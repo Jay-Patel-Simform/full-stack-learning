@@ -47,22 +47,26 @@ services:
     name: tasks-api
     runtime: docker
     plan: free
-    region: oregon                 <span class="dim">&larr; the region you picked in lesson 56</span>
-    rootDir: server                <span class="dim">&larr; same as the dashboard's "Root Directory"</span>
-    dockerfilePath: ./server/Dockerfile   <span class="dim">&larr; ! from the REPO ROOT, not from rootDir</span>
+    <span class="dim"># the region you picked in lesson 56</span>
+    region: oregon
+    <span class="dim"># same as the dashboard's "Root Directory"</span>
+    rootDir: server
+    <span class="dim"># ! from the REPO ROOT, not from rootDir</span>
+    dockerfilePath: ./server/Dockerfile
     healthCheckPath: /health
     envVars:
       <span class="dim"># decisions: safe to read, and worth reading</span>
       - key: NODE_ENV
         value: production
       - key: TRUST_PROXY
-        value: true
+        value: "true"
+      <span class="dim"># lesson 56: without this the port scan times out</span>
       - key: HOST
-        value: 0.0.0.0             <span class="dim">&larr; lesson 56: without this the port scan times out</span>
+        value: 0.0.0.0
       - key: LOG_LEVEL
         value: info
       - key: AUDIT_RETENTION_DAYS
-        value: 90
+        value: "90"
       <span class="dim"># secrets: the NAME is here, the VALUE is asked for in the dashboard</span>
       - key: DATABASE_URL
         sync: false
@@ -80,19 +84,22 @@ services:
     buildCommand: npm ci &amp;&amp; npm run build
     staticPublishPath: ./web/dist
     envVars:
+      <span class="dim"># lesson 57. A build-time value, and public by design</span>
       - key: VITE_API_URL
-        value: /api                <span class="dim">&larr; lesson 57. A build-time value, and public by design</span>
+        value: /api
     routes:
       <span class="dim"># ! Order matters, exactly as in the dashboard. /api/* first, or the</span>
       <span class="dim"># ! SPA rule below swallows every API call and answers with index.html.</span>
       - type: rewrite
         source: /api/*
-        destination: https://tasks-api.onrender.com/*
+        destination: https://full-stack-learning-mmty.onrender.com/*
       - type: rewrite
         source: /*
         destination: /index.html</code></pre>
 
 <p>Nothing here is new behaviour. Every line is something you already typed once by hand; you are writing it down, not deciding it again. Three lines are worth naming out loud.</p>
+
+<p class="takeaway"><b>Every explanation in that file is a <code>#</code> comment on its own line, and it has to be.</b> YAML ends a value at the end of the line, so <code>value: 0.0.0.0 &larr; because&hellip;</code> makes the arrow and the prose part of the value &mdash; and the parser then dies on the first colon it finds in your sentence: <code>19: mapping values are not allowed in this context</code>. That error points at a line and says nothing about the cause. Note too that <code>"true"</code> and <code>"90"</code> are quoted: an env var value is a string, and the schema says so.</p>
 
 <h2>Three lines worth naming</h2>
 
@@ -106,7 +113,13 @@ services:
 <p>The Render CLI reads the file against that same schema:</p>
 <pre><code>cd ~/learning/full-stack-learning
 render blueprints validate</code></pre>
-<p>It answers with the errors, or with nothing. Break a line on purpose and run it again &mdash; change <code>runtime: docker</code> to <code>runtime: dokcer</code>, or drop the <code>web/</code> from <code>staticPublishPath</code> &mdash; so you learn what its complaints look like while you are not in a hurry. <b>This is the loop: edit, validate, edit.</b> No deploy, no waiting, no money.</p>
+<p>Two things will stop you before it ever reads the file, and both are about the CLI, not the YAML. First, <code>render login</code> &mdash; it opens a browser once and stores a token. Second, the CLI needs to know <em>which workspace</em>, because your account can have several and a Blueprint means nothing without one:</p>
+<pre><code>render login                <span class="dim"># once per machine</span>
+render workspace set        <span class="dim"># pick it from the list; stored for next time</span></code></pre>
+<p>Skip that second one and you get <code>no workspace specified and no default workspace set</code> &mdash; which reads like a file problem and is not. In a script or CI there is no list to pick from, so pass it and the key explicitly:</p>
+<pre><code>export RENDER_API_KEY=rnd_&hellip;
+render blueprints validate --workspace tea-&hellip;   <span class="dim"># id from: render workspace list -o json</span></code></pre>
+<p>Then it answers with the errors, or with a plan &mdash; the service names it found and <code>"valid": true</code>. Break a line on purpose and run it again &mdash; change <code>runtime: docker</code> to <code>runtime: dokcer</code>, or drop the <code>web/</code> from <code>staticPublishPath</code> &mdash; so you learn what its complaints look like while you are not in a hurry. <b>This is the loop: edit, validate, edit.</b> No deploy, no waiting, no money.</p>
 <p>The same schema works in your editor. The comment on the first line of the file (<code>yaml-language-server: $schema=&hellip;</code>) is read by the YAML extension in VS Code, and you get completion and red squiggles as you type. A checker you get for free before you run anything is always worth the one line it costs.</p>
 
 <h2>Practice &mdash; three</h2>
@@ -167,7 +180,7 @@ flowchart LR
 
 <footer class="ask">
 <p><b>Read this:</b> <a href="https://render.com/docs/blueprint-spec">Render &mdash; Blueprint specification</a>. It is a field list, so skim it; read the <code>envVars</code> and static-site sections properly.</p>
-<p><b>Then this:</b> twenty minutes. (1) Write <code>render.yaml</code> at the workspace root, with your real service names and region. (2) <code>render blueprints validate</code> until it is quiet. (3) Break it twice on purpose and read both complaints. (4) Commit it &mdash; and before you do, <code>git show --stat</code> and then <code>git diff --cached | grep -i -E "postgres|password|neon"</code>. Nothing should match. That grep is the habit, not the file.</p>
+<p><b>Then this:</b> twenty minutes. (1) Write <code>render.yaml</code> at the workspace root, with your real service names and region. (2) <code>render login</code>, then <code>render workspace set</code>, then <code>render blueprints validate</code> until it is quiet. (3) Break it twice on purpose and read both complaints. (4) Commit it &mdash; and before you do, <code>git show --stat</code> and then <code>git diff --cached | grep -i -E "postgres|password|neon"</code>. Nothing should match. That grep is the habit, not the file.</p>
 <p><b>Reference card:</b> <a href="../reference/environment.html">Environment and config</a> &mdash; every variable and what a wrong value costs. The <code>sync: false</code> split is the same table, seen from the deploy side.</p>
 <p><b>Ask the community:</b> <a href="https://community.render.com/">Render Community</a> &mdash; ask what happens when a Blueprint names a service that already exists in the workspace. That is the one thing above I could not test for you.</p>
 <p>Anything unclear, ask me. I am your teacher, not a document.</p>

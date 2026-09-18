@@ -1,0 +1,56 @@
+# yaml-language-server: $schema=https://render.com/schema/render.yaml.json
+services:
+  # ---------- the API: the Dockerfile from lesson 52 ----------
+  - type: web
+    name: tasks-api
+    runtime: docker
+    plan: free
+    # the region you picked in lesson 56
+    region: oregon
+    # same as the dashboard's "Root Directory"
+    rootDir: server
+    # ! from the REPO ROOT, not from rootDir
+    dockerfilePath: ./server/Dockerfile
+    healthCheckPath: /health
+    envVars:
+      # decisions: safe to read, and worth reading
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY
+        value: "true"
+      # lesson 56: without this the port scan times out
+      - key: HOST
+        value: 0.0.0.0
+      - key: LOG_LEVEL
+        value: info
+      - key: AUDIT_RETENTION_DAYS
+        value: "90"
+      # secrets: the NAME is here, the VALUE is asked for in the dashboard
+      - key: DATABASE_URL
+        sync: false
+      - key: APP_DATABASE_URL
+        sync: false
+      # not a secret, but it is a URL you cannot know until the site below exists
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+  # ---------- the page: the static site from lesson 57 ----------
+  - type: web
+    name: tasks-web
+    runtime: static
+    rootDir: web
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./web/dist
+    envVars:
+      # lesson 57. A build-time value, and public by design
+      - key: VITE_API_URL
+        value: /api
+    routes:
+      # ! Order matters, exactly as in the dashboard. /api/* first, or the
+      # ! SPA rule below swallows every API call and answers with index.html.
+      - type: rewrite
+        source: /api/*
+        destination: https://full-stack-learning-mmty.onrender.com/*
+      - type: rewrite
+        source: /*
+        destination: /index.html
