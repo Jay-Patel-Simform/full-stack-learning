@@ -7,7 +7,11 @@ import { ACTIONS, ROLES, can, type Action, type Role } from "./can.ts";
 
 // * The reads a VIEWER gets. Name them here; the loop below still refuses
 // * every other action, so widening a role has to come through this line.
-const READS = ["task:read", "project:read"] as const;
+// Everything the lowest rung may do. Lesson 67 added member:leave here: it is
+// not a read, but it is granted at VIEWER so nobody is held in a team by their
+// role. The name stays READS because the other two are, and renaming it would
+// touch more lines than it is worth.
+const READS = ["task:read", "project:read", "member:leave"] as const;
 
 test("no role is no permission", () => {
   for (const action of ACTIONS) {

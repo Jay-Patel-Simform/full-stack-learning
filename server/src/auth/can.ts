@@ -27,6 +27,7 @@ export const ACTIONS = [
   "project:delete",
   "member:invite",
   "member:remove",
+  "member:leave",
   "team:delete",
   "audit:read",
 ] as const;
@@ -38,7 +39,10 @@ export type Resource = { targetRole?: Role | undefined };
 
 // ? "The role below, plus these". Our four happen to nest. If one ever needs a
 // ? power a lower one lacks the other way round, unroll the spread.
-const VIEWER = ["task:read", "project:read"] as const;
+// ! member:leave sits on the lowest rung so all four roles inherit it. Nobody
+// ! is held in a team by their role -- the only thing that can refuse a leave
+// ! is the state of the team (the last owner), and that lives in the store.
+const VIEWER = ["task:read", "project:read", "member:leave"] as const;
 const MEMBER = [
   ...VIEWER,
   "task:create",

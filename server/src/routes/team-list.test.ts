@@ -77,7 +77,10 @@ test("the viewer gets the same team with a shorter can list", async () => {
     .json()
     .find((t: { id: number }) => t.id === teamId);
   assert.equal(mine.role, "VIEWER");
-  assert.deepEqual(mine.can, ["task:read", "project:read"]);
+  // member:leave is in here from lesson 67 -- a VIEWER may always show itself
+  // the door. Note the list is still a HINT: it says what the UI may offer,
+  // never what the API will allow.
+  assert.deepEqual(mine.can, ["task:read", "project:read", "member:leave"]);
 });
 
 test("somebody in no team gets an empty list, not a 403", async () => {

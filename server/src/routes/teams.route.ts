@@ -18,6 +18,7 @@ import {
   addMember,
   createTeam,
   deleteTeam,
+  leaveTeam,
   listMemberships,
   removeMember,
 } from "../store/team.store.ts";
@@ -68,6 +69,40 @@ export default async function teamsRoutes(app: FastifyInstance) {
       const membership = await addMember(teamId, userId, role);
       if (!membership) return reply.code(409).send({ error: "already a member" });
       return reply.code(201).send(membership);
+    },
+  );
+
+  // * Leaving, not removing. No Load function and therefore no targetRole, so
+  // * the rank rule stays out of it entirely -- which is correct: you do not
+  // * outrank yourself, and you never will. The only refusal left is about the
+  // * TEAM's state, and that lives in the store, not in the gate.
+  // ? A static segment beats a parametric one in Fastify's router whatever the
+  // ? registration order, so /members/me can never be shadowed by /members/:userId.
+  app.delete(
+    "/teams/:teamId/members/me",
+    {
+      schema: {
+        params: TeamParams,
+        response: { 204: z.null(), 403: ErrorReply, 404: ErrorReply, 409: ErrorReply },
+      },
+      preHandler: requirePermission("member:leave"),
+    },
+    async (request, reply) => {
+      const { teamId } = request.params as TeamParamsInput;
+      const result = await leaveTeam(teamId, request.userId!);
+
+      // ! 409, not 403. 403 means "you may not" -- and you may, that is what
+      // ! member:leave says. What refuses you is the state of the world: you
+      // ! are the only owner. Change the world and the same request succeeds.
+      // ! A 403 tells the user to find an admin; a 409 tells them what to do.
+      if (result === "last-owner")
+        return reply
+          .code(409)
+          .send({ error: "the last owner cannot leave; make somebody else an owner first" });
+
+      if (result === "missing") return reply.code(404).send({ error: "not found" });
+
+      return reply.code(204).send();
     },
   );
 

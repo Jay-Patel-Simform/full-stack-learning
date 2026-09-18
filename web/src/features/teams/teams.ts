@@ -15,6 +15,7 @@ export type Action =
   | "project:delete"
   | "member:invite"
   | "member:remove"
+  | "member:leave"
   | "team:delete"
   | "audit:read";
 
