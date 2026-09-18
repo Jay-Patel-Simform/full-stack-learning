@@ -14,6 +14,7 @@ import authRoutes from "./routes/auth.route.ts";
 import teamsRoutes from "./routes/teams.route.ts";
 import projectsRoutes from "./routes/projects.route.ts";
 import auditRoutes from "./routes/audit.route.ts";
+import cspReportRoutes from "./routes/csp-report.route.ts";
 import { config } from "./config.ts";
 
 // * The exact front ends allowed to read our replies. Origin = scheme + host
@@ -193,6 +194,10 @@ export async function buildApp(logStream?: NodeJS.WritableStream) {
   // ? onResponse fires after the reply is flushed, so the await costs the
   // ? caller nothing.
   app.addHook("onResponse", async (request, reply) => {
+    // ! Lesson 65: a public telemetry route. shouldAudit says yes to every
+    // ! POST, so one broken page writes a row per violation with no actor.
+    // ! The PATTERN, never request.url -- same rule as the route column below.
+    if (request.routeOptions.url === "/csp-report") return;
     if (!shouldAudit(request.method, reply.statusCode)) return;
 
     // ? Params may still be raw strings here -- a 401 from requireAuth is
@@ -273,6 +278,7 @@ export async function buildApp(logStream?: NodeJS.WritableStream) {
   app.register(teamsRoutes);
   app.register(projectsRoutes);
   app.register(auditRoutes);
+  app.register(cspReportRoutes);
 
   return app;
 }

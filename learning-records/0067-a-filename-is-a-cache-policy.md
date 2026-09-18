@@ -45,6 +45,13 @@ lesson 61's Blueprint question is closed by evidence, and the queued
 - **Unmeasured and named in the lesson:** does Render keep the previous
   deploy's `/assets/` files reachable? Jay saves a bundle URL, deploys, curls
   it. `200` → the white-page failure cannot happen; `404` → shorten `s-maxage`.
+  - Attempted on the 2026-09-18 deploy and **the check was void**: nothing in
+    `web/` changed, so Vite emitted identical hashes and the "old" URLs were
+    the current ones. Two `200`s that mean nothing. *A test whose inputs did
+    not change has not passed* — the same shape as the clean console in
+    lesson 63. Retry on the next deploy that actually rebuilds the bundle.
+  - Confirmed live and real: `/assets/*` now returns
+    `max-age=31536000, immutable`; `/` still returns `max-age=0, s-maxage=300`.
 - `report-uri` (needs a public unauthenticated route — own lesson).
 - Service worker: declined, named as a third cache. COOP/COEP: still cargo cult.
 - The invite mailer, week 13–14.

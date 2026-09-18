@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 65 &mdash; The route nobody is logged into</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 65 &middot; Week 15&ndash;16 &middot; Deploy</p>
+<h1>The route nobody is logged into</h1>
+
+<p class="lede">Every route you have written so far has a user behind it. <code>requireAuth</code> runs, a session is found, and everything after that &mdash; the rate-limit bucket, the audit row, <code>can()</code> &mdash; hangs off knowing who asked. Today you write the first route where <b>nobody is logged in and nobody ever will be</b>: the endpoint that collects CSP violation reports. The reports are the excuse. The skill is the shape, because your invite-accept route will have exactly the same problem in two weeks.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>An unauthenticated route loses three defences at once</strong> &mdash; the session check, the per-user rate limit, and the audit row that says who did it. You have to replace each one deliberately.</li>
+<li><strong>Your app will reject the browser&rsquo;s report with a <code>415</code></strong>, and it is not a bug. Browsers post <code>application/csp-report</code>; Fastify only parses <code>application/json</code>.</li>
+<li><strong>Your audit hook will write one row per violation.</strong> A single broken page can emit dozens per load. That is a table you delete in a month.</li>
+<li><strong>The endpoint must be allowed to drop data.</strong> It is telemetry, not a transaction. Nobody is waiting for the reply.</li>
+<li><strong>Honest framing first:</strong> with one user and a console open, this buys you very little today. The reason to build it is the shape, not the reports.</li>
+</ul>
+</div>
+
+<h2>First, the argument against building this</h2>
+<p>Lesson 62 left <code>report-uri</code> out with the note &ldquo;needs a public unauthenticated route, so its own lesson&rdquo;. It has now been carried for three lessons, so here it is &mdash; but it starts with the case for skipping it.</p>
+<p>A reports endpoint pays for itself when <b>you cannot see the console</b>: real users, real browsers, extensions you do not have, an old Safari on someone&rsquo;s phone breaking on a directive you never tested. You have one user. You have the console open. Today the endpoint tells you nothing that <kbd>F12</kbd> does not tell you faster.</p>
+<p class="takeaway"><b>Build it for the shape, not for the reports.</b> Your invite flow needs a route that a person who is not logged in can POST to &mdash; that is what accepting an invite <em>is</em>. Every problem below reappears there, except there the request matters and cannot be dropped. This is the cheap place to meet them.</p>
+
+<h2>What you lose when there is no session</h2>
+<p>Read down the &ldquo;replaced by&rdquo; column. That column is the lesson:</p>
+
+<div class="scroll"><table>
+<tr><th>Defence</th><th>How it works today</th><th>Replaced by, on a public route</th></tr>
+<tr><td>Authentication</td><td><code>requireAuth</code> finds a session or answers <code>401</code></td><td><b>Nothing.</b> Anyone may post. Accept that and design for it.</td></tr>
+<tr><td>Rate limiting</td><td>100/min, per IP &mdash; already global in <code>app.ts</code></td><td>Still per IP, and now it is the <em>only</em> limit. A tighter per-route one.</td></tr>
+<tr><td>Body size</td><td><code>bodyLimit: 64 * 1024</code>, app-wide</td><td>The same 64&nbsp;KB, and it is now load-bearing rather than generous.</td></tr>
+<tr><td>Input shape</td><td>zod, strict, rejects unknown keys</td><td><b>Cannot be strict.</b> The body is written by the browser, not by you &mdash; and different browsers send different keys.</td></tr>
+<tr><td>Audit trail</td><td><code>shouldAudit</code>: every write gets a row</td><td><b>Must be switched off here</b>, or a broken page fills the table.</td></tr>
+</table></div>
+
+<p>The fourth row is the one that catches people. Everywhere else in your API, an unknown key is a <code>400</code> on purpose &mdash; lesson 30&rsquo;s strict mode, so a front-end typo is loud. Here the sender is Chrome, and Chrome may add a field next year. <b>Strictness is for input you control.</b> For a body somebody else&rsquo;s browser composes, you read the fields you want and ignore the rest.</p>
+
+<h2>The three things that will break it</h2>
+
+<h3>1. The content type &mdash; a <code>415</code>, not a bug</h3>
+<p>Fastify parses <code>application/json</code>. It does not parse <code>application/csp-report</code>, which is what browsers actually send, and an unknown content type is answered <code>415 Unsupported Media Type</code> before your handler exists. One line fixes it:</p>
+
+<pre><code><span class="dim">// the browser posts application/csp-report, not application/json.
+// Same bytes, different label &mdash; so reuse the JSON parser.</span>
+app.addContentTypeParser(
+  "application/csp-report",
+  { parseAs: "string" },
+  (_req, body, done) =&gt; {
+    <span class="dim">// ! a malformed report is the reporter's problem, not ours.
+    // ! done(err) here would answer 400; we would rather drop it.</span>
+    try { done(null, JSON.parse(body as string)); }
+    catch { done(null, {}); }
+  },
+);</code></pre>
+
+<p>Note what that <code>catch</code> does: it turns bad JSON into an empty object instead of an error. <b>On a telemetry route, a malformed message is something to drop, not something to complain about</b> &mdash; nobody is reading your complaint.</p>
+
+<h3>2. The audit hook &mdash; a row per violation</h3>
+<p>Your hook in <code>app.ts</code> calls <code>shouldAudit(method, status)</code>, which returns <code>true</code> for every non-safe method. A POST is a write, so <b>every report becomes an audit row</b> &mdash; with <code>userId: undefined</code>, because there is no user. One broken screen emitting fifteen violations per load is fifteen rows with no actor, and your audit log stops being the thing you can read.</p>
+
+<pre><code><span class="dim">// in the onResponse audit hook, first line:</span>
+if (request.routeOptions.url === "/csp-report") return;</code></pre>
+
+<p>Check the route <b>pattern</b>, never <code>request.url</code> &mdash; the same rule the hook already follows for the <code>route</code> column, and for the same reason: a URL is caller input.</p>
+
+<h3>3. The rate limit &mdash; the bucket you share</h3>
+<p>The global limit already covers this route: 100 per IP per minute. But those hundred are shared with the user&rsquo;s real requests, so a page spraying reports would spend the allowance and then get <code>429</code>s on the actual app. Give the route its own, much tighter limit:</p>
+
+<pre><code>app.post("/csp-report", {
+  config: { rateLimit: { max: 20, timeWindow: "1 minute" } },
+}, async (request, reply) =&gt; {
+  <span class="dim">// 204: received, nothing to say. The browser ignores the body anyway.</span>
+  reply.code(204);
+
+  const r = (request.body as any)?.["csp-report"] ?? {};
+  request.log.warn({
+    <span class="dim">// ! the fields you chose, never the whole object &mdash; server/CLAUDE.md.
+    // ! this body came from the internet; logging it whole is log injection.</span>
+    blocked: String(r["blocked-uri"] ?? "").slice(0, 200),
+    directive: String(r["violated-directive"] ?? "").slice(0, 100),
+    doc: String(r["document-uri"] ?? "").slice(0, 200),
+  }, "csp violation");
+});</code></pre>
+
+<p>Three deliberate choices in that handler. <b><code>204</code></b>, because there is no body worth sending to a reporter that does not read it. <b><code>slice()</code></b> on every field, because the values are attacker-influenced and a log line is a place attackers like to write. <b>Named fields</b>, never the whole report &mdash; the rule your own <code>server/CLAUDE.md</code> already states, and this is the route where it matters most.</p>
+
+<div class="box">
+<div class="cap">and one I have not measured</div>
+<div class="body">
+<div><b>Your CSRF hook might refuse the report before any of this runs.</b> <span class="dim">Lesson 46&rsquo;s <code>allowWrite()</code> denies a POST unless <code>Sec-Fetch-Site</code> is <code>same-origin</code> or the <code>Origin</code> is allow-listed. A violation report is sent by the browser itself rather than by your page, and I do not know for certain what it puts in those two headers &mdash; I would be guessing, and lesson 63 is about what guessing costs. <b>Measure it:</b> deploy, trigger a violation, and look at the response. A <code>403</code> in the network tab means the hook caught it, and the fix is one early return in the hook for this one route pattern. A <code>204</code> means it passed. Tell me which.</span></div>
+</div>
+</div>
+
+<h2>Wiring it up</h2>
+<p>The route goes on the API, and the policy has to point at it. Since lesson 57 your front end and API share an origin, so the path is simply <code>/api/csp-report</code>, and the <code>headers:</code> block gains one directive inside the existing policy value:</p>
+
+<pre><code>value: "default-src 'self'; &hellip; object-src 'none'; <b>report-uri /api/csp-report</b>"</code></pre>
+
+<p><code>report-uri</code> is formally deprecated in favour of <code>report-to</code> and the Reporting API, which needs a second header and a JSON endpoint-group document. <b>It is also the one every browser actually implements today.</b> Ship <code>report-uri</code> alone; when <code>report-to</code> is universal, this is a one-line change and your endpoint does not move.</p>
+
+<h2>The loop</h2>
+<ol>
+<li><b>Prove the <code>415</code> first</b>, so you have seen the failure before the fix: <code>curl -X POST -H 'content-type: application/csp-report' -d '{}' &hellip;/api/csp-report</code></li>
+<li>Add the parser, the route, the audit skip. Add the directive to <code>render.yaml</code>.</li>
+<li>Deploy both. Same <code>curl</code> &mdash; expect <code>204</code>.</li>
+<li>Open the app, and in the console run <code>document.body.appendChild(document.createElement('script')).src='https://evil.example/x.js'</code></li>
+<li><b>Read your server log</b>, not the browser console. One <code>csp violation</code> line with <code>directive: script-src</code>. That line arriving is the whole point: the browser told your server what it blocked.</li>
+</ol>
+
+<h2>Practice &mdash; three</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why can this route not use a strict zod schema?</p>
+<button>The body is too large to validate fully</button>
+<button>The browser composes it, not your code</button>
+<p class="why" hidden>Strict mode exists to catch <em>your</em> typos &mdash; a front end sending <code>isDone</code> when the API wants <code>done</code> should be a loud <code>400</code> rather than a silent no-op. Here the sender is the browser, the field set differs between Chrome, Firefox and Safari, and a new field next year is normal rather than a mistake. So you read the few fields you care about and ignore everything else. Strictness is for input you control.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why exclude this route from the audit log?</p>
+<button>Its rows have no actor and no limit</button>
+<button>Its rows are written before the reply</button>
+<p class="why" hidden>Every audit row answers &ldquo;who did what&rdquo;, and here there is no who &mdash; <code>userId</code> is always undefined because nobody is logged in. Worse, the volume is set by a broken page rather than by a person: one bad screen can emit dozens of reports per load, and each becomes a row. A table that grows without an actor and without a ceiling is one you stop reading, and an audit log nobody reads is not an audit log.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why answer <code>204</code> instead of <code>200</code> with a body?</p>
+<button>A 204 skips your global onSend hooks</button>
+<button>Nothing reads the reply to this post</button>
+<p class="why" hidden>The browser sends a violation report and discards whatever comes back &mdash; there is no caller to inform, no UI to update and no retry that depends on the answer. <code>204 No Content</code> states exactly that, and saves composing a body nobody parses. It is the same instinct as dropping a malformed report instead of answering <code>400</code>: on a telemetry route your job is to receive cheaply, not to converse.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  P["your page<br/><i>a blocked script</i>"] -->|"POST /api/csp-report<br/>application/csp-report"| H1["rate limit<br/><i>20/min, own bucket</i>"]
+  H1 --> H2["CSRF hook<br/><i>UNMEASURED: 403?</i>"]
+  H2 --> H3["content-type parser<br/><i>without it: 415</i>"]
+  H3 --> R["handler<br/><i>204, log 3 fields</i>"]
+  R -.->|"skipped on purpose"| AU["audit hook"]
+</pre>
+<figcaption>The hooks a request meets before a handler exists. Four of the five were written for a logged-in user; this route has to get past all of them without one.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div><b>storing reports in Postgres</b> <span class="dim">a log line is enough to learn from, and a table filled by the public internet needs retention, an index and a page to read it &mdash; three things before the first useful answer. If you ever want the table, add it when the log lines have proved what you would query.</span></div>
+<div><b><code>report-to</code> and the Reporting API</b> <span class="dim">the standards-track replacement. A second header, a JSON group document, and no browser that needs it yet. One line to add later.</span></div>
+<div><b>de-duplication</b> <span class="dim">one violation per element, so a bad page repeats itself. The 20/min cap is the crude version and costs nothing; real de-dup needs state, and state is the thing you have gone 65 lessons without adding.</span></div>
+<div><b>alerting on a report</b> <span class="dim">you have no alerting at all yet. Wanting to be paged for this is a reason to build alerting, not a reason to build it here.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/report-uri">MDN &mdash; CSP <code>report-uri</code></a>. Short page; read the example report body and match its fields to the three you log.</p>
+<p><b>Then this:</b> twenty minutes, in the order above &mdash; the <code>415</code> <em>first</em>, so you have seen the failure the parser fixes. Then report back the one thing I could not measure: does the CSRF hook let the report through, <code>204</code> or <code>403</code>?</p>
+<p><b>Reference card:</b> <a href="../reference/api-security-basics.html">API security basics</a> &mdash; add the public-route row to it once you have this working.</p>
+<p><b>Ask the community:</b> <a href="https://community.render.com/">Render Community</a>, or the MDN issue tracker for the headers question &mdash; &ldquo;what <code>Sec-Fetch-Site</code> does a CSP report POST carry?&rdquo; is a precise question with a checkable answer.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0064-the-deploy-you-can-still-see-the-old-of.html">&larr; Back</a>
+<a href="../reference/api-security-basics.html">API security basics &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>
