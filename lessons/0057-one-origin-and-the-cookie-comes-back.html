@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 57 &mdash; One origin, and the cookie comes back</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 57 &middot; Week 15&ndash;16 &middot; Docker + deploy</p>
+<h1>One origin, and the cookie comes back</h1>
+<p class="lede">Lesson 56 ended with a 401 you could not blame on your code. Today the front end joins the API on one origin and that 401 disappears &mdash; not by loosening a cookie flag, but by removing the second site. One new Render service, two rewrite rules, one env value on each side. <b>Zero TypeScript changes. Suite stays at 172.</b></p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>There are two fixes and only one of them is right.</strong> <code>SameSite=None</code> makes the 401 go away and gives back the CSRF defence you bought in lesson 29. Putting the page and the API on <em>one origin</em> makes the cross-site request stop existing.</li>
+<li><strong>A Render <b>static site</b> can proxy.</strong> A rewrite rule sends <code>/api/*</code> on to your API service. The browser only ever talks to one host, so there is no cross-site anything to defend against.</li>
+<li><strong>Your cookie has no <code>Domain=</code> attribute</strong>, which is exactly why this works with no server change. A host-only cookie belongs to whatever host the browser asked &mdash; and now that host is the page&rsquo;s own.</li>
+<li><strong><code>VITE_API_URL</code> becomes <code>/api</code></strong> &mdash; a path, not a URL. And Vite bakes it into the bundle at <em>build</em> time, which is the opposite of how every server variable you have works.</li>
+<li><strong><code>ALLOWED_ORIGINS</code> shrinks to one entry</strong>, the static site&rsquo;s URL. CORS goes quiet: same-origin requests never ask it anything.</li>
+<li><strong>One thing to go and check afterwards</strong>, not to take on trust: what <code>request.ip</code> now says, because your 100-per-minute floor is keyed on it and there is a new machine in the path.</li>
+<li><strong>Streak intact: no new dependency, 57 lessons.</strong></li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<pre><code>server:  <b>https://&lt;your-api&gt;.onrender.com</b>    lesson 56
+db:      Neon, ap-southeast-1                lesson 55
+web:     <b>your laptop only.</b> npm run dev, :5173
+symptom: login 200, every request after it <b>401</b></code></pre>
+<p>Nothing in <code>server/src/</code> or <code>web/src/</code> is edited today. You create one service, type two rules into a form, and change one value at each end.</p>
+
+<h2>Do this &mdash; the whole change on one screenful</h2>
+<p>Five screens in the Render dashboard. <b>No files are edited, nothing is committed, nothing is pushed.</b> When you are done you have <em>two</em> services: the API from lesson 56, and a new static site for the page. The rest of this lesson explains why each field is what it is &mdash; do the list first, read the why afterwards.</p>
+<p>Two URLs to have in front of you. <b>API_URL</b> is the service from lesson 56, e.g. <code>https://tracker-api.onrender.com</code>. <b>WEB_URL</b> is the new one, and Render tells you it in step A.</p>
+
+<div class="box">
+<div class="cap">A &mdash; create the static site</div>
+<div class="body">
+<div>Dashboard &rarr; <b>New +</b> &rarr; <b>Static Site</b> &rarr; your <code>full-stack-learning</code> repo. Five fields, then <b>Create Static Site</b>.</div>
+</div>
+</div>
+<div class="scroll"><table>
+<thead><tr><th>Field</th><th>Type this</th></tr></thead>
+<tbody>
+<tr><td>Name</td><td><code>tracker-web</code></td></tr>
+<tr><td>Branch</td><td><code>main</code></td></tr>
+<tr><td>Root Directory</td><td><code>web</code></td></tr>
+<tr><td>Build Command</td><td><code>npm ci &amp;&amp; npm run build</code></td></tr>
+<tr><td>Publish Directory</td><td><code>dist</code></td></tr>
+</tbody>
+</table></div>
+<p class="dim">When it goes live, Render shows its address at the top of the page. That is your <b>WEB_URL</b> &mdash; probably <code>https://tracker-web.onrender.com</code>. Write it down; two of the next three steps need it.</p>
+
+<div class="box">
+<div class="cap">B &mdash; two rules, on the new static site</div>
+<div class="body">
+<div><code>tracker-web</code> &rarr; <b>Redirects/Rewrites</b> &rarr; <b>Add Rule</b>, twice. Add the <code>/api/*</code> one first, so it sits on top of the list.</div>
+</div>
+</div>
+<div class="scroll"><table>
+<thead><tr><th>#</th><th>Source</th><th>Destination</th><th>Action</th></tr></thead>
+<tbody>
+<tr><td>1</td><td><code>/api/*</code></td><td><code>API_URL/*</code> <span class="dim">e.g. <code>https://tracker-api.onrender.com/*</code></span></td><td><b>Rewrite</b></td></tr>
+<tr><td>2</td><td><code>/*</code></td><td><code>/index.html</code></td><td><b>Rewrite</b></td></tr>
+</tbody>
+</table></div>
+
+<div class="box">
+<div class="cap">C &mdash; one variable, on the new static site</div>
+<div class="body">
+<div><code>tracker-web</code> &rarr; <b>Environment</b> &rarr; add <code>VITE_API_URL</code> = <code>/api</code>, then <b>Manual Deploy &rarr; Deploy latest commit</b>. It does nothing until the site is rebuilt &mdash; that is not a quirk, it is step 5 below.</div>
+</div>
+</div>
+
+<div class="box">
+<div class="cap">D &mdash; one variable, on the OLD api service</div>
+<div class="body">
+<div>your API service &rarr; <b>Environment</b> &rarr; edit <code>ALLOWED_ORIGINS</code> to be your <b>WEB_URL</b> and nothing else. Exact, with <code>https://</code>, no trailing slash. Delete whatever was there. Saving redeploys it on its own.</div>
+</div>
+</div>
+
+<div class="box">
+<div class="cap">E &mdash; check</div>
+<div class="body">
+<div>Open <b>WEB_URL</b> in a browser and log in. You stay logged in. That is the whole lesson &mdash; the 401 from last time is gone.</div>
+</div>
+</div>
+
+<p class="takeaway"><b>Five fields, two rules, two variables &mdash; and not one line of code.</b> Everything below is about <em>why</em> each of those is what it is &mdash; and the why is worth more than the how, because the how is different on every platform and the why is the same everywhere.</p>
+
+<h2>Why &mdash; 1. name the failure exactly, before fixing it</h2>
+<p>The 401 has a precise cause and it is worth being able to say it in one sentence, because the wrong sentence leads to the wrong fix.</p>
+<div class="scroll"><table>
+<thead><tr><th>Sentence</th><th>True?</th><th>Why it matters</th></tr></thead>
+<tbody>
+<tr><td>CORS blocked the request</td><td>No</td><td>The login returned <b>200</b> and you read the body. CORS had already said yes.</td></tr>
+<tr><td>The cookie was never stored</td><td>No</td><td>It was stored. <code>Secure</code> is fine &mdash; the API is real HTTPS now.</td></tr>
+<tr><td>The cookie was not <em>sent</em></td><td><b>Yes</b></td><td><code>SameSite=Lax</code>. <code>localhost</code> and <code>onrender.com</code> are different sites, so the browser holds it back.</td></tr>
+</tbody>
+</table></div>
+<p>Open DevTools &rarr; Network &rarr; the failing request &rarr; Request Headers, and confirm it for yourself: there is <b>no <code>Cookie</code> header</b>. Then look at Application &rarr; Cookies and see the session sitting there, stored, unsent. That gap between &ldquo;stored&rdquo; and &ldquo;sent&rdquo; is the whole lesson.</p>
+<p class="dim"><b>Same site is not same origin.</b> An origin is scheme + host + port. A site is roughly the registrable domain: <code>a.example.com</code> and <code>b.example.com</code> are two origins but one site. <code>localhost</code> and <code>onrender.com</code> are neither.</p>
+
+<h2>Why &mdash; 2. the two fixes, and why one is a trap</h2>
+<div class="scroll"><table>
+<thead><tr><th></th><th><code>SameSite=None; Secure</code></th><th>One origin <span class="dim">(today)</span></th></tr></thead>
+<tbody>
+<tr><td>Does the 401 go away?</td><td>Yes</td><td>Yes</td></tr>
+<tr><td>Code changed</td><td><code>session.ts</code>, plus a test</td><td><b>None</b></td></tr>
+<tr><td>CSRF</td><td>The cookie now rides on <em>any</em> site&rsquo;s request. Your <code>Sec-Fetch-Site</code> hook is the only thing left standing.</td><td>Unchanged. <code>Lax</code> still refuses every other site, and the hook sees <code>same-origin</code>.</td></tr>
+<tr><td>What it says about your app</td><td>&ldquo;My page is a stranger to my API.&rdquo;</td><td>&ldquo;My page and my API are one thing.&rdquo;</td></tr>
+</tbody>
+</table></div>
+<p><code>SameSite=None</code> is not forbidden &mdash; it is the correct answer when the page and the API genuinely <em>are</em> different companies, and then you pay for it with a real CSRF token. You are not in that situation. You have one app whose two halves happen to be on two hosts, and that is a deployment accident, not a design.</p>
+<p class="takeaway"><b>Do not loosen a defence to accommodate an accident.</b> Ask first whether the situation the defence is complaining about should exist at all. Here it should not: there is no reason on earth for your own page to be a third party to your own API.</p>
+
+<h2>Why &mdash; 3. the five fields in step A</h2>
+<p>Render <b>Static Site</b>, from the same repository you pushed last lesson. Free, no instance hours, no spin-down &mdash; it is files on a CDN, not a process.</p>
+<pre><code>New &rarr; <b>Static Site</b> &rarr; your repo
+Name             <b>tracker-web</b>
+Root Directory   <b>web</b>
+Build Command    <b>npm ci &amp;&amp; npm run build</b>
+Publish Directory <b>dist</b></code></pre>
+<p><code>web/package.json</code> already has <code>"build": "tsc -b &amp;&amp; vite build"</code>, and Vite already writes to <code>dist</code>. Nothing new. Note what <code>tsc -b</code> means here though: <b>a type error is now a failed deploy.</b> On your laptop <code>npm run dev</code> renders the page anyway and puts the error in the terminal. On Render there is no page until the types pass.</p>
+<p class="dim">Root Directory <code>web</code> does the same job it did for <code>server</code> last lesson: it makes <code>web/</code> the working directory, so <code>npm ci</code> finds <code>web/package-lock.json</code> and nothing has to know the repo holds two projects.</p>
+
+<h2>Why &mdash; 4. the two rules in step B</h2>
+<p>This is the whole lesson in one form. On the static site: <b>Redirects/Rewrites</b> &rarr; Add Rule. Order matters, and the API rule must be first.</p>
+<pre><code>Source  <b>/api/*</b>
+Destination  <b>https://&lt;your-api&gt;.onrender.com/*</b>
+Action  <b>Rewrite</b>
+
+Source  <b>/*</b>
+Destination  <b>/index.html</b>
+Action  <b>Rewrite</b></code></pre>
+<p>Two things are happening, and they are unrelated to each other.</p>
+<p><b>The first rule is the fix.</b> <code>*</code> in the source captures everything from that point on; <code>*</code> in the destination pastes it back. So <code>/api/auth/login</code> arrives at your API as <code>/auth/login</code> &mdash; the path your routes already use. <b>Rewrite, not Redirect</b>: a redirect sends a <code>301</code> back and the browser goes to the API host itself, which is the cross-site problem you started with, now with an extra round trip. A rewrite is invisible to the browser. Render fetches your API server-side and hands the answer back under its own hostname. <a href="https://render.com/docs/redirects-rewrites">Render&rsquo;s own words</a>: the destination &ldquo;can be either a path or a full, publicly accessible URL&rdquo;.</p>
+<p><b>The second rule is ordinary SPA housekeeping.</b> Your React app routes in the browser, so a hard reload on any path other than <code>/</code> asks the CDN for a file that does not exist. <code>/*</code> &rarr; <code>/index.html</code> hands every unknown path to the app. It has to come second, or it would swallow <code>/api</code> too. Rules are matched top down.</p>
+
+<h2>Why &mdash; 5. the two variables in steps C and D</h2>
+<p>On the <b>static site</b>, one environment variable:</p>
+<pre><code>VITE_API_URL=<b>/api</b></code></pre>
+<p>Not a URL. A path. <code>web/src/lib/api.ts</code> passes it to axios as <code>baseURL</code>, and a relative <code>baseURL</code> resolves against whatever page it is running on &mdash; so the request goes to <code>https://tracker-web.onrender.com/api/auth/login</code>, which is the page&rsquo;s own origin.</p>
+<p class="takeaway"><b>A <code>VITE_</code> variable is not an environment variable. It is a compile-time find-and-replace.</b> Vite substitutes <code>import.meta.env.VITE_API_URL</code> for the literal string while building, and ships the result. Changing it in the dashboard does nothing until you redeploy. And anyone can read it, because it is sitting in the JavaScript you sent them. <a href="https://vite.dev/guide/env-and-mode">Vite&rsquo;s docs</a> say it outright: never put a secret in one.</p>
+<p>On the <b>API service</b>, shrink one value:</p>
+<pre><code>ALLOWED_ORIGINS=<b>https://tracker-web.onrender.com</b></code></pre>
+<p>Drop the API&rsquo;s own URL and <code>http://localhost:5173</code> if they are still in there. Keep it exact &mdash; scheme included, no trailing slash. Then hit the static site&rsquo;s URL, log in, and watch the request that used to 401.</p>
+
+<h2>What the API actually sees now</h2>
+<p>Three headers change, and every one of them is a decision your code already knows how to make.</p>
+<div class="scroll"><table>
+<thead><tr><th>Header</th><th>Before <span class="dim">(local page &rarr; deployed API)</span></th><th>After <span class="dim">(via the rewrite)</span></th><th>Who cares</th></tr></thead>
+<tbody>
+<tr><td><code>Cookie</code></td><td><b>absent</b></td><td><code>session=&hellip;</code></td><td><code>requireAuth</code>. This is the 401.</td></tr>
+<tr><td><code>Sec-Fetch-Site</code></td><td><code>cross-site</code></td><td><code>same-origin</code></td><td><code>allowWrite()</code> &mdash; first line of the good case, and it has never been true until today.</td></tr>
+<tr><td><code>Origin</code></td><td><code>http://localhost:5173</code></td><td>the static site&rsquo;s URL</td><td><code>ALLOWED_ORIGINS</code>, on writes.</td></tr>
+</tbody>
+</table></div>
+<p>Look at <code>server/src/auth/csrf.ts</code> again with this in hand. The line <code>if (site === "same-origin") return true;</code> has the comment <em>&ldquo;the good case in production&rdquo;</em> above it. You wrote that in lesson 29 about a future you did not have yet. This is the deploy where that line starts doing the work and the <code>allowedOrigins.includes(origin)</code> fallback below it goes back to being a dev convenience.</p>
+
+<h2>Why no server change was needed &mdash; the missing attribute</h2>
+<p>A proxy in front of an API usually breaks cookies, and there is a whole genre of blog post about rewriting the <code>Domain</code> on the way through. You skip all of it, for a reason worth knowing:</p>
+<pre><code>server/src/auth/session.ts
+
+session=&lt;id&gt;; HttpOnly; SameSite=Lax; Path=/; Expires=&hellip;; Secure
+                                    <b>^ no Domain= anywhere</b></code></pre>
+<p>A <code>Set-Cookie</code> with no <code>Domain</code> makes a <b>host-only</b> cookie: the browser files it under the exact host it asked, and sends it back only to that host (<a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Cookies#define_where_cookies_are_sent">MDN</a>). The browser asked <code>tracker-web.onrender.com</code>, so that is where the cookie lands and that is where it goes back &mdash; it never learns the API host exists. Had you written <code>Domain=&lt;your-api&gt;.onrender.com</code> at any point, today would have needed a proxy that rewrites it.</p>
+<p class="takeaway"><b>The narrowest default is the one that survives being moved.</b> Host-only was never chosen for this situation; it was chosen because it was the tightest thing that worked. Tight defaults keep paying out in situations you had not imagined.</p>
+
+<h2>The one thing to go and check</h2>
+<p>There is now a machine between the browser and your API that was not there yesterday. Your global floor from lesson 12 is <b>100 requests per IP per minute</b>, and the whole question is <em>whose</em> IP that counts.</p>
+<pre><code>browser &rarr; Render CDN <b>(rewrite)</b> &rarr; Render router &rarr; your container</code></pre>
+<p>If the forwarded client address survives that hop, <code>request.ip</code> is the visitor and the limit works per visitor. If it does not, every visitor in the world shares one bucket and the 101st request of the minute is a <code>429</code> for somebody innocent. <code>TRUST_PROXY=true</code> makes Fastify read <code>X-Forwarded-For</code> instead of the socket, so the machinery is in place &mdash; but whether the CDN hop appends to that header is a fact about Render, not about your code, and I have not measured it.</p>
+<p>Check it, do not assume it. Your <code>logger</code> already prints <code>reqId</code> and the request line; load the page, then read the API service&rsquo;s <b>Logs</b> tab in the dashboard and compare the address against <a href="https://ifconfig.me">what your own IP actually is</a>. Two outcomes, both fine to discover:</p>
+<div class="box">
+<div class="cap">what you find</div>
+<div class="body">
+<div>your real IP <span class="dim">the chain forwards correctly. Nothing to do. Say so in the next session and it becomes a measured fact instead of an open question.</span></div>
+<div>one address for everyone <span class="dim">the per-IP floor is meaningless behind the CDN, and the answer is not a bigger number &mdash; it is to key the limit on something that identifies a caller. The login throttle from lesson 11 is already keyed on the account, and it is unaffected either way.</span></div>
+</div>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why <b>Rewrite</b> and not <b>Redirect</b> for <code>/api/*</code>?</p>
+<button>A redirect cannot forward the path suffix</button>
+<button>A redirect sends the browser cross-site</button>
+<p class="why" hidden>A redirect answers <code>301</code> with the API&rsquo;s own URL, and the browser goes there itself &mdash; two sites again, cookie withheld again, plus a wasted round trip. A rewrite is server-side: Render fetches the API and replies under its own hostname, so the browser only ever sees one origin. Both forms can forward the path.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why does the proxy not break the session cookie?</p>
+<button>It is host-only, having no Domain set</button>
+<button>It is HttpOnly, so no host is read</button>
+<p class="why" hidden>No <code>Domain=</code> attribute means the browser files the cookie under the host it actually asked &mdash; the static site &mdash; and sends it back there. The API host is never named in the cookie and the browser never learns it. <code>HttpOnly</code> is about JavaScript access and has nothing to do with which host receives it.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">You change <code>VITE_API_URL</code>. What happens?</p>
+<button>Next request uses it, no rebuild needed</button>
+<button>Nothing at all until the site rebuilds</button>
+<p class="why" hidden>Vite replaces <code>import.meta.env.VITE_API_URL</code> with the literal string while building and ships that. The deployed bundle has no idea the variable exists. Server env is read at boot; <code>VITE_</code> env is read at build. Same word, two different moments &mdash; and the built one is public.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Yesterday&rsquo;s picture with one box added, and one arrow deleted &mdash; the deleted arrow is the lesson.</p>
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  B["your browser<br/>one origin only"]
+  subgraph CDN["tracker-web.onrender.com &mdash; static site"]
+    F["dist/ &mdash; index.html, js<br/>rule 2: /* &rarr; /index.html"]
+    RW["rule 1: /api/* &rarr; API/*<br/><b>rewrite (server-side)</b>"]
+  end
+  subgraph API["&lt;your-api&gt;.onrender.com"]
+    S["docker-entrypoint.sh<br/>&rarr; npm start"]
+  end
+  NEON[("Neon<br/>neondb")]
+  B -->|"GET / &mdash; the page"| F
+  B -->|"POST /api/auth/login<br/><b>Cookie sent: same origin</b>"| RW
+  RW -->|"POST /auth/login<br/>Sec-Fetch-Site: same-origin"| S
+  S --> NEON
+  OLD["laptop :5173<br/>npm run dev"] -.->|"cross-site: cookie withheld<br/><b>this is what you deleted</b>"| S
+</pre>
+<figcaption>The dotted arrow is lesson 56&rsquo;s 401. It is not fixed &mdash; it is gone, because nothing takes that route any more. <code>npm run dev</code> on your Mac still works exactly as before: <code>VITE_API_URL</code> is unset there, so axios falls back to <code>http://localhost:3000</code>, same host, same site, happy <code>Lax</code>.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div>a CSP for the page <span class="dim">helmet&rsquo;s <code>default-src 'none'</code> in <code>app.ts</code> protects the <em>API&rsquo;s</em> replies, and it is deliberately wrong for an HTML page &mdash; it would block your own JavaScript. A real page CSP is set on the static site&rsquo;s custom headers, and it is its own lesson because the interesting part is what Tailwind and Vite need from <code>style-src</code>.</span></div>
+<div><code>render.yaml</code> <span class="dim">now that there are two services and eleven dashboard fields between them, this has stopped being premature. It is the honest next step for the deploy, and it is small.</span></div>
+<div>a custom domain <span class="dim">two are free on the plan you are on. It also makes the page and the API genuinely same-<em>site</em> (<code>app.you.com</code> and <code>api.you.com</code>), which is the other way to have solved today &mdash; worth knowing exists, not worth buying a domain for.</span></div>
+<div>caching rules <span class="dim">Render already serves the hashed Vite assets with long cache headers and invalidates on deploy. Nothing to tune until something is slow.</span></div>
+<div>the two front-end holes <span class="dim">still open, and now more visible: nothing <em>reads</em> the audit log, and there is no way to create a team from the page &mdash; <code>POST /teams</code> has still only ever been called by a test. The deploy is finished; those are next.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Cookies#define_where_cookies_are_sent">MDN &mdash; where cookies are sent</a>, specifically the <code>Domain</code> and <code>Path</code> paragraphs. Short, and it is the mechanism behind today. Then <a href="https://render.com/docs/redirects-rewrites">Render &mdash; redirects and rewrites</a> for the rule syntax.</p>
+<p><b>Then this:</b> fifteen minutes, and it is the checking task from above, not a build. (1) Confirm the cookie is now on the request in DevTools. (2) Read your API&rsquo;s log lines and decide whether <code>request.ip</code> is you or Render. (3) Log in, then hard-reload on a path that is not <code>/</code> &mdash; that is rule 2 earning its place. Tell me what you found for (2); it decides whether lesson 12&rsquo;s floor still means anything.</p>
+<p><b>Reference card:</b> <a href="../reference/sessions-and-cookies.html">Sessions and cookies</a> &mdash; add the host-only note, it is the durable part of today. <a href="../reference/environment.html">Environment</a> now has a third column: your Mac, the API service, the static site.</p>
+<p><b>Ask the community:</b> <a href="https://community.render.com/">Render&rsquo;s forum</a>. Good question, and one I could not answer for you: <em>does a static-site rewrite to another Render service preserve the client IP in <code>X-Forwarded-For</code>, or does the backend see the CDN?</em> That is a real question with a real answer someone there has already hit.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0056-the-url-you-can-send-to-someone.html">&larr; Back</a>
+<a href="../reference/sessions-and-cookies.html">Sessions and cookies &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

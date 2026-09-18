@@ -1,3 +1,4 @@
+import { Navigate, Outlet, Route, Routes, useLocation } from "react-router";
 import { LoginForm } from "@/features/auth/login-form";
 import { SignedInCard } from "@/features/auth/signed-in-card";
 import { useSession } from "@/features/auth/session";
@@ -19,11 +20,11 @@ function StateLine({ state }: { state: string }) {
   );
 }
 
-export default function App() {
+// The shell every route renders inside. The session question is asked once,
+// here, and the answer decides whether the URL is allowed — so a route never
+// has to ask it again.
+function Shell() {
   const { user, isPending } = useSession();
-
-  // Three states, derived straight from the query. No useState mirroring it,
-  // no useEffect syncing it.
   const state = isPending ? "unknown" : user != null ? "in" : "out";
 
   return (
@@ -32,17 +33,63 @@ export default function App() {
         <h1 className="text-xl font-semibold">Team Task Tracker</h1>
         <StateLine state={state} />
       </header>
-
-      {isPending ? (
-        <Asking />
-      ) : user != null ? (
-        <>
-          <SignedInCard user={user} />
-          <TeamsCard user={user} />
-        </>
-      ) : (
-        <LoginForm />
-      )}
+      {isPending ? <Asking /> : <Outlet />}
     </main>
+  );
+}
+
+// ! Guards render `Navigate`, they do not call navigate() in an effect: an
+// ! effect runs *after* the wrong screen has already painted.
+// Rule: rerender-move-effect-to-event.
+function RequireAuth() {
+  const { user } = useSession();
+  const location = useLocation();
+
+  // `replace`, so Back does not walk into the page we just bounced out of.
+  // The attempted URL rides along so login can send them back to it.
+  return user != null ? (
+    <Outlet />
+  ) : (
+    <Navigate to="/login" replace state={{ from: location }} />
+  );
+}
+
+function RequireAnon() {
+  const { user } = useSession();
+  const location = useLocation();
+  const from = (location.state as { from?: Location } | null)?.from?.pathname;
+
+  return user == null ? <Outlet /> : <Navigate to={from ?? "/"} replace />;
+}
+
+function Home() {
+  const { user } = useSession();
+  if (user == null) return null; // RequireAuth already guaranteed this.
+
+  return (
+    <>
+      <SignedInCard user={user} />
+      <TeamsCard user={user} />
+    </>
+  );
+}
+
+function NotFound() {
+  return <p className="text-muted-foreground text-sm">No such page.</p>;
+}
+
+export default function App() {
+  return (
+    <Routes>
+      <Route element={<Shell />}>
+        <Route element={<RequireAnon />}>
+          <Route path="/login" element={<LoginForm />} />
+        </Route>
+        <Route element={<RequireAuth />}>
+          <Route path="/" element={<Home />} />
+        </Route>
+        <Route path="*" element={<NotFound />} />
+      </Route>
+    </Routes>
   );
 }

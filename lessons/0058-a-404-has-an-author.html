@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 58 &mdash; A 404 has an author</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 58 &middot; Week 15&ndash;16 &middot; Docker + deploy</p>
+<h1>A 404 has an author</h1>
+
+<p class="lede">You deployed lesson 57 and the page asks <code>GET /api/auth/me</code>. The answer is <code>404 Not Found</code>. Today you learn to ask <b>who wrote that 404</b> &mdash; and the answer, in your case, is your own API, complaining about a path it was handed. <b>One character is missing from one dashboard field.</b> Zero TypeScript. Suite stays at 172.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>Your rewrite destination is missing its <code>/*</code>.</strong> Without the wildcard, every path under <code>/api</code> collapses to <code>/</code> at the API. Add it and the 404 goes away.</li>
+<li><strong>I measured this, I did not guess it.</strong> <code>curl</code> against your live URL returned <code>{"message":"Route GET:/ not found"}</code>. That sentence is written by Fastify, not by Render.</li>
+<li><strong>A 404 is a signature.</strong> The body and the headers tell you which machine answered. A CDN 404 and an app 404 look nothing alike, and they have opposite fixes.</li>
+<li><strong>The <code>*</code> is two separate jobs.</strong> In the <em>source</em> it captures. In the <em>destination</em> it pastes back. You can have the first without the second, and that is exactly the bug.</li>
+<li><strong>The path shrinks in transit.</strong> The browser asks <code>/api/auth/me</code>; your API must see <code>/auth/me</code>, because that is the route you wrote. Two spellings of one request, and one hop between them.</li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<pre><code>web:     https://tracker-web-mxol.onrender.com   lesson 57, live
+api:     https://&lt;your-api&gt;.onrender.com         lesson 56, live
+symptom: GET /api/auth/me &rarr; <b>404 Not Found</b>
+
+<span class="dim">measured from here, 2026-09-18:</span>
+$ curl -s https://tracker-web-mxol.onrender.com/api/health
+{"message":"Route GET:<b>/</b> not found","error":"Not Found","statusCode":404}</code></pre>
+<p>Read the path in that message. Not <code>/api/health</code>. Not <code>/health</code>. Just <code>/</code>. Something threw the rest of the path away.</p>
+
+<h2>Do this &mdash; one field</h2>
+<div class="box">
+<div class="cap">the fix</div>
+<div class="body">
+<div><code>tracker-web</code> &rarr; <b>Redirects/Rewrites</b> &rarr; edit rule 1.</div>
+<div>Make sure the <b>Destination</b> ends with <code>/*</code> &mdash; not <code>/</code>, not nothing.</div>
+</div>
+</div>
+<div class="scroll"><table>
+<thead><tr><th></th><th>Source</th><th>Destination</th><th>Action</th></tr></thead>
+<tbody>
+<tr><td class="dim">now</td><td><code>/api/*</code></td><td><code>https://&lt;your-api&gt;.onrender.com</code> <span class="dim">&larr; no wildcard</span></td><td>Rewrite</td></tr>
+<tr><td><b>want</b></td><td><code>/api/*</code></td><td><code>https://&lt;your-api&gt;.onrender.com<b>/*</b></code></td><td>Rewrite</td></tr>
+</tbody>
+</table></div>
+<p>Save. Rules apply within a few seconds &mdash; there is no rebuild, because rules are router configuration, not files. Then check it the same way I did, from your terminal, before you touch the browser:</p>
+<pre><code>$ curl -s https://tracker-web-mxol.onrender.com/api/health
+{"status":"ok", ...}   <span class="dim">&larr; your own health route, lesson 11</span></code></pre>
+<p class="dim">Use <code>/api/health</code> for this, not <code>/api/auth/me</code>. <code>me</code> needs a cookie your terminal does not have, so it answers <code>401</code> when it is working &mdash; two failures that look alike. <code>health</code> needs nothing, so <code>200</code> means <em>only</em> that the path arrived.</p>
+
+<h2>Why &mdash; the star does two jobs</h2>
+<p>One rule, two stars, and they are not the same star.</p>
+<pre><code>Source       /api/<b>*</b>        the * here <b>captures</b>  &rarr; "auth/me"
+Destination  https://api/<b>*</b>  the * here <b>pastes</b>    &rarr; "/auth/me"</code></pre>
+<p>The source star is a question: <em>does this request start with <code>/api/</code>?</em> It matches, so the rule fires. What it captured is then only used if the destination asks for it. Your destination did not ask. So the rule fired, forwarded the request, and sent the bare destination URL &mdash; whose path is <code>/</code>.</p>
+<p class="takeaway"><b>Matching and forwarding are two decisions, not one.</b> A rule can match perfectly and still forward the wrong thing. When a proxy misbehaves, always ask both questions separately: did it match, and what did it send?</p>
+
+<h2>Why &mdash; the 404 told you who wrote it</h2>
+<p>This is the part worth keeping. There were three possible authors of that 404, and each has a different fix. You can tell them apart without any access to Render's dashboard.</p>
+<div class="scroll"><table>
+<thead><tr><th>Author</th><th>What you would see</th><th>What it means</th></tr></thead>
+<tbody>
+<tr><td><b>Your API</b> <span class="dim">(this is yours)</span></td><td><code>{"message":"Route GET:/ not found",&hellip;}</code> &mdash; JSON, plus <code>content-security-policy: default-src 'none'</code> and <code>access-control-allow-credentials: true</code></td><td>The request <em>arrived</em>. The rewrite works. The <b>path</b> is wrong.</td></tr>
+<tr><td>Render's CDN</td><td>a short HTML page, <code>content-type: text/html</code>, no headers you recognise</td><td>No rule matched. The request never left the static site.</td></tr>
+<tr><td>Your own <code>index.html</code></td><td><code>200</code>, <code>text/html</code>, and your React app boots</td><td>Rule 2 (<code>/*</code> &rarr; <code>/index.html</code>) swallowed it &mdash; rule 1 is missing or ordered second.</td></tr>
+</tbody>
+</table></div>
+<p>The giveaway in your case was <code>content-security-policy: default-src 'none'</code>. You wrote that line &mdash; it is helmet, in <code>server/src/app.ts</code>, lesson 31. A CDN has no reason to send it. The reply <em>carried your fingerprints</em>, so your server had it in its hands.</p>
+<p class="takeaway"><b>Every hop leaves marks on the reply.</b> Headers are not decoration; they are a chain of custody. Read them before you change any configuration.</p>
+
+<h2>Practice &mdash; three</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">The API replied <code>Route GET:/ not found</code>. What does that prove?</p>
+<button>No rewrite rule matched the request</button>
+<button>The rule matched but dropped the path</button>
+<p class="why" hidden>It arrived. Fastify wrote that sentence, and Fastify only runs inside your container &mdash; so rule 1 matched and forwarded. What it forwarded was the bare destination, whose path is <code>/</code>. If nothing had matched, Render&rsquo;s CDN would have answered instead, in HTML, with none of your headers on it.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Which reply means rule 1 never matched at all?</p>
+<button>An HTML page with no helmet headers</button>
+<button>A JSON body with a route in it</button>
+<p class="why" hidden>Plain HTML with no <code>content-security-policy</code> and no <code>access-control-allow-credentials</code> means your server never saw the request. Those headers are helmet&rsquo;s, from <code>app.ts</code> &mdash; they are the fingerprints. JSON naming a route is the opposite: that is your app talking.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why check <code>/api/health</code> rather than <code>/api/auth/me</code>?</p>
+<button>Health is cheaper for the free plan</button>
+<button>A 401 would hide whether it arrived</button>
+<p class="why" hidden><code>/auth/me</code> answers <code>401</code> when it is working correctly, because your terminal holds no session cookie. So <code>401</code> and &ldquo;still broken&rdquo; would look the same. <code>/health</code> needs nothing, so a <code>200</code> proves the path arrived and nothing else is in the way.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  B["browser<br/>GET /api/auth/me"] --> R{"rule 1<br/>source /api/*<br/><b>matches</b>"}
+  R -->|"destination has <b>no</b> /*"| BAD["API receives <b>GET /</b><br/>404 &mdash; written by Fastify"]
+  R -->|"destination ends <b>/*</b>"| OK["API receives <b>GET /auth/me</b><br/>200 or 401 &mdash; your route"]
+</pre>
+<figcaption>Both arrows leave the same matching rule. The difference is one field, and the 404 on the top arrow is your own code answering honestly about a path it was given.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div><code>render.yaml</code> <span class="dim">this bug is the best argument yet for it: a rewrite rule in a reviewed file cannot lose a character without you seeing the diff. Still the honest next deploy step, and still small.</span></div>
+<div>a catch-all 404 handler on the API <span class="dim">tempting, and wrong today. Fastify&rsquo;s default message is what solved this. A friendlier page would have hidden the path.</span></div>
+<div>the client-IP answer from lesson 57 <span class="dim">still open, still unmeasured, still your homework.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://render.com/docs/redirects-rewrites#wildcards">Render &mdash; redirects and rewrites, the wildcards section</a>. Four paragraphs, and it is the exact field you just fixed.</p>
+<p><b>Then this:</b> ten minutes. (1) Apply the fix and confirm <code>/api/health</code> with <code>curl</code>, from the terminal, before the browser. (2) Log in on the deployed page and confirm <code>me</code> returns your user. (3) Then the still-open task from lesson 57: read the API logs and tell me whether <code>request.ip</code> is you or Render.</p>
+<p><b>Reference card:</b> <a href="../reference/environment.html">Environment</a> &mdash; the static-site column now has the rewrite rules in it, wildcard included.</p>
+<p><b>Ask the community:</b> <a href="https://community.render.com/">Render&rsquo;s forum</a> &mdash; same unanswered question as last time, and it is a good one.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0057-one-origin-and-the-cookie-comes-back.html">&larr; Back</a>
+<a href="../reference/environment.html">Environment &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

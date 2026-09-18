@@ -1467,3 +1467,59 @@ move?* No answer -> do not write it.
   57 with a reason he will have felt.
 - Zero nags this time. The password rotation is done, and there is nothing left
   standing open that he has said no to.
+
+## 2026-09-18 — lesson 57, the one-origin fix
+
+- He asked by number again ("move to lesson 57"), and 56 had already specified
+  it. Built what 56 promised. Third session in a row with no candidate menu.
+- **Read his code before claiming anything**, again: no `Domain=` in
+  `sessionCookie()`, `csrf.ts`'s `same-origin` early return, axios `baseURL`
+  from `VITE_API_URL`, `vite.config.ts` port 5173 strict. Every claim in the
+  lesson comes from a file I opened this session.
+- Checked Render's rewrite docs before writing the rule (destination may be a
+  full URL, `*` forwards the suffix). Same reflex as 55/56. Now habitual.
+- **Chose nginx-less.** `deploy/nginx.conf` has been sitting unused since 53
+  and the static site + rewrite is $0, no container, no spin-down. Said so in
+  "what you did not build" rather than silently dropping it.
+- **Could not measure the client-IP question** (needs his two deployed
+  services), so the lesson says "I have not measured it" out loud and turns it
+  into the homework and the forum question. Better than asserting. Watch
+  whether he brings back an answer — if he does, lesson 12's floor gets a
+  verdict.
+- Teaching move, new phrasing of an old family: **"do not loosen a defence to
+  accommodate an accident."** Sits next to "make the safe thing the default".
+  Fits a comparison table, which is the eleventh or twelfth of those now.
+- Second word pair this arc: **build time vs boot time** (`VITE_` vs server
+  env). Same word "environment variable", two different moments. That is the
+  bit to re-teach if anything from 57 is shaky.
+- The deploy arc is closed after three lessons (55, 56, 57). Next session
+  should offer the two front-end holes first — they are the oldest open thing
+  in the workspace and now nothing blocks them.
+
+## 2026-09-18 — lesson 58, the 404 with a signature
+
+- He came with an error, not a lesson number. Fourth session in a row with no
+  candidate menu, and this one was pure debugging.
+- **Measured it before writing a word.** `curl`'d his live URL, got
+  `Route GET:/ not found` plus helmet's CSP header on the reply. That single
+  response identified both the author and the cause. Every claim in the lesson
+  is from that measurement or from a file I opened.
+- Also read his code first: `/auth/me` exists at `auth.route.ts:96`, no route
+  prefix anywhere, `api.ts` baseURL from `VITE_API_URL`. So his code was
+  innocent and I could say so with confidence rather than hedging.
+- **The lesson is 60% diagnostic skill, 40% fix.** The fix is one character;
+  teaching only the fix would have been a wasted session. The keeper is the
+  three-author table — API vs CDN vs index.html, told apart by body and
+  headers. That generalises to every proxy he will ever meet.
+- Resisted the obvious over-build: no catch-all 404 handler on the API.
+  Fastify's default message is the thing that solved it. Said so out loud in
+  "what you did not build".
+- New rule phrasing: **"matching and forwarding are two decisions."** Pairs
+  with 57's rule ordering. Both are about proxy rules failing while looking fine.
+- Told him to verify with `/api/health` not `/api/auth/me`, because a working
+  `me` returns 401 to curl. That kind of "two failures that look alike" note is
+  worth repeating — it is the same shape as 56's port-message-for-a-host-mistake.
+- **The client-IP question from 57 is still unanswered.** Asked twice now. Do
+  not ask a third time without him volunteering it; if it stays open, drop it.
+- The front-end holes are now the oldest open item and nothing blocks them.
+  Next session should lead with them.

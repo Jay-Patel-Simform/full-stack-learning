@@ -884,3 +884,30 @@ Roles: Owner, Admin, Member, Viewer. Scoped per team.
 - Next lesson (57): page and API on **one origin** — `deploy/nginx.conf`,
   unused since 53, or a second Render service with a proxy rule.
 - Suite stays **172**. Streak intact: **no new dependency, 56 lessons.**
+
+### Lesson 57 — one origin (2026-09-18)
+- **Render Static Site for `web/`**, Root Directory `web`, build
+  `npm ci && npm run build`, publish `dist`. Free, CDN, no spin-down.
+- **Two rewrite rules, order significant**: `/api/*` → `https://<api>.onrender.com/*`
+  (Rewrite, not Redirect — a redirect puts the browser back on the API host),
+  then `/*` → `/index.html` for client-side routing. Render docs confirm the
+  destination may be "a full, publicly accessible URL".
+- **No server change.** The session cookie has no `Domain=`, so it is host-only
+  and belongs to the static site's host. That is why the usual proxy
+  cookie-domain rewriting is unnecessary.
+- `VITE_API_URL=/api` (a path; relative axios `baseURL`). Taught the
+  build-time vs boot-time env split, and that a `VITE_` value is public.
+- `ALLOWED_ORIGINS` shrinks to the static site URL. `Sec-Fetch-Site:
+  same-origin` becomes true for the first time — csrf.ts's "good case in
+  production" line finally does work.
+- Rejected `SameSite=None; Secure` in the lesson with a comparison table:
+  **do not loosen a defence to accommodate a deployment accident.**
+- **Left deliberately unmeasured and named as such**: whether the CDN rewrite
+  hop preserves the client IP in `X-Forwarded-For`. Lesson 12's 100/IP/min
+  floor depends on it. Homework is to read the Render logs and report back;
+  also sent to the Render forum as the community question.
+- Zero TypeScript. Suite stays **172**. Streak intact: **no new dependency, 57
+  lessons.**
+- Deploy arc is now closed. Next: the two front-end holes (nothing reads the
+  audit log; no way to create a team from the page), then `render.yaml`, then
+  a real page CSP on the static site's custom headers.
