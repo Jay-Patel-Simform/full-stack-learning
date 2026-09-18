@@ -29,7 +29,8 @@ There is no typecheck script — `npm run build` runs `tsc -b`.
 - `src/features/<feature>/` — hooks + components for one feature. Today: `auth`, `teams`, `tasks`.
 - `src/features/auth/session.ts` — `useSession`, `useLogin`, `useLogout`.
 - `src/features/auth/session-key.ts` — `SESSION_KEY` alone, so `lib/api.ts` can import it without a cycle.
-- `src/features/teams/teams.ts` — `useTeams` and its mutations. Each team arrives with the `role` you hold and the `can` list the server computed.
+- `src/features/teams/teams.ts` — `useTeams` and its mutations. Each team arrives with the `role` you hold and the `can` list the server computed. `useLeaveTeam` calls `DELETE /teams/:id/members/me` — a separate server action from removing somebody, because nobody outranks themselves.
+- `src/components/app-shell.tsx` — the sidebar. `TeamRow` is one team: its name, your role, the Leave button, and the sections your `can` list allows. Exported for its test.
 - `src/features/tasks/tasks.ts` — `useTasks(teamId)` and its mutations, keyed `["teams", teamId, "tasks"]`.
 - `src/components/ui/` — shadcn primitives. Generated; edit only when a design change needs it.
 - `src/index.css` — Tailwind, shadcn theme tokens, Geist.
@@ -51,6 +52,8 @@ There is no typecheck script — `npm run build` runs `tsc -b`.
 - A query key mirrors its URL. Team-scoped data gets one entry per team (`["teams", teamId, "tasks"]`), never a single shared bucket a second team could read out of.
 - Permissions are the server's answer, not a copy. Render off the `can` list in the reply; never re-derive what a role may do in this app.
 - A mutation sends the value it wants, never a verb — send it twice and the answer is the same, so a double-click and a retry are the same event.
+- No confirm step on a mistake you can undo yourself (deleting a task: type it again). A second click is for irreversible *and* mis-clickable — leaving a team, where an admin has to re-add you. The button becomes its own confirmation; no dialog to mount, trap focus in or dismiss.
+- `can` is what the UI may **offer**, never what the API will **allow**. A sole owner holds `member:leave` and is still refused with a `409`, because that refusal is about the team and not about them. Always render the server's sentence.
 - Comments explain why, in plain words. Keep that style.
 
 ## Tests
@@ -63,5 +66,6 @@ Vitest + jsdom + Testing Library, since lesson 68 — the first new dependency i
 - `findBy*` for anything that arrives after a request. `getBy*` throws immediately.
 - Every render needs `QueryClientProvider` + a router. Build a **fresh** `QueryClient` per test with `retry: false` on queries and mutations, or a failing-on-purpose test waits through backoff and is reported as a timeout.
 - Fake the network with `vi.spyOn(api, "post")`, not MSW and not `fetch`. Assert the **payload**, not just that a call happened.
+- Reject with a **real `new AxiosError()`**, not a plain object shaped like one. `errorMessage()` narrows with `instanceof`, so a look-alike quietly takes the fallback branch: the error line still appears and the test still passes while proving nothing. Assert the server's own words, never the fallback string.
 - `@testing-library/jest-dom` is deliberately not installed, so `toBeDisabled()` and `toHaveValue()` do not exist. Read `.disabled` and `.value` off the element instead.
 - `afterEach(cleanup)` is in `src/test-setup.ts`; `afterEach(() => vi.restoreAllMocks())` goes in any file that spies.

@@ -6,6 +6,7 @@
 // rendered a button and somebody has typed into a box.
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { AxiosError } from "axios";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { api } from "@/lib/api";
@@ -79,10 +80,19 @@ test("a real name submits the trimmed value", async () => {
 });
 
 test("a refused create leaves the typed name on screen", async () => {
-  vi.spyOn(api, "post").mockRejectedValue({
-    isAxiosError: true,
-    response: { status: 403, data: { error: "forbidden" } },
-  });
+  // ! A REAL AxiosError, not a plain object shaped like one. errorMessage()
+  // ! narrows with `instanceof AxiosError`, so a look-alike quietly falls back
+  // ! to the default sentence -- an error line still appears and this test
+  // ! still passes, while never proving the server's words reach the screen.
+  const refusal = new AxiosError("Request failed with status code 403");
+  refusal.response = {
+    status: 403,
+    statusText: "Forbidden",
+    data: { error: "forbidden" },
+    headers: {},
+    config: { headers: {} } as never,
+  };
+  vi.spyOn(api, "post").mockRejectedValue(refusal);
   renderForm();
   const user = userEvent.setup();
 
@@ -93,6 +103,8 @@ test("a refused create leaves the typed name on screen", async () => {
   // * onSubmit. A 403 that eats the sentence you typed is the rudest thing a
   // * form can do, and nothing has ever stopped this regressing.
   // ? findByText, not getByText -- the message arrives after the request.
-  await screen.findByText(/could not create team/i);
+  // ? And the SERVER's word, not the fallback: asserting the fallback would
+  // ? pass even if errorMessage() never unwrapped the reply.
+  await screen.findByText(/forbidden/i);
   expect(nameBox().value).toBe("Design");
 });

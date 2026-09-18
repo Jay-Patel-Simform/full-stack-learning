@@ -101,3 +101,32 @@ export function useCreateTeam() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: TEAMS_KEY }),
   });
 }
+
+/**
+ * Show yourself the door. Not the same call as removing somebody — the server
+ * has a separate `member:leave` action, because nobody outranks themselves and
+ * the rank rule would refuse you forever.
+ *
+ * Two answers worth knowing about:
+ *   204 — gone. The team drops out of the list on the next fetch.
+ *   409 — you are the last OWNER, so leaving would strand the team. Not a 403:
+ *         your permission is fine, the state of the world is not, and
+ *         promoting somebody makes the identical request succeed. Show the
+ *         server's sentence; it says what to do about it.
+ */
+export function useLeaveTeam() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    // ! No type parameter on delete(). A 204 has no body, so `api.delete<Team>`
+    // ! would compile clean and be "" at runtime -- lesson 28's trap.
+    mutationFn: async (teamId: number) => {
+      await api.delete(`/teams/${teamId}/members/me`);
+    },
+    // ! Nothing is edited by hand here. The reply is empty, and the row that
+    // ! has to disappear carries `role` and `can` that only the server knows.
+    // ! Returning the promise holds isPending until the list is back, so a
+    // ! caller can navigate away knowing the cache no longer holds the team.
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: TEAMS_KEY }),
+  });
+}

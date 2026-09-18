@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { NavLink, Outlet, useParams } from "react-router";
+import { NavLink, Outlet, useNavigate, useParams } from "react-router";
 import { useIsFetching } from "@tanstack/react-query";
 import { AnimatePresence, motion } from "motion/react";
 import {
+  DoorOpen,
   FolderClosed,
   ListTodo,
   LogOut,
@@ -14,8 +15,9 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/skeleton";
 import { Wordmark } from "@/components/wordmark";
 import { cn } from "@/lib/utils";
+import { errorMessage } from "@/lib/api";
 import { useLogout, useSession } from "@/features/auth/session";
-import { useTeams, type Team } from "@/features/teams/teams";
+import { useLeaveTeam, useTeams, type Team } from "@/features/teams/teams";
 import { UnderTheHood } from "@/features/dev/under-the-hood";
 
 const EASE_OUT = [0.23, 1, 0.32, 1] as const;
@@ -24,11 +26,147 @@ const EASE_OUT = [0.23, 1, 0.32, 1] as const;
  *  answer, read off the `can` list the team arrived with. */
 const SECTIONS = [
   { to: "tasks", label: "Tasks", icon: ListTodo, needs: "task:read" },
-  { to: "projects", label: "Projects", icon: FolderClosed, needs: "project:read" },
+  {
+    to: "projects",
+    label: "Projects",
+    icon: FolderClosed,
+    needs: "project:read",
+  },
   { to: "activity", label: "Activity", icon: ScrollText, needs: "audit:read" },
 ] as const;
 
-function TeamNav({ teams, onNavigate }: { teams: Team[]; onNavigate: () => void }) {
+/**
+ * The way out of a team, in the row that names it.
+ *
+ * Two clicks, not one. Lesson 28 argued against a confirm step on deleting a
+ * task, and that still holds — a task you delete by mistake you can type again.
+ * This is different: you cannot re-add yourself, an admin has to, and the
+ * button sits a few pixels from the links you use all day. Irreversible plus
+ * mis-clickable is where a second click earns its place. No dialog for it:
+ * the button becomes the confirmation, so there is nothing to mount, trap
+ * focus in, or dismiss.
+ */
+export function TeamRow({ team, onNavigate }: { team: Team; onNavigate: () => void }) {
+  const [armed, setArmed] = useState(false);
+  const leaveTeam = useLeaveTeam();
+  const navigate = useNavigate();
+  const { teamId } = useParams();
+
+  // The server's own list. `can` is a hint for drawing buttons, never the
+  // check — and here it is a deliberately approximate one: a sole OWNER holds
+  // member:leave and is still refused, because the refusal is about the team
+  // rather than about them. That 409 is what the error line below renders.
+  const mayLeave = team.can.includes("member:leave");
+
+  function leave() {
+    leaveTeam.mutate(team.id, {
+      onSuccess: () => {
+        // Only move if you are standing in the team you just left. Leaving one
+        // you are not looking at should not throw you off the page.
+        // "/" is not a screen: it picks your first remaining team, or shows
+        // the empty state. Either way that decision already exists.
+        if (teamId === String(team.id)) void navigate("/", { replace: true });
+      },
+    });
+  }
+
+  return (
+    <div className="grid gap-1">
+      <div className="flex items-baseline gap-2 px-3">
+        <h2 className="mr-auto truncate text-xs font-semibold tracking-[0.04em] uppercase">
+          {team.name}
+        </h2>
+        <span className="text-muted-foreground shrink-0 text-[0.6875rem] tracking-wide">
+          {team.role.toLowerCase()}
+        </span>
+        {mayLeave ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            // An icon-only destructive control names its row. "Leave" alone
+            // does not say which team disappears — lesson 28, third use.
+            aria-label={
+              armed ? `Confirm leaving ${team.name}` : `Leave ${team.name}`
+            }
+            disabled={leaveTeam.isPending}
+            onClick={() => (armed ? leave() : setArmed(true))}
+            // Losing focus un-arms it, so a button left mid-confirm does not
+            // sit there waiting for the next click that lands nearby.
+            onBlur={() => setArmed(false)}
+            className={cn(
+              "-my-1 h-6 shrink-0 gap-1 self-center px-1.5 text-[0.6875rem]",
+              armed
+                ? "text-destructive hover:text-destructive"
+                : "text-muted-foreground",
+            )}
+          >
+            <DoorOpen className="size-3.5" aria-hidden />
+            {armed ? "Sure?" : null}
+          </Button>
+        ) : null}
+      </div>
+
+      {leaveTeam.error !== null ? (
+        <p role="alert" className="text-destructive px-3 text-xs text-balance">
+          {errorMessage(leaveTeam.error, "Could not leave this team")}
+        </p>
+      ) : null}
+
+      <ul className="grid gap-0.5">
+        {SECTIONS.filter((section) => team.can.includes(section.needs)).map(
+          (section) => (
+            <li key={section.to}>
+              <NavLink
+                to={`/teams/${team.id}/${section.to}`}
+                onClick={onNavigate}
+                className={({ isActive }) =>
+                  cn(
+                    "group relative flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm transition-colors duration-150 ease-[var(--ease-out)]",
+                    isActive
+                      ? "text-sidebar-accent-foreground font-medium"
+                      : "text-muted-foreground hover:text-sidebar-accent-foreground",
+                  )
+                }
+              >
+                {({ isActive }) => (
+                  <>
+                    {/* The highlight is one element that slides between
+                          rows, so the eye follows it instead of finding a
+                          new box somewhere else. */}
+                    {isActive ? (
+                      <motion.span
+                        layoutId="nav-active"
+                        aria-hidden
+                        className="bg-sidebar-accent absolute inset-0 -z-10 rounded-lg shadow-(--shadow-raised)"
+                        transition={{ duration: 0.22, ease: EASE_OUT }}
+                      />
+                    ) : null}
+                    <section.icon
+                      className={cn(
+                        "size-4 shrink-0 transition-colors duration-150",
+                        isActive ? "text-primary" : "text-muted-foreground",
+                      )}
+                    />
+                    {section.label}
+                  </>
+                )}
+              </NavLink>
+            </li>
+          ),
+        )}
+      </ul>
+    </div>
+  );
+}
+
+function TeamNav({
+  teams,
+  onNavigate,
+}: {
+  teams: Team[];
+  onNavigate: () => void;
+}) {
   if (teams.length === 0) {
     return (
       <p className="text-muted-foreground px-3 py-2 text-sm text-balance">
@@ -40,60 +178,7 @@ function TeamNav({ teams, onNavigate }: { teams: Team[]; onNavigate: () => void 
   return (
     <div className="grid gap-5">
       {teams.map((team) => (
-        <div key={team.id} className="grid gap-1">
-          <div className="flex items-baseline justify-between gap-2 px-3">
-            <h2 className="truncate text-xs font-semibold tracking-[0.04em] uppercase">
-              {team.name}
-            </h2>
-            <span className="text-muted-foreground shrink-0 text-[0.6875rem] tracking-wide">
-              {team.role.toLowerCase()}
-            </span>
-          </div>
-
-          <ul className="grid gap-0.5">
-            {SECTIONS.filter((section) =>
-              team.can.includes(section.needs),
-            ).map((section) => (
-              <li key={section.to}>
-                <NavLink
-                  to={`/teams/${team.id}/${section.to}`}
-                  onClick={onNavigate}
-                  className={({ isActive }) =>
-                    cn(
-                      "group relative flex items-center gap-2.5 rounded-lg px-3 py-1.5 text-sm transition-colors duration-150 ease-[var(--ease-out)]",
-                      isActive
-                        ? "text-sidebar-accent-foreground font-medium"
-                        : "text-muted-foreground hover:text-sidebar-accent-foreground",
-                    )
-                  }
-                >
-                  {({ isActive }) => (
-                    <>
-                      {/* The highlight is one element that slides between
-                          rows, so the eye follows it instead of finding a
-                          new box somewhere else. */}
-                      {isActive ? (
-                        <motion.span
-                          layoutId="nav-active"
-                          aria-hidden
-                          className="bg-sidebar-accent absolute inset-0 -z-10 rounded-lg shadow-(--shadow-raised)"
-                          transition={{ duration: 0.22, ease: EASE_OUT }}
-                        />
-                      ) : null}
-                      <section.icon
-                        className={cn(
-                          "size-4 shrink-0 transition-colors duration-150",
-                          isActive ? "text-primary" : "text-muted-foreground",
-                        )}
-                      />
-                      {section.label}
-                    </>
-                  )}
-                </NavLink>
-              </li>
-            ))}
-          </ul>
-        </div>
+        <TeamRow key={team.id} team={team} onNavigate={onNavigate} />
       ))}
     </div>
   );
