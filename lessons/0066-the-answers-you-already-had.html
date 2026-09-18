@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 66 &mdash; The answers you already had</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 66 &middot; Week 15&ndash;16 &middot; Measure</p>
+<h1>The answers you already had</h1>
+
+<p class="lede">You asked for five things. Three of them turned out to be questions, not features &mdash; and the answer to each was already sitting in your repo or one command away. This lesson is what a probe found. One of the three has been done since your first commit, and you have asked for it four times.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>The body size limit is already there.</strong> <code>bodyLimit: 64 * 1024</code>, <code>src/app.ts</code> line 65, present in the first commit. Measured: an 80&nbsp;KB body is a <code>413</code>.</li>
+<li><strong>Lesson 65&rsquo;s unmeasured question is answered.</strong> The CSRF hook does <b>not</b> block a CSP report. Measured with a real headless Chrome, both same-origin and cross-site.</li>
+<li><strong>Lesson 64&rsquo;s asset check cannot run yet</strong>, and that is a finding too &mdash; <code>index-D1HMFRqX.js</code> is <em>still</em> the live bundle, so there has been no second deploy to compare against.</li>
+<li><strong>Found while looking:</strong> your live CSP is still <code>Report-Only</code>, and the <code>report-uri</code> you added is in your working tree, not on the internet.</li>
+<li><strong>The rule:</strong> an open question is not an unbuilt feature. Check before you build.</li>
+</ul>
+</div>
+
+<h2>One: the body size limit, asked four times</h2>
+
+<p>It is in <code>server/src/app.ts</code>, and it has been for as long as the repository has existed:</p>
+
+<pre><code>const app = Fastify({
+  logger: { <span class="dim">&hellip;</span> },
+  <b>bodyLimit: 64 * 1024,</b>
+  trustProxy: config.TRUST_PROXY,
+});</code></pre>
+
+<p>Fastify&rsquo;s own default is 1&nbsp;MiB. Yours is 64&nbsp;KB, sixteen times tighter, and it was a deliberate line somebody wrote. <code>git log -S'bodyLimit'</code> puts it in commit <code>5f73323</code> &mdash; the squashed first commit. It never appeared in a lesson, so it never got ticked off, so it stayed on the list.</p>
+
+<p class="takeaway"><b>An item can be open on a list and closed in the code.</b> A plan is a claim about the repository, and claims go stale. This is the third time in six lessons that reading the file first changed the lesson &mdash; 61&rsquo;s audit page, 63&rsquo;s live headers, now this.</p>
+
+<h3>But there was a real question underneath it</h3>
+
+<p>Lesson 65 added a <b>custom content-type parser</b> for <code>application/csp-report</code>. A custom parser can carry its own <code>bodyLimit</code>, and yours does not pass one. So: does it inherit the app&rsquo;s 64&nbsp;KB, or does it quietly get no limit at all? That is a genuinely worth-asking question, and it is the reason the item deserved a look rather than a tick.</p>
+
+<p>Measured, with your installed Fastify and lesson 65&rsquo;s parser copied exactly:</p>
+
+<div class="scroll"><table>
+<tr><th>Request</th><th>Content type</th><th>Status</th></tr>
+<tr><td>1&nbsp;KB body</td><td><code>application/json</code></td><td><code>204</code></td></tr>
+<tr><td>80&nbsp;KB body</td><td><code>application/json</code></td><td><b><code>413</code></b></td></tr>
+<tr><td>1&nbsp;KB body</td><td><code>application/csp-report</code></td><td><code>204</code></td></tr>
+<tr><td>80&nbsp;KB body</td><td><code>application/csp-report</code></td><td><b><code>413</code></b></td></tr>
+</table></div>
+
+<p>The custom parser inherits the app limit. Nothing to add.</p>
+
+<p class="takeaway"><b>A limit with no test is a limit you will delete by accident.</b> The line is right, and nothing in the 174 tests you already had would notice if someone removed it. That is your exercise below &mdash; three assertions, no new dependency.</p>
+
+<h2>Two: does the CSRF hook block a CSP report?</h2>
+
+<p>Lesson 65 shipped with an honesty box: <em>&ldquo;unmeasured &mdash; whether the CSRF hook 403s a report POST&rdquo;</em>. You cannot answer this by reading, because the answer is a fact about <b>what headers a browser puts on a report</b>, and no amount of staring at <code>csrf.ts</code> reveals that.</p>
+
+<p>So: a throwaway page served with a policy that blocks an image, a report endpoint that prints every header it receives, and a real headless Chrome pointed at it. Here is what Chrome actually sent:</p>
+
+<pre><code>=== REPORT ARRIVED ===
+method:          POST
+content-type:    application/csp-report
+<b>sec-fetch-site:  same-origin</b>
+sec-fetch-mode:  no-cors
+<b>sec-fetch-dest:  report</b>
+origin:          http://127.0.0.1:7788
+cookie:          undefined
+content-length:  386</code></pre>
+
+<p>Now walk that through your own <code>allowWrite()</code>, line by line:</p>
+
+<pre><code>if (SAFE_METHODS.has(method)) return true;      <span class="dim">// POST &mdash; no</span>
+<b>if (site === "same-origin") return true;         // &larr; returns HERE</b></code></pre>
+
+<p><b>The answer is <code>204</code>, not <code>403</code>.</b> The report sails through on the second line of the function &mdash; the line whose comment says &ldquo;the good case in production&rdquo;. And it is the good case, genuinely: since lesson 57 your page and your API are one origin, so a report posted to <code>/api/csp-report</code> is same-origin by construction.</p>
+
+<h3>The second measurement, which is the interesting one</h3>
+
+<p>What if the report endpoint were <em>not</em> same-origin &mdash; if <code>report-uri</code> pointed straight at <code>full-stack-learning-mmty.onrender.com</code> instead of at the <code>/api</code> rewrite? Same probe, page on one host, endpoint on another:</p>
+
+<pre><code>=== CROSS-SITE REPORT ARRIVED ===
+method:          POST
+content-type:    application/csp-report
+<b>sec-fetch-site:  cross-site</b>
+sec-fetch-dest:  report
+<b>origin:          http://localhost:7790</b>   <span class="dim">&larr; the PAGE's origin</span></code></pre>
+
+<p>That falls past the <code>same-origin</code> line and lands on the allow-list line:</p>
+
+<pre><code>if (origin) return allowedOrigins.includes(origin);</code></pre>
+
+<p>The <code>Origin</code> the browser attaches is <b>the page&rsquo;s</b> origin &mdash; and your page&rsquo;s origin is in <code>ALLOWED_ORIGINS</code>, because that is exactly what <code>ALLOWED_ORIGINS</code> is for. So it passes too. Both ways round, reports get through.</p>
+
+<p class="takeaway"><b>Passing and passing for the right reason are two different results.</b> The cross-site report is allowed because your page is on the CORS allow-list &mdash; a list that exists to answer a completely different question. The day someone trims that list, reports start vanishing with a <code>403</code> that nothing logs and nobody is waiting for. It would look like &ldquo;CSP stopped finding violations&rdquo;.</p>
+
+<h3>The header you would actually want</h3>
+
+<p>Look again at the probe output. Chrome sent <code>Sec-Fetch-Dest: report</code>. Not <code>empty</code>, not <code>document</code> &mdash; <code>report</code>. That value means &ldquo;this request is a browser-generated report&rdquo; and a page cannot forge it, for the same reason it cannot forge <code>Sec-Fetch-Site</code>: the <code>Sec-</code> prefix makes it a forbidden header name.</p>
+
+<p>So there <em>is</em> a precise discriminator available, and it is one line. Whether you want it is a real decision, and the honest answer is <b>not yet</b>:</p>
+
+<div class="scroll"><table>
+<tr><th></th><th>Leave it alone</th><th>Add a <code>Sec-Fetch-Dest</code> exception</th></tr>
+<tr><td>Works today</td><td>Yes, measured, both ways</td><td>Yes</td></tr>
+<tr><td>Survives trimming <code>ALLOWED_ORIGINS</code></td><td>No</td><td>Yes</td></tr>
+<tr><td>Lines of code</td><td>0</td><td>~3, in a function you have not touched in 50 lessons</td></tr>
+<tr><td>New failure mode</td><td>&mdash;</td><td>A second reason a write can be allowed</td></tr>
+</table></div>
+
+<p><b>Recommendation: leave it.</b> Write the finding in the honesty box and move on. You have one page, one origin, and a measured pass. Adding a second door to the CSRF gate to protect a telemetry route from a hypothetical config change is the kind of code that looks wise and costs you at 3am. Revisit it the day <code>ALLOWED_ORIGINS</code> has more than one entry that matters.</p>
+
+<h2>Three: did the old assets survive? Still cannot tell</h2>
+
+<p>Lesson 64 set you homework: save one asset URL, deploy again, curl the saved URL, see whether Render keeps the old deploy&rsquo;s files alive. I went to run it for you. Here is the live page today:</p>
+
+<pre><code>$ curl -sS https://tracker-web-mxol.onrender.com/ | grep -o '/assets/[^"]*'
+/assets/index-D1HMFRqX.js
+/assets/index-ChPRm71S.css</code></pre>
+
+<p>That is <b>the same hash lesson 64 wrote down</b>. The bundle has not changed, so there is no &ldquo;old&rdquo; version to ask about. The site <em>has</em> redeployed since &mdash; <code>last-modified</code> is today, and lesson 63&rsquo;s headers are live &mdash; but a headers change does not change a byte of JavaScript, so Vite produced the identical filename.</p>
+
+<p class="takeaway"><b>A content hash that did not move is telling you the truth: nothing changed.</b> That is the whole point of the name. It also means this experiment needs a real source edit to run at all &mdash; which lesson 68 is about to give you.</p>
+
+<p>The check, for when you have one:</p>
+
+<pre><code><span class="dim"># BEFORE you push a change to web/</span>
+curl -sS https://tracker-web-mxol.onrender.com/ | grep -o '/assets/[^"]*\.js'
+<span class="dim"># write that filename down. then push, wait for the deploy, and:</span>
+curl -sS -o /dev/null -w '%{http_code}\n' \
+  https://tracker-web-mxol.onrender.com/assets/<i>index-THE-OLD-ONE.js</i></code></pre>
+
+<p><code>200</code> means a tab someone had open before your deploy can still load its chunks. <code>404</code> means that tab breaks on its next lazy import, and <code>s-maxage=300</code> from lesson 64 is the only thing hiding it.</p>
+
+<div class="box">
+<div class="cap">the check is now armed &mdash; the numbers are filled in</div>
+<div class="body">
+<div><b>The old filename, saved:</b> <span class="dim"><code>/assets/index-D1HMFRqX.js</code> &mdash; still what the live site serves as you read this.</span></div>
+<div><b>The new one, built locally:</b> <span class="dim"><code>/assets/index-zI3W9Tc3.js</code>. Lesson 67&rsquo;s one-word edit to the <code>Action</code> union moved it, which is exactly what a content hash is supposed to do. The <b>CSS hash did not move</b> (<code>index-ChPRm71S.css</code> before and after) &mdash; only the JavaScript changed, so only the JavaScript got a new name. That is the mechanism proving itself in miniature.</span></div>
+<div><b>So, after your next deploy, run exactly this:</b>
+<pre><code>curl -sS -o /dev/null -w '%{http_code}\n' \
+  https://tracker-web-mxol.onrender.com/assets/index-D1HMFRqX.js</code></pre>
+<span class="dim">One command, one number, and a question that has been open since lesson 64 is closed.</span></div>
+</div>
+</div>
+
+<h2>Found while looking: two things that are not deployed</h2>
+
+<p>The same <code>curl</code> that answered the asset question showed two gaps. Neither is a bug; both are &ldquo;the working tree is ahead of the internet&rdquo;.</p>
+
+<pre><code>$ curl -sSI https://tracker-web-mxol.onrender.com/ | grep -i content-security
+<b>content-security-policy-report-only:</b> default-src 'self'; script-src 'self';
+  style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self';
+  connect-src 'self'; frame-ancestors 'none'; base-uri 'none';
+  form-action 'self'; object-src 'none'</code></pre>
+
+<ol>
+<li><b>Still <code>Report-Only</code>.</b> Lesson 62&rsquo;s loop was: ship Report-Only, walk every screen with the console open, then delete <code>-Report-Only</code>. The walk has not been cashed in. Right now the policy blocks nothing.</li>
+<li><b>No <code>report-uri</code> on the live header.</b> Your <code>render.yaml</code> has it. Your deploy does not &mdash; the file is modified in the working tree and has not been pushed. So lesson 65&rsquo;s route, once you write it, currently has nothing pointing at it.</li>
+</ol>
+
+<p>Those two are one deploy apart, and they go together: turn the policy on and point it at the route in the same push.</p>
+
+<h2>Do this now &mdash; twenty minutes</h2>
+
+<ol>
+<li><b>Write the body-limit test</b> that does not exist. New file <code>server/src/routes/body-limit.test.ts</code>:
+
+<pre><code><span class="dim">import</span> { test } <span class="dim">from</span> "node:test";
+<span class="dim">import</span> assert <span class="dim">from</span> "node:assert/strict";
+<span class="dim">import</span> { buildApp } <span class="dim">from</span> "../app.ts";
+
+<span class="dim">// ! 64 KB is a decision, not a default -- Fastify's own is 1 MiB. Nothing
+// ! else in the suite would notice if this line were deleted.</span>
+test("a body over 64 KB is refused before the handler", async (t) =&gt; {
+  const app = await buildApp();
+  t.after(() =&gt; app.close());
+
+  const res = await app.inject({
+    method: "POST",
+    url: "/auth/login",
+    headers: { "content-type": "application/json" },
+    payload: JSON.stringify({ email: "a@b.com", password: "x".repeat(80 * 1024) }),
+  });
+
+  <span class="dim">// ? 413, not 400: refused on size, before zod ever saw it.</span>
+  assert.equal(res.statusCode, 413);
+});
+
+test("a normal body still gets through to validation", async (t) =&gt; {
+  const app = await buildApp();
+  t.after(() =&gt; app.close());
+
+  const res = await app.inject({
+    method: "POST",
+    url: "/auth/login",
+    headers: { "content-type": "application/json" },
+    payload: JSON.stringify({ email: "nobody@example.com", password: "wrong-password" }),
+  });
+
+  <span class="dim">// ! NOT 413. Which code it is does not matter here -- only that size
+  // ! was not the reason. Asserting 401 would couple this to login's logic.</span>
+  assert.notEqual(res.statusCode, 413);
+});</code></pre>
+</li>
+
+<li><b>Watch the first one fail before it passes.</b> Temporarily change <code>bodyLimit</code> to <code>1024 * 1024</code> in <code>src/app.ts</code>, run <code>npm test</code>, see <code># fail 1</code>. Put it back. <span class="dim">Same move as lesson 29 &mdash; a test you never saw red is a test you are guessing about.</span></li>
+
+<li><b>Expect 177.</b> <code>npm test</code> &mdash; 174 before (172, plus the two <code>csp-report</code> tests you wrote after lesson 65), three new here.</li>
+
+<li><b>Update lesson 65&rsquo;s honesty box in your own notes:</b> the CSRF hook answers <code>204</code>. Measured, both origins.</li>
+
+<li><b>Deploy the two missing pieces</b> &mdash; commit <code>render.yaml</code>, and in the same push rename <code>Content-Security-Policy-Report-Only</code> to <code>Content-Security-Policy</code> <em>only after</em> you have walked every screen with the console open. Do the walk first. It is the whole reason Report-Only exists.</li>
+</ol>
+
+<h2>Practice &mdash; three</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why did reading <code>csrf.ts</code> not answer lesson 65&rsquo;s question?</p>
+<button>The hook runs before the route is known</button>
+<button>The answer is a fact about the browser</button>
+<p class="why" hidden><code>allowWrite()</code> is a pure function and entirely readable &mdash; you can see exactly what it does with every combination of <code>Sec-Fetch-Site</code> and <code>Origin</code>. What you cannot see is which combination a browser actually sends when it posts a violation report, and that is the input the whole answer depends on. No amount of staring at your own code produces a fact about Chrome. That needed a probe: a page, a policy, a violation and a header dump.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why is the same live asset hash a useful result?</p>
+<button>It proves the bundle bytes never changed</button>
+<button>It proves the deploy never actually ran</button>
+<p class="why" hidden>A content hash is derived from the file&rsquo;s bytes, so an unchanged name is positive evidence that the JavaScript is identical &mdash; which is the exact guarantee lesson 64 leaned on when it put <code>immutable</code> on <code>/assets/*</code>. The site did redeploy: <code>last-modified</code> is today and lesson 63&rsquo;s headers are live. Headers are served by the platform and are not part of the bundle, so they changed while the filename did not. That is the system working, not a failure.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why not add a <code>Sec-Fetch-Dest</code> exception today?</p>
+<button>It guards against a change nobody made</button>
+<button>A page can set that header itself</button>
+<p class="why" hidden>The header is genuinely unforgeable &mdash; the <code>Sec-</code> prefix makes it a forbidden header name, exactly like <code>Sec-Fetch-Site</code>, so page JavaScript cannot set it. The reason to skip it is different: reports already pass, measured both ways, and the exception only earns its keep if somebody later trims <code>ALLOWED_ORIGINS</code>. Adding a second way to be allowed through the CSRF gate, in a function untouched for fifty lessons, to insure against an edit nobody has made, is cost now for a benefit that may never arrive. Write the finding down instead.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  B["Chrome<br/><i>a blocked image</i>"] -->|"POST, Sec-Fetch-Site: same-origin<br/>Sec-Fetch-Dest: report"| L["rate limit"]
+  L --> C{"allowWrite()"}
+  C -->|"line 2:<br/>site === same-origin"| OK["204 &#10003;<br/><i>MEASURED</i>"]
+  B2["Chrome<br/><i>cross-site report-uri</i>"] -->|"Sec-Fetch-Site: cross-site<br/>Origin: the PAGE"| C
+  C -->|"line 4:<br/>ALLOWED_ORIGINS includes it"| OK
+  OK -.->|"only if someone<br/>trims the list"| BAD["403, silently<br/><i>the risk you wrote down</i>"]
+</pre>
+<figcaption>Both paths through <code>allowWrite()</code> that a CSP report can take, and the one edit that would close them. The dotted arrow is the finding, not a bug.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div><b>a <code>Sec-Fetch-Dest: report</code> branch in <code>csrf.ts</code></b> <span class="dim">argued above. Reports pass today, measured. Revisit when <code>ALLOWED_ORIGINS</code> stops being a one-line answer.</span></div>
+<div><b>a smaller <code>bodyLimit</code> on the report route</b> <span class="dim">a per-parser limit is available and 64&nbsp;KB is already tight for a body whose biggest field you truncate to 200 characters. It is one option object away if the log ever fills with huge reports &mdash; but nothing has posted a big one yet, so there is no number to pick from.</span></div>
+<div><b>turning the CSP on for you</b> <span class="dim">that push belongs after the console walk, and the walk is the part that only you can do. A policy switched from Report-Only by someone who has not opened every screen is a policy that breaks a screen.</span></div>
+<div><b>a test for the CSRF-vs-report path</b> <span class="dim">tempting, and it would assert the wrong thing. The interesting half of that behaviour lives in Chrome, and a test in your suite can only replay headers you typed yourself &mdash; which is a test of your typing.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Sec-Fetch-Dest">MDN &mdash; <code>Sec-Fetch-Dest</code></a>. Skim the value table and find <code>report</code>. Knowing this list exists is worth more than today&rsquo;s decision not to use it.</p>
+<p><b>Then this:</b> the five steps above. The one that matters most is step 2 &mdash; break <code>bodyLimit</code> on purpose and watch the new test go red before you trust it.</p>
+<p><b>Reference card:</b> <a href="../reference/api-security-basics.html">API security basics</a> &mdash; the public-route row from lesson 65 can now be written with a measured answer in it.</p>
+<p><b>Ask the community:</b> <a href="https://community.render.com/">Render Community</a> &mdash; &ldquo;are a previous deploy&rsquo;s hashed assets still served after a new static-site deploy?&rdquo; is still open, and is a better question than a guess.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0065-the-route-nobody-is-logged-into.html">&larr; Back</a>
+<a href="./0067-the-door-marked-exit.html">Next &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

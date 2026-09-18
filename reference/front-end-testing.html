@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference &mdash; Front-end testing</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<p class="kicker">Reference &middot; Tooling</p>
+<h1>Front-end testing</h1>
+<p class="lede">The setup, the three queries that matter, and the defaults that are right for an app and wrong for a test. From lesson <a href="../lessons/0068-the-first-test-that-needed-a-browser.html">68</a>. For the server suite see <a href="./testing.html">Tests in this project</a>.</p>
+
+<h2>The two rules</h2>
+<p class="takeaway">Test what a user can do; never test what a component knows.</p>
+<p class="takeaway">A test you have never seen fail is not a test. It is a file.</p>
+
+<h2>What runs what</h2>
+<div class="scroll">
+<table>
+<tr><th>Command</th><th>Where</th><th>What it covers</th></tr>
+<tr><td><code>npm test</code></td><td><code>web/</code></td><td><code>vitest run</code> &mdash; both the old <code>.test.ts</code> function tests and the new <code>.test.tsx</code> component tests.</td></tr>
+<tr><td><code>npx vitest</code></td><td><code>web/</code></td><td>Watch mode, while writing one.</td></tr>
+<tr><td><code>npx tsc -b</code></td><td><code>web/</code></td><td>Not a test. It cannot see a wrong value, only a wrong type.</td></tr>
+</table>
+</div>
+
+<h2>The four packages, and why each</h2>
+<div class="scroll">
+<table>
+<tr><th>Package</th><th>Unpacked</th><th>Why this one</th></tr>
+<tr><td><code>vitest</code></td><td>2.7&nbsp;MB</td><td>It <b>is</b> Vite, so it reads <code>vite.config.ts</code> &mdash; the <code>@/</code> alias and the JSX transform are already correct. Jest would need a second copy of both, kept in agreement forever.</td></tr>
+<tr><td><code>jsdom</code></td><td>7.2&nbsp;MB</td><td>A DOM in Node. Smaller <em>and</em> more complete than happy-dom (8.6&nbsp;MB), which trades edge-case correctness for speed you do not need at three tests.</td></tr>
+<tr><td><code>@testing-library/react</code></td><td>0.34&nbsp;MB</td><td><code>render()</code>, plus queries that find elements the way a screen reader does.</td></tr>
+<tr><td><code>@testing-library/user-event</code></td><td>0.44&nbsp;MB</td><td>Typing and clicking as real event sequences, not as direct value assignment.</td></tr>
+</table>
+</div>
+<p>Direct packages only. <b>Measured on this machine: 254M &rarr; 297M, +43&nbsp;MB and 69 packages</b> &mdash; four times the direct total, because every one of them has its own tree. Always run <code>du -sh node_modules</code> before and after rather than adding up registry numbers.</p>
+<h2>One runner, and the conversion it cost</h2>
+<p><code>node:test</code> <b>cannot be bundled into the jsdom environment</b>: <code>Cannot bundle Node.js built-in "node:test"</code>, and the file does not load at all. Converting a pure-function file is mechanical &mdash; drop the <code>node:test</code> and <code>node:assert</code> imports (<code>test</code> and <code>expect</code> are globals) and rewrite the assertions. To keep the old reading style, six wrappers at the top of the file:</p>
+<pre><code>const expectSame = (a: unknown, b: unknown) =&gt; expect(a).toBe(b);
+const expectNotSame = (a: unknown, b: unknown) =&gt; expect(a).not.toBe(b);
+const expectEqual = (a: unknown, b: unknown) =&gt; expect(a).toEqual(b);
+const expectNotEqual = (a: unknown, b: unknown) =&gt; expect(a).not.toEqual(b);
+const expectThrows = (fn: () =&gt; unknown) =&gt; expect(fn).toThrow();
+const expectTruthy = (v: unknown) =&gt; expect(v).toBeTruthy();</code></pre>
+<p><b>Swap the runner before writing new tests</b>, so this failure arrives with one suspect instead of four.</p>
+
+<h2>The setup, in three files</h2>
+<pre><code><span class="dim">// vite.config.ts &mdash; one new key, nothing else moves</span>
+test: {
+  environment: "jsdom",
+  setupFiles: ["./src/test-setup.ts"],
+  globals: true,
+}</code></pre>
+<pre><code><span class="dim">// src/test-setup.ts</span>
+import { afterEach } from "vitest";
+import { cleanup } from "@testing-library/react";
+<span class="dim">// ! or the second test finds two forms and every getBy* throws
+// ! "found multiple elements" -- an error naming the wrong problem.</span>
+afterEach(cleanup);</code></pre>
+<pre><code><span class="dim">// package.json</span>
+"test": "vitest run"</code></pre>
+
+<h2>Which query? In this order</h2>
+<div class="scroll">
+<table>
+<tr><th>Reach for</th><th>When</th><th>Why it is first</th></tr>
+<tr><td><code>getByRole(role, {name})</code></td><td>buttons, links, headings, inputs</td><td>Fails exactly when a user could not find it. Accessibility becomes load-bearing.</td></tr>
+<tr><td><code>getByLabelText</code></td><td>form fields</td><td>Proves the label is actually associated with the input, which is the bug you would otherwise ship.</td></tr>
+<tr><td><code>getByText</code></td><td>messages, static copy</td><td>Fine for content, useless for controls.</td></tr>
+<tr><td><code>getByTestId</code></td><td><b>last resort</b></td><td>A handle added for the test&rsquo;s convenience. Survives changes that leave a real person stranded.</td></tr>
+</table>
+</div>
+<p><b><code>findBy*</code> not <code>getBy*</code> for anything async.</b> <code>getBy*</code> throws immediately; <code>findBy*</code> retries until it appears or times out. A message that arrives after a request needs <code>findBy</code>.</p>
+
+<h2>Defaults that are right for an app and wrong for a test</h2>
+<div class="scroll">
+<table>
+<tr><th>Default</th><th>What it does in a test</th><th>Set</th></tr>
+<tr><td>React Query retries</td><td>A failing request is retried with backoff, so the test waits and then reports a <b>timeout</b> &mdash; naming the wrong problem.</td><td><code>retry: false</code> on queries <em>and</em> mutations</td></tr>
+<tr><td>A shared <code>QueryClient</code></td><td>Cache from test one leaks into test two.</td><td>A fresh <code>new QueryClient()</code> per render</td></tr>
+<tr><td>No cleanup</td><td>Mounted trees pile up in the document.</td><td><code>afterEach(cleanup)</code></td></tr>
+<tr><td>Live spies</td><td>A mock from one test answers in the next.</td><td><code>afterEach(() =&gt; vi.restoreAllMocks())</code></td></tr>
+</table>
+</div>
+
+<h2>The wrapper every component test needs</h2>
+<pre><code>function renderForm() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    &lt;QueryClientProvider client={client}&gt;
+      &lt;MemoryRouter&gt;&lt;NewTeamForm /&gt;&lt;/MemoryRouter&gt;
+    &lt;/QueryClientProvider&gt;,
+  );
+}</code></pre>
+<p><b>A component is a thing in a tree, not a thing with arguments.</b> That is the whole reason a component test feels heavier than a function test, and the wrapper is where the weight lives.</p>
+
+<h2>Faking the network</h2>
+<pre><code>const spy = vi.spyOn(api, "post").mockResolvedValue({ data: { id: 7, name: "Design" } });
+<span class="dim">// a refusal:</span>
+vi.spyOn(api, "post").mockRejectedValue({
+  isAxiosError: true,
+  response: { status: 403, data: { error: "forbidden" } },
+});</code></pre>
+<p>One line, on the axios instance. <b>MSW</b> (a mock HTTP server) is the heavier, more faithful answer &mdash; reach for it when several requests interact, not for one <code>POST</code>.</p>
+
+<h2>Assert the value, not the call</h2>
+<pre><code>expect(spy).toHaveBeenCalledTimes(1);          <span class="dim">// weak: passes with untrimmed input</span>
+expect(spy.mock.calls[0]?.[1]).toEqual({ name: "Design" });  <span class="dim">// the real assertion</span></code></pre>
+<p>Same family as the server rule from lesson 20: <em>a sort test whose two orders agree cannot fail</em>. Pick fixtures and assertions that can tell the right answer from the nearly-right one.</p>
+
+<h2>Not installed, and why</h2>
+<div class="scroll">
+<table>
+<tr><th>Tool</th><th>Why not yet</th></tr>
+<tr><td><code>@testing-library/jest-dom</code></td><td>Nicer matchers and nothing else. Without it you get <code>Error: Invalid Chai property: toBeDisabled</code>; read <code>.disabled</code> and <code>.value</code> off the element instead. Write the ugly version first; let the annoyance be the measurement.</td></tr>
+<tr><td>MSW</td><td>One spy covers one request. Add it when requests interact.</td></tr>
+<tr><td>Playwright</td><td>A different question &mdash; does the whole system work, browser to Postgres. A browser download and a CI story, for one user and a working app.</td></tr>
+<tr><td>Coverage</td><td>A number that rises while tests stay shallow. At three tests you know what they cover.</td></tr>
+</table>
+</div>
+
+<nav class="nav">
+<a href="../lessons/index.html">All lessons</a>
+<a href="./testing.html">Server tests &rarr;</a>
+<a href="./react-query-rules.html">React Query rules &rarr;</a>
+</nav>
+
+</body>
+</html>

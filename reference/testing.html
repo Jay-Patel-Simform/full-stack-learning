@@ -26,7 +26,7 @@
 <tr><td><code>npx tsc -b</code></td><td><code>web/</code></td><td>Same job on the front end.</td></tr>
 </table>
 </div>
-<p>No Jest, no Vitest, no test framework installed. The runner is <code>node:test</code>, which ships inside Node, driven through <code>tsx</code> so it reads TypeScript. Decided in lesson 6 and still the right call. Vitest arrives only when the first <em>component</em> test needs a DOM.</p>
+<p>On the <b>server</b>: no Jest, no Vitest, no test framework installed. The runner is <code>node:test</code>, which ships inside Node, driven through <code>tsx</code> so it reads TypeScript. Decided in lesson 6 and still the right call. On the <b>front end</b> that changed in lesson 68 &mdash; the first component test needed a DOM, a JSX transform and the <code>@/</code> alias, so <code>web/</code> now runs Vitest. See <a href="./front-end-testing.html">Front-end testing</a>.</p>
 
 <h2>Globs: quote them, always</h2>
 <pre><code>"test": "LOG_LEVEL=silent tsx --test <b>\"</b>src/**/*.test.ts<b>\"</b>"</code></pre>

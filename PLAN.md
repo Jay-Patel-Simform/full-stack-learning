@@ -41,8 +41,16 @@ Roles: Owner, Admin, Member, Viewer. Scoped per team.
 - `Project` is built (routes, store, schema, migration `20260902115602_project`).
   Nothing in `can()` is unwired now. Week 5-6 is CLOSED. No lesson file for
   it — Jay wrote it himself and did not want it re-taught (see record 0012).
-- Still open: an owner cannot leave their own team (equal rank). Decide if
-  that needs a `member:leave` action.
+- ~~Still open: an owner cannot leave their own team (equal rank).~~ **DONE in
+  lesson 67.** The note undersold it: *nobody* could leave, for two unrelated
+  reasons (VIEWER/MEMBER lack `member:remove`; ADMIN/OWNER tie on the rank
+  rule). Fixed with a new `member:leave` action granted at VIEWER and passed
+  **no target**, so the rank rule stays out. Last owner is a **409**, not a
+  403. `SELECT ... FOR UPDATE` on the team row, because a transaction is
+  atomicity and not isolation. Record 0070. Expect 179.
+- Opened by lesson 67, deliberately not built: **transferring ownership**. An
+  owner handing out their own rank is a second exception to the rank rule and
+  deserves its own lesson.
 
 ## Week 7-8 — API security
 - Rate limit login. (Done, lesson 11. `npm test` = 66. See record 0012.)
@@ -721,8 +729,13 @@ Roles: Owner, Admin, Member, Viewer. Scoped per team.
 - Idempotency keys for `POST`, planted in lesson 26.
 - Soft delete + real undo (`deletedAt`), planted in lesson 28.
 - Front-end tests: **started in lesson 32** with `node --test` and 0 new
-  dependencies. Vitest + Testing Library is still open, deferred on purpose —
-  install it for the first *component* test (a click, a rendered row).
+  dependencies. ~~Vitest + Testing Library still open~~ **DONE in lesson 68** —
+  the first component test, and the **first new dependency in 68 lessons**.
+  Four packages: `vitest`, `jsdom`, `@testing-library/react`,
+  `@testing-library/user-event`. Vitest over Jest for one reason: `vite.config.ts`
+  already holds the `@/` alias and the React plugin, and Vitest *is* Vite.
+  jsdom over happy-dom on size (7.2 vs 8.6 MB) and completeness. Record 0071.
+  New card `reference/front-end-testing.html`. Three tests on `NewTeamForm`.
 - ~~The lesson-26 trim fix~~ **DONE in lesson 33**, with two tests.
 
 ## Week 15-16 — Docker + deploy (moved here by Jay, 2026-09-10)
@@ -1054,3 +1067,88 @@ Roles: Owner, Admin, Member, Viewer. Scoped per team.
 - Zero application code. Suite stays **172**. Streak: **no new dependency, 64
   lessons.**
 - Next: `report-uri` (needs the public route), or the invite mailer.
+
+### Lesson 65 — the route nobody is logged into (2026-09-18)
+- The `report-uri` item, carried open since lesson 62, finally built. Opens
+  with the **argument against building it** — one user, console open, buys
+  little. Built for the shape: the invite-accept route is the same problem.
+- Rule to remember: **a route with no session loses three defences, not one** —
+  auth, the rate-limit bucket, and the audit row's actor.
+- Rule to remember: **strictness is for input you control.** First place the
+  strict-zod house rule inverts, and the lesson says why out loud.
+- Two traps read from his own `app.ts`: the **415** on
+  `application/csp-report`, and the audit hook writing a row per violation.
+  Loop makes him reproduce the 415 before fixing it.
+- `204`, three `slice()`d log fields, malformed JSON dropped not 400'd.
+- Unmeasured and said so: whether the CSRF hook 403s a report POST.
+- Zero application code by me. Suite stays **172**. Streak: **no new
+  dependency, 65 lessons.**
+- Next: the invite mailer (week 13–14, overdue), or retry lesson 64's asset
+  check on the next `web/` rebuild.
+
+### Lessons 66–68 — the backlog, cleared (2026-09-18)
+Jay asked for five leftovers in one go. They came out as three lessons, because
+three of the five were **questions, not features**.
+
+- **Lesson 66 — the answers you already had.** Measurement, not building.
+  - `bodyLimit: 64 * 1024` has been in `src/app.ts` since commit `5f73323`.
+    **Asked for four times because it never appeared in a lesson.** Fastify's
+    own default is 1 MiB, so the line is deliberate and sixteen times tighter.
+  - Measured (his Fastify, lesson 65's parser copied exactly): json 80 KB →
+    **413**, `application/csp-report` 80 KB → **413**. A custom content-type
+    parser **inherits** the app `bodyLimit`. Nothing to add.
+  - Lesson 65's honesty box closed **with a real headless Chrome**: a CSP
+    report carries `Sec-Fetch-Site: same-origin`, `Sec-Fetch-Dest: report`,
+    `application/csp-report`, the page's `Origin`, **no cookie**. `allowWrite()`
+    returns on line 2 → **204, not 403**. Cross-site variant also passes, via
+    `ALLOWED_ORIGINS` — right answer, not quite the right reason. A
+    `Sec-Fetch-Dest` branch was **argued and declined**; finding written down.
+  - Lesson 64's asset check **could not run**: the live bundle is still
+    `index-D1HMFRqX.js`. Headers changed, bytes did not, so the hash did not.
+  - Found while looking: the live CSP is still **`Report-Only`** and carries
+    **no `report-uri`** — `render.yaml` is ahead of the deploy. Those ship in
+    one push, after the console walk.
+  - Two tests (`body-limit.test.ts`) with a deliberate red step. Expect **174**.
+  - Rule: **an item can be open on a list and closed in the code.** Third time
+    in six lessons that reading first changed the lesson (61, 63, 66).
+- **Lesson 67 — the door marked exit.** See record 0070 and the week 5–6 entry
+  above. Expect **179**.
+- **Lesson 68 — the first test that needed a browser.** See record 0071 and the
+  week 13–14 entry above. **The no-new-dependency streak ends at 67**, with the
+  argument made out loud rather than quietly.
+
+**All of lessons 66–68 is now WRITTEN AND PASSING** — he asked for the code as
+well as the lessons, on 2026-09-18, so the lesson-only rule was suspended for
+this batch. Measured, not predicted:
+- `server`: **182 pass**, `tsc --noEmit` clean. (174 before, +3 body-limit,
+  +5 team-leave.)
+- `web`: **12 pass** under Vitest, `tsc -b` clean, `npm run build` succeeds.
+- Both deliberate red steps were actually run: widening `bodyLimit` to 1 MiB
+  gives `# fail 2`, and `name === ""` in place of `name.trim() === ""` gives
+  one failing component test. Restored both.
+
+**Two of lesson 68's predictions were wrong and are corrected in the lesson:**
+1. The old `node:test` files do **not** survive the runner swap —
+   `Cannot bundle Node.js built-in "node:test"` under the jsdom environment.
+   Both were converted to `expect` with six one-line wrappers.
+2. `tsc -b` failed on the new test file until `"vitest/globals"` joined
+   `types` in `tsconfig.app.json`. **`npm test` passing does not mean
+   `npm run build` passes** — two different checkers, and Render runs the
+   second one. This was one edit away from a red deploy.
+
+Also updated because the code made them false: `web/CLAUDE.md` (it said there
+is no test script) and `reference/testing.html` (it said no Vitest installed).
+
+**Owed by him, in order:** the console walk, then drop `-Report-Only`; commit
+and deploy `render.yaml` (it carries the `report-uri`); then run lesson 64's
+curl against the saved old asset URL — **the check is armed**, because lesson
+67's `Action`-union edit moved the bundle hash from `index-D1HMFRqX.js` to
+`index-zI3W9Tc3.js` (the CSS hash did not move, which is the mechanism proving
+itself). One command:
+`curl -sS -o /dev/null -w '%{http_code}\n' https://tracker-web-mxol.onrender.com/assets/index-D1HMFRqX.js`
+
+**Next lesson (69): the invite mailer.** Week 13–14, overdue since lesson 18,
+and the route it needs is the shape lesson 65 was built to rehearse. It also
+drags in email verification, register's design-A `202`, and forgot-password,
+which does not exist at all. **Ownership transfer** (opened by 67) is the
+strongest alternative if he wants a shorter one first.

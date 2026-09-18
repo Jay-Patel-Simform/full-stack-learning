@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 67 &mdash; The door marked exit</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 67 &middot; Week 13&ndash;14 &middot; RBAC</p>
+<h1>The door marked exit</h1>
+
+<p class="lede">Since lesson 9, your permission gate has had one rule about people: <b>you may only act on somebody strictly below you</b>. It closed a real hole &mdash; an Admin cannot remove the Owner. It also closed a door you never meant to close. Right now, in your API, <b>nobody can leave a team</b>. Not the owner, not an admin, not a viewer. The plan has carried this as &ldquo;an owner cannot leave their own team&rdquo; for forty lessons, and the note undersold it.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>The bug is wider than the note says.</strong> Every role is trapped, for two different reasons, and the reasons need two different fixes.</li>
+<li><strong>Leaving is not removing.</strong> Same row deleted, different act &mdash; so it is a different action, not a special case bolted onto <code>member:remove</code>.</li>
+<li><strong>The rank rule has nothing to say about you and yourself.</strong> Comparing your rank to your own rank is always a tie, and a tie is a no. So the leave action carries <em>no target</em>.</li>
+<li><strong>One real refusal survives:</strong> the last owner may not leave, or the team is orphaned forever. That is a <code>409</code>, not a <code>403</code>.</li>
+<li><strong>A transaction will not save you here.</strong> Two owners leaving at the same instant both see two owners. You need a lock, and it is one line.</li>
+</ul>
+</div>
+
+<h2>First, reproduce it</h2>
+
+<p>Before any code, prove the trap. You have a team where you are <code>OWNER</code>. Try to remove yourself with the route that already exists:</p>
+
+<pre><code>DELETE /teams/1/members/<i>&lt;your own user id&gt;</i>
+&rarr; 403 {"error":"forbidden"}</code></pre>
+
+<p>Now walk the gate and see why. <code>requirePermission("member:remove", targetMember)</code> loads the victim&rsquo;s role &mdash; the victim is you &mdash; and calls:</p>
+
+<pre><code><span class="dim">// can.ts, the rank rule</span>
+const target = resource?.targetRole;
+if (target !== undefined && rank(role) &lt;= rank(target)) return false;
+<span class="dim">//                          rank(OWNER) &lt;= rank(OWNER)  &rarr;  3 &lt;= 3  &rarr;  true  &rarr;  no</span></code></pre>
+
+<p><b>Equal rank is a no.</b> That was deliberate in lesson 9 &mdash; it stops two admins from deleting each other &mdash; and you are always exactly equal to yourself. So the owner is stuck.</p>
+
+<h3>Now check the other three roles, because the note only mentioned one</h3>
+
+<div class="scroll"><table>
+<tr><th>Role</th><th>Has <code>member:remove</code>?</th><th>Rank rule vs self</th><th>Can leave today?</th></tr>
+<tr><td><code>VIEWER</code></td><td><b>No</b></td><td>never reached</td><td><code>403</code></td></tr>
+<tr><td><code>MEMBER</code></td><td><b>No</b></td><td>never reached</td><td><code>403</code></td></tr>
+<tr><td><code>ADMIN</code></td><td>Yes</td><td>tie &rarr; refused</td><td><code>403</code></td></tr>
+<tr><td><code>OWNER</code></td><td>Yes</td><td>tie &rarr; refused</td><td><code>403</code></td></tr>
+</table></div>
+
+<p>Four roles, one outcome, <b>two unrelated causes</b>. Viewers and members are refused by the permissions table &mdash; they were never given the power to remove anybody. Admins and owners get past the table and are refused by the rank rule. A fix aimed at the rank rule alone would free two roles and leave two trapped.</p>
+
+<p class="takeaway"><b>When one symptom has two causes, you have two bugs.</b> The 403 looked like a single problem because your gate deliberately answers the same way for every kind of no &mdash; lesson 8&rsquo;s &ldquo;one reply for two different noes&rdquo;. Good for attackers, quietly misleading for you. The reply is identical; the reasoning is not.</p>
+
+<h2>The wrong fix, and why it is wrong</h2>
+
+<p>The tempting patch is three lines in the gate:</p>
+
+<pre><code><span class="dim">// ! do not do this</span>
+if (request.params.userId === request.userId) return; <span class="dim">// leaving is fine</span></code></pre>
+
+<p>It works. It is also the shape lesson 9 taught you to distrust: a special case in the gate that the permissions table knows nothing about. Three specific costs:</p>
+
+<ul>
+<li><b><code>can()</code> stops being the answer.</b> Today one function decides everything, and you can read it in sixty seconds. After this patch, &ldquo;may I?&rdquo; is answered by <code>can()</code> <em>plus</em> a condition in a hook, and the second one is invisible from the first.</li>
+<li><b>The front end cannot see it.</b> <code>allowedActions(role)</code> is where the UI gets its list of buttons. An exception living in the gate is not in that list, so the page can never learn that Leave exists.</li>
+<li><b>It cannot express the one refusal you actually want.</b> The last owner still must not leave. A blanket &ldquo;self is fine&rdquo; has nowhere to put that.</li>
+</ul>
+
+<p class="takeaway"><b>Leaving and removing are different acts that happen to delete the same row.</b> Removing is something you do <em>to</em> someone; leaving is something you do about yourself, and nobody outranks themselves. Count the nouns: <code>member:remove</code> has an actor and a target, <code>member:leave</code> has only an actor. Different number of nouns, different action.</p>
+
+<h2>The fix, in four files</h2>
+
+<h3>1. <code>server/src/auth/can.ts</code> &mdash; a new action, and who has it</h3>
+
+<p>Two edits. Add the action to the list, and grant it at the bottom rung so every role inherits it:</p>
+
+<pre><code>export const ACTIONS = [
+  "task:read",
+  "project:read",
+  "task:create",
+  "task:update",
+  "task:delete",
+  "project:create",
+  "project:delete",
+  "member:invite",
+  "member:remove",
+  <b>"member:leave",</b>
+  "team:delete",
+  "audit:read",
+] as const;</code></pre>
+
+<pre><code><span class="dim">// ! member:leave sits on VIEWER, the lowest rung, so all four roles inherit
+// ! it. Nobody is held in a team against their will -- not even the owner,
+// ! who is stopped by the state of the team below, never by their role.</span>
+const VIEWER = ["task:read", "project:read", <b>"member:leave"</b>] as const;</code></pre>
+
+<p>That is the whole permissions change. Note what you did <em>not</em> touch: the rank rule. It stays exactly as lesson 9 wrote it, because it is still right about what it is for.</p>
+
+<h3>2. <code>server/src/store/team.store.ts</code> &mdash; the leave itself</h3>
+
+<p>Append this. Read the comments twice; the lock is the part that is easy to leave out and impossible to notice.</p>
+
+<pre><code><span class="dim">// * Leaving is its own store function, not removeMember with a different
+// * argument, because it has a rule removeMember does not: the last OWNER
+// * may not go. A team with no owner cannot be deleted, cannot invite, and
+// * cannot be handed to anybody -- it is stuck for good.</span>
+export async function leaveTeam(
+  teamId: number,
+  userId: number,
+): Promise&lt;"gone" | "missing" | "last-owner"&gt; {
+  return prisma.$transaction(async (tx) =&gt; {
+    <span class="dim">// ! Lock the team row FIRST, before reading anything about it.
+    // !
+    // ! A transaction alone does NOT fix the race here. Postgres runs at READ
+    // ! COMMITTED by default, so two owners leaving at the same instant would
+    // ! BOTH count two owners, BOTH delete a different row, and both commit.
+    // ! Atomicity is not isolation. This SELECT ... FOR UPDATE makes the
+    // ! second leave wait for the first to finish, so it counts one and is
+    // ! refused. A tagged template, so teamId travels as a parameter --
+    // ! lesson 20's one mechanism.</span>
+    await tx.$queryRaw`SELECT id FROM "Team" WHERE id = ${teamId} FOR UPDATE`;
+
+    const me = await tx.membership.findUnique({
+      where: { teamId_userId: { teamId, userId } },
+      select: { role: true },
+    });
+    <span class="dim">// ? Not a member. The gate already answered 403 for strangers, so this
+    // ? is the narrow case of a membership deleted since the gate looked.</span>
+    if (!me) return "missing";
+
+    if (me.role === "OWNER") {
+      const owners = await tx.membership.count({ where: { teamId, role: "OWNER" } });
+      <span class="dim">// ! &lt; 2, not === 1. Same answer today; survives the day a bug leaves
+      // ! a team with zero owners, where === 1 would happily delete nothing.</span>
+      if (owners &lt; 2) return "last-owner";
+    }
+
+    await tx.membership.delete({ where: { teamId_userId: { teamId, userId } } });
+    return "gone";
+  });
+}</code></pre>
+
+<p>Three return values, not a boolean. The route has three different things to say, and a <code>boolean</code> would force the route to re-derive which one &mdash; a second read, racing the first.</p>
+
+<h3>3. <code>server/src/routes/teams.route.ts</code> &mdash; the route</h3>
+
+<p>Add this <b>above</b> the <code>DELETE /teams/:teamId/members/:userId</code> route. It does not have to be above &mdash; see the box after &mdash; but read order should match the specific-before-general rule you are relying on.</p>
+
+<pre><code><span class="dim">// * Leaving, not removing. No Load function and therefore no targetRole, so
+// * the rank rule stays out of it entirely -- which is correct: you do not
+// * outrank yourself, and you never will. The only refusal left is about the
+// * TEAM's state, and that lives in the store, not in the gate.</span>
+app.delete(
+  "/teams/:teamId/members/me",
+  {
+    schema: {
+      params: TeamParams,
+      response: { 204: z.null(), 403: ErrorReply, 404: ErrorReply, 409: ErrorReply },
+    },
+    preHandler: requirePermission("member:leave"),
+  },
+  async (request, reply) =&gt; {
+    const { teamId } = request.params as TeamParamsInput;
+    const result = await leaveTeam(teamId, request.userId!);
+
+    <span class="dim">// ! 409, not 403. 403 means "you may not" -- and you may, that is what
+    // ! member:leave says. What refuses you is the state of the world: you
+    // ! are the only owner. Change the world and the same request succeeds.
+    // ! A 403 tells the user to find an admin; a 409 tells them what to do.</span>
+    if (result === "last-owner")
+      return reply
+        .code(409)
+        .send({ error: "the last owner cannot leave; make somebody else an owner first" });
+
+    if (result === "missing") return reply.code(404).send({ error: "not found" });
+
+    return reply.code(204).send();
+  },
+);</code></pre>
+
+<p>And add <code>leaveTeam</code> to the import from <code>../store/team.store.ts</code>.</p>
+
+<div class="box">
+<div class="cap">the routing question you should have asked</div>
+<div class="body">
+<div><b>Does <code>/members/me</code> collide with <code>/members/:userId</code>?</b> <span class="dim">No, and not because of the order you wrote them in. Fastify&rsquo;s router is a radix tree and a <b>static segment always beats a parametric one</b>, whichever was registered first. So <code>/members/me</code> wins, always. Worth knowing precisely, because the same fact means <code>/members/me</code> can never be reached by a user whose id is literally the string <code>me</code> &mdash; and <code>MemberParams</code> would have answered <code>400</code> for that anyway, since <code>z.coerce.number()</code> makes <code>"me"</code> a <code>NaN</code>. Two independent reasons this is safe; check them yourself with one curl each.</span></div>
+</div>
+</div>
+
+<h3>4. The front end gets it for free</h3>
+
+<p>Nothing to write. <code>GET /teams</code> already sends <code>can: allowedActions(role)</code>, and <code>TeamMembership</code> types <code>can</code> as <code>z.array(z.enum(ACTIONS))</code> &mdash; so the moment <code>member:leave</code> joins <code>ACTIONS</code>, every team row in the API response carries it. One table, two consumers, still.</p>
+
+<p class="takeaway"><b>The hint is approximate, for the third time.</b> <code>can</code> will contain <code>member:leave</code> for a sole owner, and their leave request will still be a <code>409</code>. Lesson 9 said it (the rank rule needs a target a flat list has not got); lesson 23 said it about a flat list of teams; here it is a fact about the <em>team</em> rather than about ranks. Same shape every time: the list says what to offer, the server says what happens.</p>
+
+<h2>The tests</h2>
+
+<p>New file <code>server/src/routes/team-leave.test.ts</code>. Five cases, and the third is the one worth writing slowly.</p>
+
+<pre><code><span class="dim">// 1.</span> a VIEWER leaves                         &rarr; 204, and GET /teams no longer lists it
+<span class="dim">// 2.</span> leaving twice                            &rarr; 204 then 403
+<span class="dim">//    ^ NOT 404. After the first leave you are not a member, so the GATE
+<span class="dim">//      refuses you before the store is reached. Assert the 403 and say why
+<span class="dim">//      in a comment, or the next reader will "fix" it.</span>
+<span class="dim">// 3.</span> the sole OWNER leaves                    &rarr; 409, and they are STILL a member
+<span class="dim">// 4.</span> one of two OWNERs leaves                 &rarr; 204
+<span class="dim">// 5.</span> a stranger leaves a team they are not in &rarr; 403</code></pre>
+
+<p>Case 3 needs two assertions, not one. The status code proves the request was refused; only a second read proves the row survived. A store function that answered <code>409</code> <em>and</em> deleted the row would pass a one-assertion test:</p>
+
+<pre><code>const res = await app.inject({
+  method: "DELETE",
+  url: `/teams/${teamId}/members/me`,
+  headers: { cookie: ownerCookie },
+});
+assert.equal(res.statusCode, 409);
+
+<span class="dim">// ! the assertion that actually matters: refusing and deleting anyway
+// ! would pass the line above.</span>
+const teams = await app.inject({ method: "GET", url: "/teams", headers: { cookie: ownerCookie } });
+assert.ok(teams.json().some((t: { id: number }) =&gt; t.id === teamId));</code></pre>
+
+<p>Expect <b>182</b>: 177 after lesson 66, five more here. <b>Two existing tests go red on the way</b>, and both are right to &mdash; <code>can.test.ts</code> and <code>team-list.test.ts</code> each hard-code the <code>VIEWER</code> action list, and <code>member:leave</code> now belongs in it. A test that fails because a permission genuinely changed is the test doing its job; update the expectation, never the table.</p>
+
+<h2>Do this now &mdash; thirty minutes</h2>
+
+<ol>
+<li><b>Reproduce the trap first.</b> <code>DELETE /teams/1/members/&lt;your id&gt;</code> and see the <code>403</code>. Then do it as a <code>MEMBER</code> in some team and see the same <code>403</code> for the other reason.</li>
+<li><b>Edit <code>can.ts</code></b> &mdash; two lines. Run <code>npm test</code> and expect <b>two failures</b>: <code>can.test.ts</code> (&ldquo;a viewer can read and nothing else&rdquo;) and <code>team-list.test.ts</code> (&ldquo;a shorter can list&rdquo;). Both assert the exact set of things a <code>VIEWER</code> may do, which is precisely what you just changed. Fix the two expectations before going further.</li>
+<li><b>Add <code>leaveTeam</code></b> to the store, then the route, then the import.</li>
+<li><b>Write the five tests</b>, case 3 with both assertions.</li>
+<li><b>Break the lock on purpose.</b> Delete the <code>SELECT &hellip; FOR UPDATE</code> line and convince yourself the test suite still passes &mdash; it will. Then put it back. <span class="dim">This is the third time a green suite has failed to see a real hole (lesson 29&rsquo;s dead code, lesson 66&rsquo;s untested body limit). A single-threaded test cannot produce a race; you keep the line because you reasoned about it, not because something went red.</span></li>
+<li><b>Decide the owner question out loud</b> and write the answer in <code>PLAN.md</code>: should a sole owner be able to <em>delete</em> the team instead of leaving it? They already can &mdash; <code>team:delete</code> is an OWNER power. So the <code>409</code> message could name that exit too. Your call; it is a wording change, not a code change.</li>
+</ol>
+
+<h2>Practice &mdash; three</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why does <code>member:leave</code> pass no target to <code>can()</code>?</p>
+<button>The target row is deleted before the check</button>
+<button>Nobody outranks themselves, ever</button>
+<p class="why" hidden>The rank rule exists to stop you acting on a peer or a superior, and it does that by refusing whenever your rank is less than or equal to the target&rsquo;s. Against yourself that comparison is a tie by definition, at every role, forever &mdash; so passing a target would make the action permanently impossible. The rule is not wrong; it simply has nothing to say about an act with only one person in it. An action with no target skips the comparison entirely, which is exactly what <code>team:delete</code> already does.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why is the sole owner refused with <code>409</code> and not <code>403</code>?</p>
+<button>Their permission is fine, the state is not</button>
+<button>They are allowed to retry a 409</button>
+<p class="why" hidden><code>403</code> is a statement about the caller: you are not permitted to do this, and doing it again will not help. But a sole owner <em>is</em> permitted to leave &mdash; <code>member:leave</code> sits on <code>VIEWER</code>, so every role has it. What refuses them is a fact about the team: removing the last owner would strand it. That is a conflict with the current state, which is what <code>409</code> means, and it is actionable &mdash; promote somebody and the identical request succeeds. Status codes are for the caller to act on, so this one tells them what to change.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why will a transaction alone not stop two owners leaving together?</p>
+<button>Prisma runs the count outside the transaction</button>
+<button>Read committed lets both see two owners</button>
+<p class="why" hidden>A transaction guarantees that your statements land together or not at all &mdash; atomicity. It does not, at Postgres&rsquo;s default <code>READ COMMITTED</code> level, guarantee that two concurrent transactions cannot make decisions on the same stale reading. Both owners count two, both conclude they are not the last, both delete a different row, and both commit happily. The team ends with zero owners and no error anywhere. <code>SELECT &hellip; FOR UPDATE</code> on the team row is what serialises them: the second transaction blocks until the first commits, then counts one and is refused.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  subgraph before["today: everybody is trapped"]
+    V1["VIEWER / MEMBER"] --> T1["table: no member:remove"] --> F1["403"]
+    A1["ADMIN / OWNER"] --> T2["rank rule: tie with self"] --> F1
+  end
+  subgraph after["after: one action, one real refusal"]
+    ANY["any role"] --> T3["table: member:leave<br/><i>granted at VIEWER</i>"] --> T4{"sole OWNER?"}
+    T4 -->|no| OK["204, row deleted"]
+    T4 -->|yes| C["409<br/><i>promote somebody first</i>"]
+  end
+</pre>
+<figcaption>Two causes collapsing into one action. The rank rule is untouched &mdash; the new action simply never hands it a target to compare against.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div><b>a Leave button on the page</b> <span class="dim">the API is the lesson, and <code>can</code> already carries <code>member:leave</code> to the front end, so the button is a small piece of work with no new ideas in it. It also wants a confirm step, and lesson 28 argued that a confirm dialog without real undo is a speed bump &mdash; so it belongs with soft delete.</span></div>
+<div><b>transferring ownership</b> <span class="dim">the obvious partner to this, and a bigger lesson than it looks: promoting somebody to <code>OWNER</code> means an owner handing out their own rank, which the rank rule forbids. That is a second deliberate exception and deserves its own hour, not a footnote in this one.</span></div>
+<div><b>deleting the team when the last owner leaves</b> <span class="dim">the tempting &ldquo;helpful&rdquo; version, and it is a data-loss trap: one click on Leave silently destroys every task the team ever had. Owners already have <code>team:delete</code> if that is what they want. Make the destructive thing deliberate &mdash; the same rule as lesson 3.</span></div>
+<div><b>reusing <code>removeMember</code> with an <code>isSelf</code> flag</b> <span class="dim">a boolean parameter that changes which rules apply is two functions wearing one name. The store function is nine lines; a second one is cheaper than a flag you have to remember the meaning of.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://www.postgresql.org/docs/current/transaction-iso.html">PostgreSQL &mdash; Transaction Isolation</a>. Read only &sect;13.2.1, Read Committed, and find the sentence about a statement seeing a snapshot taken at statement start. That sentence is why the lock line exists.</p>
+<p><b>Then this:</b> the six steps above. Step 1 before any editing &mdash; see both <code>403</code>s with your own eyes, so you know you fixed two things.</p>
+<p><b>Reference card:</b> <a href="../reference/rbac-permissions.html">The RBAC table</a> &mdash; add the <code>member:leave</code> row, and mark it as the first action with no target since <code>team:delete</code>.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/ExperiencedDevs/">r/ExperiencedDevs</a> &mdash; &ldquo;should the last owner of a resource be blocked from leaving, or should leaving transfer ownership automatically?&rdquo; is a design question with real opinions behind it, and worth hearing three.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0066-the-answers-you-already-had.html">&larr; Back</a>
+<a href="./0068-the-first-test-that-needed-a-browser.html">Next &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

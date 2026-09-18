@@ -1632,3 +1632,54 @@ move?* No answer -> do not write it.
 - Next: he has an actual deploy to run. Do not teach a new thing until the
   `diff` comes back — the whole point of 63 is not building on an unverified
   result.
+
+## Lessons 66–68 notes (2026-09-18)
+- He asked for **five leftovers in one message**. Three were questions, not
+  features. Splitting them as *measure / build / spend* gave three lessons with
+  one idea each instead of one unreadable lesson with five.
+- **The streak is over: 67 lessons, then four packages at once.** It held for so
+  long because it was a habit of asking the cost, not a rule. Do not start a new
+  streak count — the useful thing to keep saying is the *reasoning*, and the
+  house move is now: name the thing you cannot do, price the alternatives, say
+  the number, then spend.
+- **Say the number** worked again: 7.2 MB jsdom vs 8.6 MB happy-dom decided it,
+  plus "measure `du -sh node_modules` yourself, these are direct packages only".
+  He is resource-conscious; a registry number beats an adjective every time.
+- **Probes are cheap and keep winning.** A throwaway page + headless Chrome
+  answered a question that had been carried as "unmeasured" for a lesson. Two
+  probes, ten minutes, and the lesson got a header dump instead of a hedge.
+  Reach for a probe before writing another honesty box.
+- **Reading the repo first changed the lesson for the third time in six**
+  (61 audit page, 63 live headers, 66 bodyLimit). This is now a reliable
+  pre-lesson step, not luck. Do it every time before writing a word.
+- The **deliberate red step** is in all three lessons now (widen `bodyLimit`,
+  delete the `FOR UPDATE`, break `name.trim()`). He gets a green suite that
+  cannot see a real hole three times running — worth naming as a pattern the
+  next time it appears rather than explaining it again from scratch.
+- New word pair, twelfth: **atomicity vs isolation**. The test it gives: *could
+  two of these run at once and both read the same "before"?*
+- **Weak arguments named as weak, fifth and sixth time** (the `Sec-Fetch-Dest`
+  branch, `@testing-library/jest-dom`). This is the house move now. Keep it.
+- Watch for: he has **four things owed** before lesson 69, and two of them are
+  deploys. If they slip to a third lesson, ask directly — same rule that closed
+  the Blueprint-adoption question in 63.
+
+## After he asked for the code too (2026-09-18)
+- He answered "right code also" to the offer, so **the lesson-only rule was
+  suspended for lessons 66–68** and I wrote every file. It is a per-batch
+  suspension, not a repeal: **go back to lesson-only for 69 unless he says
+  otherwise**, and ask rather than assume.
+- Writing it caught **four things the lessons got wrong**, which is the real
+  argument for running your own homework: the two existing `web/` tests do not
+  survive the Vitest swap (`node:test` cannot be bundled into jsdom); `tsc -b`
+  needs `vitest/globals` in `types` or the **Render build breaks while
+  `npm test` is green**; `toBeDisabled()` throws `Invalid Chai property`; and
+  two existing server tests hard-code the VIEWER action list.
+- **`npm test` green and `npm run build` red is a real state.** Worth a lesson
+  of its own one day — two checkers, and the deploy runs the one you did not.
+- The measured install cost was **+43 MB / 69 packages**, four times the sum of
+  the four direct packages. Keep telling him to run `du`, never to add up
+  registry numbers.
+- Predicted test counts in lessons were wrong (174/179 vs the real 177/182)
+  because his own `csp-report.test.ts` had landed since. **Run the suite before
+  writing the number into a lesson.**

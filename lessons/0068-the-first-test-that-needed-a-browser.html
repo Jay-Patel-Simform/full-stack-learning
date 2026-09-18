@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 68 &mdash; The first test that needed a browser</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 68 &middot; Week 13&ndash;14 &middot; Testing</p>
+<h1>The first test that needed a browser</h1>
+
+<p class="lede">Sixty-seven lessons, no new dependency. Today that ends, and it should end loudly &mdash; because the streak was never a rule, it was a habit of asking &ldquo;what would this cost me?&rdquo; before typing <code>npm install</code>. So: here is the question you cannot test today, here is what it costs to be able to, and here is the argument for paying.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>The streak breaks, on purpose.</strong> Four packages. The reasoning is the lesson; the packages are the consequence.</li>
+<li><strong>Your two front-end tests test functions, not screens.</strong> Nothing has ever proved that a button is disabled, because nothing has ever rendered one.</li>
+<li><strong>Vitest, not Jest, and the reason is one file.</strong> <code>vite.config.ts</code> already holds your <code>@/</code> alias and your React plugin. Vitest reads it. Jest would need a second copy of both.</li>
+<li><strong>Test what a user can do</strong> &mdash; type, click, read &mdash; never what the component holds in <code>useState</code>.</li>
+<li><strong>The first test is the trim rule from lesson 26</strong>, which has been &ldquo;still open&rdquo; and is about to become enforced.</li>
+</ul>
+</div>
+
+<h2>The question you cannot answer today</h2>
+
+<p>Here is a line from <code>web/src/features/teams/new-team-form.tsx</code>:</p>
+
+<pre><code>&lt;Button type="submit" disabled={createTeam.isPending || <b>name.trim() === ""</b>}&gt;</code></pre>
+
+<p>Three real decisions live in that one attribute. A box holding only spaces must not submit. A submit already in flight must not start a second one &mdash; lesson 26&rsquo;s double-click guard, measured as ids 360 and 361. And the moment the request settles, the button must come back.</p>
+
+<p>Now look at what your suite can see. <code>web/package.json</code>:</p>
+
+<pre><code>"test": "node --test \"src/**/*.test.ts\""</code></pre>
+
+<p>Note the extension: <code>.test.ts</code>. Your two existing tests &mdash; <code>edit-pages.test.ts</code> and <code>audit-row.test.ts</code> &mdash; test exported functions with inputs and outputs, and they are good tests. But <code>node --test</code> has no DOM to render into, no JSX transform to read <code>&lt;Button&gt;</code> with, and no idea what <code>@/components/ui/button</code> resolves to. Three separate walls, and any one of them is fatal.</p>
+
+<p class="takeaway"><b>You have been testing the parts of the front end that are not the front end.</b> Pure functions were the cheap half, and taking the cheap half first was right. The half left over is the half users touch.</p>
+
+<h2>The argument for spending, in order</h2>
+
+<h3>Could you avoid it? Honestly, no</h3>
+
+<p>The lazy instinct says: shim a DOM yourself, keep <code>node --test</code>, streak intact. Follow that through. You would need a DOM implementation, a JSX transform, module resolution for <code>@/</code>, CSS imports turned into no-ops, and <code>import.meta.env</code> defined. Five pieces of machinery, each a real dependency or a hand-written hack, assembled by you and debugged by you.</p>
+
+<p class="takeaway"><b>Take the library when the problem has no decisions left in it.</b> Lesson 12&rsquo;s rule, fourth outing. &ldquo;Render a React component in Node and click a button&rdquo; is a solved problem with no interesting choices inside it. Writing it yourself buys a worse version and a maintenance job.</p>
+
+<h3>Vitest or Jest? One file decides it</h3>
+
+<p>This is not a taste question. Look at what your app already depends on to run at all:</p>
+
+<pre><code><span class="dim">// web/vite.config.ts, already on disk</span>
+plugins: [react(), tailwindcss()],
+resolve: { alias: { "@": path.resolve(import.meta.dirname, "./src") } },</code></pre>
+
+<p>Every component you would test imports <code>@/components/ui/button</code> and is written in JSX. Vitest <b>uses that file</b> &mdash; same resolver, same transform, same aliases, because it is Vite. Jest would need its own module mapper and its own transform, configured to agree with Vite&rsquo;s, forever. Two configs that must not drift is a bug generator; lesson 29 was an entire lesson about exactly that shape.</p>
+
+<h3>jsdom or happy-dom?</h3>
+
+<div class="scroll"><table>
+<tr><th>Package</th><th>Version</th><th>Unpacked</th><th>Note</th></tr>
+<tr><td><code>vitest</code></td><td>5.0.1</td><td>2.7&nbsp;MB</td><td>the runner</td></tr>
+<tr><td><code>jsdom</code></td><td>30.1.0</td><td>7.2&nbsp;MB</td><td>a DOM in Node</td></tr>
+<tr><td><code>happy-dom</code></td><td>20.14.5</td><td>8.6&nbsp;MB</td><td>the faster alternative &mdash; and larger</td></tr>
+<tr><td><code>@testing-library/react</code></td><td>16.3.3</td><td>0.34&nbsp;MB</td><td>render + query by what a user sees</td></tr>
+<tr><td><code>@testing-library/user-event</code></td><td>14.6.7</td><td>0.44&nbsp;MB</td><td>typing and clicking, as events</td></tr>
+</table></div>
+
+<p><b>jsdom.</b> It is smaller than happy-dom and it is the more complete implementation &mdash; happy-dom trades correctness at the edges for speed, and you have three tests, so there is no speed to win. Your laptop is resource-tight and these are direct packages only; the installed tree will be bigger. Measure it yourself, honestly:</p>
+
+<pre><code>cd web
+du -sh node_modules            <span class="dim"># write this number down</span>
+npm i -D vitest jsdom @testing-library/react @testing-library/user-event
+du -sh node_modules            <span class="dim"># and this one</span></code></pre>
+
+<p><b>Measured on this machine:</b> <code>254M</code> &rarr; <code>297M</code>. <b>+43&nbsp;MB and 69 packages</b> &mdash; four times the 10.7&nbsp;MB the table above adds up to, because those are direct packages and every one of them has its own tree. That gap is the reason to run the command rather than trust the registry.</p>
+
+<p class="takeaway"><b>Say the number before you decide, not after.</b> A cost you did not measure is a cost you will discover at the worst moment. This is the fourth time a dependency has been weighed out loud in this course, and the second time the bigger-but-faster option lost because the speed bought nothing at your scale.</p>
+
+<h2>The setup &mdash; three small edits</h2>
+
+<h3>1. <code>web/vite.config.ts</code></h3>
+
+<p>One new key. Nothing else in the file moves:</p>
+
+<pre><code><span class="dim">/// &lt;reference types="vitest/config" /&gt;</span>
+import path from "node:path";
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+import tailwindcss from "@tailwindcss/vite";
+
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+  resolve: { alias: { "@": path.resolve(import.meta.dirname, "./src") } },
+  server: { port: 5173, strictPort: true },
+  <b>// The tests reuse everything above -- the alias and the JSX transform are
+  // the whole reason this runner and not another one.
+  test: {
+    // A DOM, only in tests. The app still builds for a real browser.
+    environment: "jsdom",
+    setupFiles: ["./src/test-setup.ts"],
+    // `test`, `expect` and `vi` without importing them in every file.
+    globals: true,
+  },</b>
+});</code></pre>
+
+<h3>2. <code>web/src/test-setup.ts</code> &mdash; new file, four lines</h3>
+
+<pre><code>import { afterEach } from "vitest";
+import { cleanup } from "@testing-library/react";
+
+<span class="dim">// ! Unmount between tests, or the second test finds two forms in the document
+// ! and every getBy* throws "found multiple elements". The error names the
+// ! wrong problem, so it costs an hour the first time.</span>
+afterEach(cleanup);</code></pre>
+
+<h3>3. <code>web/package.json</code></h3>
+
+<pre><code>"test": <b>"vitest run"</b>,</code></pre>
+
+<p>One runner, not two. <b>Check it before you believe it:</b> run <code>npm test</code> straight after this edit, <em>before</em> adding a single new test.</p>
+
+<div class="box">
+<div class="cap">it fails here, and this is the correction</div>
+<div class="body">
+<div><b>Your two existing tests do NOT run unchanged.</b> <span class="dim">Measured: both files fail to load, with <code>Cannot bundle Node.js built-in "node:test" imported from src/features/audit/audit-row.test.ts</code>. The jsdom environment is a browser-shaped one, and <code>node:test</code> and <code>node:assert</code> are Node built-ins that cannot be bundled into it. Nine tests, zero of them running.</span></div>
+<div><b>The fix is to convert them, and it is mechanical.</b> <span class="dim">Delete the two <code>node:test</code> / <code>node:assert</code> imports &mdash; <code>test</code> and <code>expect</code> are globals now &mdash; and turn the assertions into <code>expect</code> calls. If you want to keep the original style readable, six one-line wrappers at the top of the file do it: <code>const expectSame = (a: unknown, b: unknown) =&gt; expect(a).toBe(b);</code> and so on for <code>not.toBe</code>, <code>toEqual</code>, <code>not.toEqual</code>, <code>toThrow</code>, <code>toBeTruthy</code>. Then all nine pass.</span></div>
+<div><b>Why this is the right order anyway.</b> <span class="dim">You met this failure with the runner as the only change, which is exactly why the loop says to swap the runner first. Had you written three new tests at the same time, the error would have arrived with four suspects instead of one.</span></div>
+</div>
+</div>
+
+<p class="takeaway"><b>&ldquo;It will just work&rdquo; is a prediction, and this one was wrong.</b> One runner is still the right call &mdash; two runners means two ways to write a test and two commands to remember &mdash; but the price was a fifteen-minute conversion nobody had costed. Write the price down next to the decision, not in your memory of it.</p>
+
+<h2>The test</h2>
+
+<p>New file <code>web/src/features/teams/new-team-form.test.tsx</code>. Note the extension &mdash; <code>.tsx</code>, because it contains JSX.</p>
+
+<pre><code>import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router";
+import { api } from "@/lib/api";
+import { NewTeamForm } from "./new-team-form";
+
+<span class="dim">// * The component needs two providers to exist at all: React Query for the
+// * mutation, a router for useNavigate. This helper is the whole reason a
+// * component test feels heavier than a function test -- a component is a
+// * thing in a tree, not a thing with arguments.</span>
+function renderForm() {
+  const client = new QueryClient({
+    <span class="dim">// ! retry: false, or the 403 test waits for three backed-off retries
+    // ! and then times out. The default is right for an app and wrong for
+    // ! a test, every time.</span>
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  return render(
+    &lt;QueryClientProvider client={client}&gt;
+      &lt;MemoryRouter&gt;
+        &lt;NewTeamForm /&gt;
+      &lt;/MemoryRouter&gt;
+    &lt;/QueryClientProvider&gt;,
+  );
+}
+
+<span class="dim">// ? Spy on the axios instance, not on fetch and not on the module. One line,
+// ? no module mocking, and errorMessage() stays the real one.</span>
+const post = () =&gt; vi.spyOn(api, "post");
+
+afterEach(() =&gt; vi.restoreAllMocks());
+
+test("a name of only spaces cannot be submitted", async () =&gt; {
+  renderForm();
+  const user = userEvent.setup();
+
+  <span class="dim">// ! getByRole, not getByTestId. The test asks the same question a screen
+  // ! reader asks, so it fails if the button stops being a button.</span>
+  const button = screen.getByRole("button", { name: /create team/i });
+  expect(button).toBeDisabled();
+
+  await user.type(screen.getByLabelText(/team name/i), "   ");
+  <span class="dim">// ? the trim rule, finally enforced somewhere. Three spaces is still empty.</span>
+  expect(button).toBeDisabled();
+});
+
+test("a real name submits the trimmed value", async () =&gt; {
+  const spy = post().mockResolvedValue({ data: { id: 7, name: "Design" } });
+  renderForm();
+  const user = userEvent.setup();
+
+  await user.type(screen.getByLabelText(/team name/i), "  Design  ");
+  await user.click(screen.getByRole("button", { name: /create team/i }));
+
+  await waitFor(() =&gt; expect(spy).toHaveBeenCalledTimes(1));
+  <span class="dim">// ! The assertion that matters: "Design", not "  Design  ". Asserting only
+  // ! that a request happened would pass with the spaces still attached.</span>
+  expect(spy.mock.calls[0]?.[1]).toEqual({ name: "Design" });
+});
+
+test("a refused create leaves the typed name on screen", async () =&gt; {
+  post().mockRejectedValue({
+    isAxiosError: true,
+    response: { status: 403, data: { error: "forbidden" } },
+  });
+  renderForm();
+  const user = userEvent.setup();
+
+  const input = screen.getByLabelText(/team name/i);
+  await user.type(input, "Design");
+  await user.click(screen.getByRole("button", { name: /create team/i }));
+
+  <span class="dim">// * Lesson 26's decision, now a test: clear the box in onSuccess, never in
+  // * onSubmit. A 403 that eats the sentence you typed is the rudest thing a
+  // * form can do, and nothing has ever stopped this regressing.</span>
+  await screen.findByText(/could not create team/i);
+  expect(input).toHaveValue("Design");
+});</code></pre>
+
+<div class="box">
+<div class="cap">one thing that will trip you</div>
+<div class="body">
+<div><b><code>toBeDisabled()</code> and <code>toHaveValue()</code> are not Vitest matchers.</b> <span class="dim">Measured, by walking into it: <code>Error: Invalid Chai property: toBeDisabled</code>. They come from <code>@testing-library/jest-dom</code>, a fifth package. You can skip it and write <code>expect((button as HTMLButtonElement).disabled).toBe(true)</code> instead &mdash; uglier, zero install. Try the plain version first and see whether the ugliness bothers you across three tests; if it does, that is a measured reason to add the fifth package rather than a guessed one.</span></div>
+</div>
+</div>
+
+<h2>What not to test, and why it matters more than what to</h2>
+
+<p>The temptation with a new tool is to test everything it can reach. Resist, with a rule:</p>
+
+<p class="takeaway"><b>Test what a user can do; never test what a component knows.</b> &ldquo;<code>name</code> state equals <code>Design</code>&rdquo; is a test of your implementation &mdash; rename the variable and it fails while the app is fine. &ldquo;The button is enabled and the request carried <code>Design</code>&rdquo; is a test of behaviour, and it survives every rewrite that keeps the behaviour.</p>
+
+<p>Which is exactly why every query above is <code>getByRole</code> or <code>getByLabelText</code> rather than a test id. A test that finds the button the way a screen reader finds it fails the day the button stops being reachable &mdash; so your accessibility becomes load-bearing instead of decorative.</p>
+
+<h2>Do this now &mdash; forty minutes</h2>
+
+<ol>
+<li><b><code>du -sh node_modules</code></b> and write the number down. Then install, then measure again. Two numbers, in your own notes.</li>
+<li><b>Switch the runner before writing a test.</b> Edit <code>package.json</code>, run <code>npm test</code>, confirm the two existing tests still pass under Vitest.</li>
+<li><b>Add the config key and <code>test-setup.ts</code>.</b></li>
+<li><b>Write test one only</b>, and run it. One passing component test is the win; the other two are repetition.</li>
+<li><b>Make test one fail on purpose.</b> Change <code>name.trim() === ""</code> to <code>name === ""</code> in the form and re-run. It must go red. <span class="dim">Third time in three lessons: a test you have not watched fail is a rumour.</span></li>
+<li><b>Then tests two and three.</b></li>
+<li><b>Cash in lesson 66&rsquo;s asset check.</b> Lesson 67 changes <code>web/src/features/teams/teams.ts</code> &mdash; the <code>Action</code> union there needs <code>"member:leave"</code> adding, because the front end keeps a type-only copy of that list. <em>That</em> edit changes the bundle, so the next deploy finally produces a new hash. Save the current filename first: <code>curl -sS https://tracker-web-mxol.onrender.com/ | grep -o '/assets/[^"]*\.js'</code></li>
+</ol>
+
+<p><b>Note for step 7:</b> devDependencies and test files do not change the bundle &mdash; nothing imports them. If you deploy after <em>this</em> lesson alone, the hash will still be <code>index-D1HMFRqX.js</code>. The <code>Action</code> union is the edit that moves it.</p>
+
+<h2>Practice &mdash; three</h2>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why Vitest rather than Jest, specifically?</p>
+<button>It reads the Vite config you already have</button>
+<button>It runs tests in parallel worker threads</button>
+<p class="why" hidden>Both runners are parallel and both are fast enough for three tests, so speed decides nothing here. What decides it is <code>vite.config.ts</code>: it already defines the <code>@/</code> alias every component imports through, and the React plugin that turns JSX into JavaScript. Vitest is Vite, so it reads that file and agrees with your app by construction. Jest would need its own module mapper and transform, configured to match, and kept matching forever &mdash; two configs that must not drift, which is the exact shape lesson 29 spent a whole lesson unpicking.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why is <code>retry: false</code> needed in the test QueryClient?</p>
+<button>Retries would send the request twice</button>
+<button>The failing test would wait, then time out</button>
+<p class="why" hidden>React Query retries failed requests with a growing delay, which is good behaviour for a real app on a flaky network. In the 403 test the request is meant to fail, so the default turns a one-line assertion into three backed-off attempts, and the test sits there until the runner gives up &mdash; reported as a timeout, which names the wrong problem entirely. A default that is right for an app is frequently wrong for a test, and this is the cheapest example of it you will meet.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why query by role and label instead of a test id?</p>
+<button>It fails when a user could not find it</button>
+<button>Test ids are stripped from the build</button>
+<p class="why" hidden>A test id is an extra handle attached for the test&rsquo;s convenience, and it survives changes that would leave a real person stranded &mdash; a button that lost its accessible name, an input whose label stopped being associated with it. <code>getByRole</code> and <code>getByLabelText</code> find elements the same way assistive technology does, so the test fails precisely when the interface has become unusable. Accessibility stops being a separate checklist item and becomes something your suite is already checking.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  subgraph old["before: node --test"]
+    F["exported function"] --> A1["assert on the return"]
+    C1["a component"] -.->|"no DOM<br/>no JSX<br/>no @/ alias"| X["cannot reach"]
+  end
+  subgraph new["after: vitest + jsdom"]
+    VC["vite.config.ts<br/><i>alias + react plugin</i>"] --> V["vitest"]
+    V --> J["jsdom<br/><i>a document</i>"]
+    J --> RTL["render()"]
+    RTL --> U["user types, user clicks"]
+    U --> A2["assert on what<br/>a person can see"]
+  end
+</pre>
+<figcaption>The config file is the arrow that matters. Every other runner would need its own copy of it.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div><b>MSW, a mock HTTP server</b> <span class="dim">the &ldquo;proper&rdquo; answer, and a sixth package plus a handlers file plus a server lifecycle. <code>vi.spyOn(api, "post")</code> is one line and tests the same behaviour. Reach for MSW when you are testing several requests interacting &mdash; not for one POST.</span></div>
+<div><b><code>@testing-library/jest-dom</code></b> <span class="dim">nicer matchers and nothing else. Argued above: try it ugly first, and let the annoyance be the measurement.</span></div>
+<div><b>tests for the other five screens</b> <span class="dim">one form, three tests, done. A suite that arrives all at once is a suite nobody read. Add the next test the next time you change a screen, not today.</span></div>
+<div><b>end-to-end tests (Playwright)</b> <span class="dim">a genuinely different tool answering a genuinely different question &mdash; does the whole system work, browser to Postgres. It is also a browser download and a CI story, and you have one user and a working app. The day a deploy breaks something these tests could not see is the day to start that conversation.</span></div>
+<div><b>coverage reporting</b> <span class="dim">a number that goes up while the tests stay shallow. You have three tests; you know exactly what they cover.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://testing-library.com/docs/queries/about/#priority">Testing Library &mdash; which query should I use?</a> One page, a ranked list. It is the whole philosophy in a table, and it is why the tests above look the way they do.</p>
+<p><b>Then this:</b> the seven steps. Step 5 above all &mdash; break the trim and watch it go red, so you know the test is testing.</p>
+<p><b>Reference card:</b> <a href="../reference/front-end-testing.html">Front-end testing</a> &mdash; worth starting one: the setup, the three query priorities, and <code>retry: false</code>. You will need all three again and remember none of them.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/reactjs/">r/reactjs</a> &mdash; &ldquo;at what point did component tests start paying for themselves in your project?&rdquo; You are at the start of that curve and the answers will be more useful now than later.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0067-the-door-marked-exit.html">&larr; Back</a>
+<a href="../reference/front-end-testing.html">Front-end testing &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>
