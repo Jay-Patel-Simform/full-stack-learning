@@ -9,8 +9,8 @@ services:
     region: singapore
     # same as the dashboard's "Root Directory"
     rootDir: server
-    # ! from the REPO ROOT, not from rootDir
-    dockerfilePath: ./server/Dockerfile
+    # ! relative to rootDir, not to the repo root
+    dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     envVars:
       # decisions: safe to read, and worth reading
@@ -40,7 +40,7 @@ services:
     runtime: static
     rootDir: web
     buildCommand: npm ci && npm run build
-    staticPublishPath: ./web/dist
+    staticPublishPath: ./dist
     envVars:
       # lesson 57. A build-time value, and public by design
       - key: VITE_API_URL

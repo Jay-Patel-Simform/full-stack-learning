@@ -21,7 +21,7 @@
 <li><strong>A Blueprint (<em>Render&rsquo;s word for a <code>render.yaml</code> file</em>) is your deploy written as code.</strong> Same two services, same settings, but readable in a diff.</li>
 <li><strong>Secrets go in with <code>sync: false</code>.</strong> That means &ldquo;this service has this variable, and Render asks me for the value&rdquo;. The name is in git, the value never is.</li>
 <li><strong>Non-secrets go in with <code>value:</code>.</strong> <code>NODE_ENV</code>, <code>TRUST_PROXY</code>, <code>LOG_LEVEL</code> are decisions, not secrets. A decision belongs in the file, where a reviewer can argue with it.</li>
-<li><strong><code>rootDir</code> moves the service; it does not move the paths.</strong> <code>dockerfilePath</code> is still written from the repo root. This is the line people get wrong.</li>
+<li><strong><code>rootDir</code> moves the service <em>and</em> the paths.</strong> Once you set it, <code>dockerfilePath</code> and <code>staticPublishPath</code> are read from inside it. This is the line people get wrong.</li>
 <li><strong>You get a checker.</strong> <code>render blueprints validate</code> reads the file and tells you what is wrong, before any deploy. That is today&rsquo;s feedback loop.</li>
 </ul>
 </div>
@@ -51,8 +51,8 @@ services:
     region: oregon
     <span class="dim"># same as the dashboard's "Root Directory"</span>
     rootDir: server
-    <span class="dim"># ! from the REPO ROOT, not from rootDir</span>
-    dockerfilePath: ./server/Dockerfile
+    <span class="dim"># ! relative to rootDir, not to the repo root</span>
+    dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     envVars:
       <span class="dim"># decisions: safe to read, and worth reading</span>
@@ -82,7 +82,7 @@ services:
     runtime: static
     rootDir: web
     buildCommand: npm ci &amp;&amp; npm run build
-    staticPublishPath: ./web/dist
+    staticPublishPath: ./dist
     envVars:
       <span class="dim"># lesson 57. A build-time value, and public by design</span>
       - key: VITE_API_URL
@@ -105,7 +105,7 @@ services:
 
 <p><b>1. <code>sync: false</code> is not &ldquo;do not deploy this&rdquo;.</b> It means: this service needs a variable with this name, and Render must ask a human for the value. The dashboard prompts you once, stores it, and never writes it back to the file. So the file records the <em>shape</em> of the environment &mdash; nine variables, these names &mdash; while the values stay where values belong. A reviewer can see that <code>APP_DATABASE_URL</code> is required without seeing your Neon password.</p>
 
-<p><b>2. <code>rootDir</code> moves the service, not the paths.</b> <code>rootDir: server</code> is what the dashboard called Root Directory. But <code>dockerfilePath</code> and <code>staticPublishPath</code> are described by Render&rsquo;s own schema as <em>relative to the repo root</em> &mdash; so they keep the <code>server/</code> and <code>web/</code> prefix that <code>rootDir</code> looks like it already removed. Two fields, two different starting points, in one service block. This is the most common wrong guess in a first Blueprint, and the validator below catches it in one second.</p>
+<p><b>2. <code>rootDir</code> moves the starting point for everything else.</b> <code>rootDir: server</code> is what the dashboard called Root Directory, and once it is set the other paths in that block are read from inside it: <code>./Dockerfile</code>, not <code>./server/Dockerfile</code>. Keep the prefix and the build fails with <code>lstat /opt/render/project/src/server/server: no such file or directory</code> &mdash; the doubled <code>server/server</code> in that message is the whole diagnosis. The static site says it differently, <code>Publish directory ./web/dist does not exist!</code>, and means the same thing. Note that the schema&rsquo;s own wording says &ldquo;relative to the repo root&rdquo;; the deploy says otherwise, and the deploy is the authority. This is the most common wrong guess in a first Blueprint &mdash; and the validator does <em>not</em> catch it, because both spellings are valid YAML.</p>
 
 <p><b>3. <code>PORT</code> is still not here</b>, for the same reason it was not in the dashboard: Render sets it. Your <code>config.ts</code> defaults it to 3000 and Render overrides that. A value you write down that the platform will overwrite is a lie in a file, and one day you will read it and believe it.</p>
 
@@ -119,7 +119,7 @@ render workspace set        <span class="dim"># pick it from the list; stored fo
 <p>Skip that second one and you get <code>no workspace specified and no default workspace set</code> &mdash; which reads like a file problem and is not. In a script or CI there is no list to pick from, so pass it and the key explicitly:</p>
 <pre><code>export RENDER_API_KEY=rnd_&hellip;
 render blueprints validate --workspace tea-&hellip;   <span class="dim"># id from: render workspace list -o json</span></code></pre>
-<p>Then it answers with the errors, or with a plan &mdash; the service names it found and <code>"valid": true</code>. Break a line on purpose and run it again &mdash; change <code>runtime: docker</code> to <code>runtime: dokcer</code>, or drop the <code>web/</code> from <code>staticPublishPath</code> &mdash; so you learn what its complaints look like while you are not in a hurry. <b>This is the loop: edit, validate, edit.</b> No deploy, no waiting, no money.</p>
+<p>Then it answers with the errors, or with a plan &mdash; the service names it found and <code>"valid": true</code>. Break a line on purpose and run it again &mdash; change <code>runtime: docker</code> to <code>runtime: dokcer</code>, or delete the <code>type:</code> line from a service &mdash; so you learn what its complaints look like while you are not in a hurry. <b>This is the loop: edit, validate, edit.</b> No deploy, no waiting, no money.</p>
 <p>The same schema works in your editor. The comment on the first line of the file (<code>yaml-language-server: $schema=&hellip;</code>) is read by the YAML extension in VS Code, and you get completion and red squiggles as you type. A checker you get for free before you run anything is always worth the one line it costs.</p>
 
 <h2>Practice &mdash; three</h2>
@@ -131,11 +131,11 @@ render blueprints validate --workspace tea-&hellip;   <span class="dim"># id fro
 <p class="why" hidden>It records that the service needs a variable with that name, and tells Render to ask you for the value in the dashboard instead of reading one from the file. Nothing is encrypted and nothing is hidden &mdash; the value is simply never written down here. That is why <code>DATABASE_URL</code> can be in a public repo as a name and stay a secret as a value.</p>
 </div>
 
-<div class="quiz" data-answer="0">
+<div class="quiz" data-answer="1">
 <p class="q">With <code>rootDir: server</code>, what is <code>dockerfilePath</code> relative to?</p>
 <button>The repo root, so server/Dockerfile</button>
 <button>The rootDir, so just Dockerfile</button>
-<p class="why" hidden>Render&rsquo;s schema says <code>dockerfilePath</code> is &ldquo;relative to the repo root&rdquo;, and <code>rootDir</code> does not change that. So the <code>server/</code> stays. <code>rootDir</code> decides where the service lives and what the build context is; it does not rewrite the other paths in the same block. Two fields in one service, two starting points.</p>
+<p class="why" hidden><code>rootDir</code> is the starting point for the build, and the paths in that block are read from inside it. Write <code>./server/Dockerfile</code> and Render looks for <code>server/server/Dockerfile</code> &mdash; the error says exactly that, <code>lstat &hellip;/server/server: no such file or directory</code>. When a doubled directory name shows up in a path error, you prefixed something that was already prefixed.</p>
 </div>
 
 <div class="quiz" data-answer="1">
