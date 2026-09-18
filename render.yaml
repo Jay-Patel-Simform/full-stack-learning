@@ -2,11 +2,11 @@
 services:
   # ---------- the API: the Dockerfile from lesson 52 ----------
   - type: web
-    name: full-stack-learning-mmty
+    name: full-stack-learning
     runtime: docker
     plan: free
     # the region you picked in lesson 56
-    region: oregon
+    region: singapore
     # same as the dashboard's "Root Directory"
     rootDir: server
     # ! from the REPO ROOT, not from rootDir
@@ -36,7 +36,7 @@ services:
 
   # ---------- the page: the static site from lesson 57 ----------
   - type: web
-    name: tracker-web-mxol
+    name: tracker-web
     runtime: static
     rootDir: web
     buildCommand: npm ci && npm run build
