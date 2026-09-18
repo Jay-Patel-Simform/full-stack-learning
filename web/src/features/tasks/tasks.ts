@@ -38,7 +38,9 @@ export function useTasks(teamId: number, filter: TaskFilter) {
     queryFn: async ({ pageParam }) =>
       (
         await api.get<TaskPage>(`/teams/${teamId}/tasks`, {
-          params: { sort: "id", dir: "asc", cursor: pageParam, ...filter },
+          // Newest first. Ascending put a just-created task on the LAST page
+          // of hundreds, so adding one looked like nothing happened.
+          params: { sort: "id", dir: "desc", cursor: pageParam, ...filter },
         })
       ).data,
     // ? No cursor on the first request. Absent means "start at the beginning",

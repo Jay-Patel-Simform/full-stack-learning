@@ -68,3 +68,18 @@ export function useInviteProbe(teamId: number, userId: number) {
     },
   });
 }
+
+/**
+ * The team the URL is pointing at, found in the list you already have. There
+ * is no `GET /teams/:id` request here on purpose: `useTeams` answers from your
+ * own membership rows, so a team missing from that list is a team you are not
+ * in — which is the same answer the API would give.
+ */
+export function useTeam(teamId: string | undefined) {
+  const { data: teams, isPending, error } = useTeams();
+  return {
+    team: teams?.find((t) => String(t.id) === teamId),
+    isPending,
+    error,
+  };
+}

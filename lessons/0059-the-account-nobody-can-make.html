@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 59 &mdash; The account nobody can make</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 59 &middot; Week 15&ndash;16 &middot; Front end + auth</p>
+<h1>The account nobody can make</h1>
+
+<p class="lede">Your deployed page has a <b>sign-in</b> form. It has no <b>sign-up</b> form. <code>POST /auth/register</code> has worked since lesson 5, and no browser has ever called it. Today you build the page that does. The trap is one line: <b>register replies with a user, but it does not set a cookie.</b> Believe the reply and the whole app thinks it is signed in when it is not.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>Two replies look the same, and only one carries a session.</strong> Login answers <code>200</code> + <code>set-cookie</code>. Register answers <code>201</code> and <em>no cookie</em>. Both bodies are <code>{id, email}</code>.</li>
+<li><strong>So never write the register reply into the session cache.</strong> <code>useLogin</code> does that on purpose. <code>useRegister</code> must not, or <code>useSession()</code> says &ldquo;in&rdquo; while every next request gets <code>401</code>.</li>
+<li><strong>The fix is to chain, not to trust.</strong> Register succeeds &rarr; call login with the same two fields. The cookie comes from the second call, which is the only call that makes one.</li>
+<li><strong>Your API already hides the interesting failures.</strong> <code>409</code> means the email is taken; <code>429</code> means it was asked too often. The form shows both, in the API&rsquo;s own words.</li>
+<li><strong>One new route, one new component, one new hook.</strong> No server change. No new dependency, 59 lessons.</li>
+</ul>
+</div>
+
+<h2>Look at the route you are calling</h2>
+<p>This is already in <code>server/src/routes/auth.route.ts</code>. Read the last line of the handler.</p>
+<pre><code>const user = await createUser(email, await hashPassword(password));
+if (!user) {
+  throttleFail(email);
+  return reply.code(409).send({ error: "email already registered" });
+}
+return reply.code(201).send(user);   <span class="dim">&larr; no reply.header("set-cookie", ...)</span></code></pre>
+<p>Now the same place in <code>/auth/login</code>:</p>
+<pre><code>const session = await createSession(user.id);
+reply.header("set-cookie", sessionCookie(session.id, session.expiresAt));
+return reply.code(200).send(toPublic(user));</code></pre>
+<p class="takeaway"><b>A reply that names a user is not a reply that logs one in.</b> The session lives in the cookie, never in the body. Ask &ldquo;did this response set a cookie?&rdquo; before you ever write a user into the cache.</p>
+
+<h2>Build it &mdash; the hook</h2>
+<p>New file, <code>web/src/features/auth/register.ts</code>:</p>
+<pre><code>import { useMutation } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+import { useLogin } from "@/features/auth/session";
+import type { User } from "@/features/auth/session";
+
+/**
+ * Two calls, one button. Register makes the row; login makes the session.
+ * ! Nothing here touches SESSION_KEY. useLogin's own onSuccess seeds it,
+ * ! and it is allowed to, because ITS reply carried the cookie.
+ */
+export function useRegister() {
+  const login = useLogin();
+
+  return useMutation({
+    mutationFn: async (credentials: { email: string; password: string }) =&gt; {
+      await api.post&lt;User&gt;("/auth/register", credentials);   <span class="dim">// 201, no cookie</span>
+      return login.mutateAsync(credentials);                 <span class="dim">// 200, cookie</span>
+    },
+  });
+}</code></pre>
+<p><code>mutateAsync</code>, not <code>mutate</code>: <code>mutate</code> returns nothing and swallows the error, so a failed second call would look like a successful signup. <code>mutateAsync</code> returns a promise, so a rejection travels up and the form shows it.</p>
+
+<h2>Build it &mdash; the form</h2>
+<p>New file, <code>web/src/features/auth/register-form.tsx</code>. It is <code>login-form.tsx</code> with four words changed, so copy that file and edit it:</p>
+<pre><code><span class="dim">// ...same imports, but:</span>
+import { Link } from "react-router";
+import { useRegister } from "@/features/auth/register";
+
+export function RegisterForm() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const register = useRegister();
+
+  function onSubmit(event: React.FormEvent&lt;HTMLFormElement&gt;) {
+    event.preventDefault();
+    register.mutate({ email, password });
+  }
+  <span class="dim">// ...CardTitle "Create an account", button "Create account"</span>
+  <span class="dim">// ...the password Input gains two attributes:</span>
+        &lt;Input id="password" type="password"
+          autoComplete="<b>new-password</b>"     <span class="dim">// tells the browser to OFFER one</span>
+          minLength={<b>8</b>}                   <span class="dim">// matches Register in auth.schema.ts</span>
+          required value={password} onChange={(e) =&gt; setPassword(e.target.value)} /&gt;
+  <span class="dim">// ...and under the button:</span>
+        &lt;p className="text-muted-foreground text-sm"&gt;
+          Already have an account? &lt;Link to="/login"&gt;Sign in&lt;/Link&gt;
+        &lt;/p&gt;</code></pre>
+<p><code>minLength={8}</code> is a <b>hint, not a gate</b> &mdash; lesson 23&rsquo;s rule, and it still holds. The real wall is <code>z.string().min(8)</code> in <code>server/src/schemas/auth.schema.ts</code>. The attribute exists so the person is told before the round trip, not so the server can relax.</p>
+
+<h2>Build it &mdash; the route</h2>
+<p>In <code>web/src/App.tsx</code>, one line, inside the block that already exists:</p>
+<pre><code>&lt;Route element={&lt;RequireAnon /&gt;}&gt;
+  &lt;Route path="/login" element={&lt;LoginForm /&gt;} /&gt;
+  <b>&lt;Route path="/signup" element={&lt;RegisterForm /&gt;} /&gt;</b>
+&lt;/Route&gt;</code></pre>
+<p>Inside <code>RequireAnon</code>, not beside it. A signed-in person opening <code>/signup</code> is bounced to <code>/</code> by the guard you already wrote in lesson 58&rsquo;s commit &mdash; and when the chained login succeeds, that same guard is what moves them off the form. You navigate nothing by hand.</p>
+
+<h2>What the two failures look like</h2>
+<div class="scroll"><table>
+<thead><tr><th>Status</th><th>The form shows</th><th>Written by</th></tr></thead>
+<tbody>
+<tr><td><code>400</code></td><td>zod&rsquo;s complaint about email or length</td><td><code>Register</code>, <code>auth.schema.ts</code></td></tr>
+<tr><td><code>409</code></td><td>&ldquo;email already registered&rdquo;</td><td>the route, after <code>createUser</code> returned nothing</td></tr>
+<tr><td><code>429</code></td><td>&ldquo;too many attempts, try again later&rdquo;</td><td><code>throttleCheck</code>, lesson 11, keyed on the email</td></tr>
+</tbody>
+</table></div>
+<p>You need no new code for any of these. <code>errorMessage(register.error, "Sign up failed")</code> reads <code>data.error</code> already, and <code>/auth/register</code> is already in <code>CREDENTIAL_ROUTES</code> in <code>web/src/lib/api.ts</code> &mdash; so a <code>401</code> from this form is never mistaken for &ldquo;your session died&rdquo;. Past you left the door open for present you.</p>
+<p class="dim">The <code>429</code> is deliberate and it is not rate limiting for its own sake. <code>409</code> versus <code>201</code> tells a stranger whether an address has an account here. The throttle makes asking that question a thousand times expensive.</p>
+
+<h2>Practice &mdash; three</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why must <code>useRegister</code> not seed the session cache?</p>
+<button>Because the reply body omits the id</button>
+<button>Because the reply carries no session cookie</button>
+<p class="why" hidden>The body is the same shape as login&rsquo;s: <code>{id, email}</code>. What is missing is <code>set-cookie</code>. Write that user into <code>SESSION_KEY</code> and <code>useSession()</code> reports &ldquo;in&rdquo;, the guard lets them to <code>/</code>, and the first real request comes back <code>401</code>.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why <code>mutateAsync</code> rather than <code>mutate</code> for the login step?</p>
+<button>Because mutate hides a failed second call</button>
+<button>Because mutate cannot send two fields</button>
+<p class="why" hidden><code>mutate</code> returns <code>void</code> and handles its error internally. So if register succeeded and login then failed, the outer mutation would still resolve, and the form would report success with nobody signed in. <code>mutateAsync</code> rejects, and the rejection is the outer mutation&rsquo;s error.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">What does <code>minLength={8}</code> on the input actually buy you?</p>
+<button>It guarantees the stored password length</button>
+<button>It tells the person before the round trip</button>
+<p class="why" hidden>Anyone can delete the attribute, or skip the page entirely and post to the API. The guarantee is <code>z.string().min(8)</code> on the server. The attribute is only a faster, kinder way to say the same thing &mdash; a hint, never a gate.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  S["Create account<br/>email + password"] --> R["POST /auth/register"]
+  R -->|"409 / 429 / 400"| E["Alert on the form<br/>the API's own words"]
+  R -->|"<b>201</b> user, <b>no cookie</b>"| L["POST /auth/login<br/>same two fields"]
+  L -->|"200 user + <b>set-cookie</b>"| C["setQueryData(SESSION_KEY, user)<br/>RequireAnon redirects to /"]
+</pre>
+<figcaption>Only the bottom arrow carries a cookie. The tempting shortcut is an arrow straight from the 201 to the cache &mdash; it renders a signed-in page over a signed-out browser.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div>a confirm-password field <span class="dim">a second box that must equal the first catches a typo the browser&rsquo;s own password manager already prevents. Add it if you ever drop <code>autoComplete="new-password"</code>.</span></div>
+<div>email verification <span class="dim">it needs a mailer, and so do invites &mdash; record 0056. Both land together in week 13&ndash;14, and that is where register finally gets its <code>202</code>.</span></div>
+<div>a session on the register route <span class="dim">one server line would remove the chained login. Left alone deliberately: today the lesson is that the two replies differ. Revisit when the mailer arrives, because then <em>nobody</em> should be signed in by signing up.</span></div>
+<div>a team for the new account <span class="dim">a fresh user signs in and sees nothing, because there is still no page that creates a team. That is the next hole, and it is now the oldest one.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://tanstack.com/query/latest/docs/framework/react/guides/mutations">TanStack Query &mdash; Mutations</a>, the &ldquo;Promises&rdquo; and &ldquo;Consecutive mutations&rdquo; parts. Short, and it is exactly the <code>mutate</code> versus <code>mutateAsync</code> choice you just made.</p>
+<p><b>Then this:</b> twenty minutes. (1) Build the three pieces. (2) Sign up with a new address on the deployed URL and confirm the header line says <code>state: in</code> with no manual sign-in. (3) Sign up again with the <em>same</em> address and read the message. (4) Do it six times fast and read the message again &mdash; then tell me which of the two you would rather a stranger saw.</p>
+<p><b>Reference cards:</b> <a href="../reference/react-query-rules.html">React Query, the rules so far</a> and <a href="../reference/sessions-and-cookies.html">Sessions and cookies</a>.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/webdev/">r/webdev</a> &mdash; ask whether signing someone in right after signup is the right default. It is an opinion question, and the answers will disagree usefully.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0058-a-404-has-an-author.html">&larr; Back</a>
+<a href="../reference/sessions-and-cookies.html">Sessions and cookies &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>
