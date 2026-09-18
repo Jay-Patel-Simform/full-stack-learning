@@ -59,12 +59,18 @@ export function useLogout() {
   return useMutation({
     mutationFn: () => api.post("/auth/logout"),
     // The server deleted the row; the cookie left in the jar is now junk.
-    // clear() because every other cached query belonged to the person who
-    // just left. Then write `null` in by hand, or the emptied session query
-    // refetches and the user watches "asking…" on the way out.
+    // Write `null` in by hand first, or the session query refetches and the
+    // user watches "asking…" on the way out. Then drop every other cached
+    // query — they all belonged to the person who just left.
+    // ! Not client.clear(): it evicts the session Query the mounted
+    // ! useSession observer is subscribed to, setQueryData then creates a
+    // ! *different* Query, and the orphaned observer keeps rendering the old
+    // ! user until something forces a remount (a manual refresh).
     onSuccess: () => {
-      client.clear();
       client.setQueryData(SESSION_KEY, null);
+      client.removeQueries({
+        predicate: (query) => query.queryKey[0] !== SESSION_KEY[0],
+      });
     },
   });
 }
