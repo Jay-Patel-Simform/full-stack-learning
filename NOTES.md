@@ -1579,3 +1579,56 @@ move?* No answer -> do not write it.
 - Kept the honest unknown visible in its own box (Blueprint adoption of
   existing services). Same as 57's client-IP note. Do not let a box like this
   go three lessons without resolution — ask him next session.
+
+## 2026-09-18 — lesson 62, the header that says no
+
+- Read `web/dist/index.html`, `package.json` and `grep -rn "style=" src` before
+  writing a single directive. The lesson's best section is the four-row table
+  of "question / where you look / your answer", because it teaches the *method*
+  — a CSP copied from anywhere else is either broken or useless. Reuse that
+  table shape for any policy-shaped config.
+- Told him plainly that `'unsafe-inline'` in `style-src` is a real hole, why he
+  cannot close it (no per-request server on a CDN), and that the dishonest move
+  is to let the same word drift into `script-src`. Naming a compromise beats
+  hiding one; that has been the house style since the audit-log lessons.
+- `Report-Only` as the feedback loop: a way to deploy an untested thing to
+  production where the worst case is a noisy console. Explicitly linked back to
+  lesson 10's expand/backfill/contract — **observable before authoritative** is
+  now a named recurring pattern, third use.
+- Gave him a proof-of-bite (`appendChild` in the console) as well as a check.
+  Cheap loops again, same as 61's break-it-twice.
+- Second honesty box in a row (proxy responses + `path: /*`). Fine, but the
+  lesson-61 Blueprint-adoption box is now two lessons old. **Ask him about it
+  first thing next session** before teaching anything.
+- Next up is Redis, which would be the first new dependency in 62 lessons. That
+  streak is his, so make the lesson argue for it rather than announce it — and
+  be ready for "can Postgres do this". Sometimes it can.
+
+## 2026-09-18 — lesson 63, the headers you already have
+
+- **He reported lesson 62 done; `curl -sI` said otherwise, and I led with it.**
+  Second time in three lessons that a stated fact failed a cheap check — first
+  mine (the audit page), now his. The check is thirty seconds and it is now
+  non-negotiable before building on top of a reported result.
+- The good news is the finding is *generous*: it hands him the lesson-61
+  answer he has been carrying for two sessions, with evidence attached. A
+  correction that closes an older question lands much better than a bare
+  correction. Look for that shape again.
+- Asked all three open questions up front with the question tool rather than
+  burying them in prose. He answered all three, including a pushback. Do this
+  at the start of a session whenever boxes are open — it cost nothing and
+  cleared a two-lesson backlog.
+- **He pushed back on Redis and he was right.** Predicted in the last NOTES
+  entry, which is why the lesson was ready to argue rather than announce. Gave
+  him the real trigger (a second process, not app size) and pointed at Postgres
+  first. He is now doing the dependency triage himself — that was the whole
+  point of the streak. Do not spend it on something he did not ask for.
+- Named `Referrer-Policy` as nearly worthless *while adding it*. Worth
+  repeating: telling him which of two lines actually earns its place is more
+  useful than a checklist where every item looks equal.
+- Design hook flagged small type in `assets/lesson.css` (0.7rem labels, 11pt
+  print). Shared across 63 lessons, so I left it alone rather than restyle the
+  whole course silently. Ask him before touching it.
+- Next: he has an actual deploy to run. Do not teach a new thing until the
+  `diff` comes back — the whole point of 63 is not building on an unverified
+  result.

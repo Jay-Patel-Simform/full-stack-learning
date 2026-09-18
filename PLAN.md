@@ -966,3 +966,73 @@ Roles: Owner, Admin, Member, Viewer. Scoped per team.
   lessons.**
 - Next: the page CSP via the static site's `headers:` key — the hard part is
   the policy, not the YAML. Then Redis for the two in-process counters.
+
+### Lesson 62 — the header that says no (2026-09-18)
+- The `headers:` key lesson 61 left empty. `Content-Security-Policy` on
+  `tasks-web` only — JSON renders nothing, so a policy on the API is theatre.
+- **The policy was derived from four facts checked in this repo, not copied**:
+  built `index.html` has one external module script and no inline one; Geist is
+  self-hosted via `@fontsource`; `style=` attributes are live (`skeleton.tsx`,
+  Radix, `motion`); `VITE_API_URL` is `/api`, same origin since lesson 57.
+  Three of the four made the policy tighter for free — earlier lessons paying
+  back.
+- Rule to remember: **every other defence trusts the browser; CSP instructs
+  it.** Worth nothing alone, and the only thing that helps once something is
+  already on the page.
+- Rule to remember: **`connect-src` is the last line, not a duplicate of
+  `default-src`** — it blocks the exfiltration by code already inside your own
+  bundle.
+- `'unsafe-inline'` accepted in `style-src`, named as a real weakening, with
+  the reason (a CDN-served static file has no per-request server to issue a
+  nonce) and the hard rule: it never migrates into `script-src`.
+- Loop is **`Report-Only` first**, exercise every screen with the console open,
+  then delete `-Report-Only`. Same shape as lesson 10's expand/backfill/
+  contract: observable before authoritative. Plus an `appendChild` proof that
+  it bites.
+- Left out and named: `report-uri` (needs an unauthenticated public route, so
+  its own lesson), a style nonce, the other security headers (check `curl -sI`
+  for what Render already sends before adding — a doubled header is worse than
+  a missing one).
+- **Unmeasured and said so**: whether `path: /*` applies to `/api/*`
+  rewritten-proxy responses. `curl -sI` homework.
+- Zero application code, zero TypeScript run by me. Suite stays **172**.
+  Streak intact: **no new dependency, 62 lessons.**
+- Next: Redis for the two in-process counters (rate limit + the other), which
+  is also the first new dependency in 62 lessons and should be argued for out
+  loud. Lesson 61's Blueprint-adoption question is unanswered after two
+  lessons — ask Jay directly, do not let it reach three.
+
+### Lesson 63 — the headers you already have (2026-09-18)
+- The "check before you add" instruction from 62, actually run. `curl -sI`
+  against both live services before writing a word.
+- **Two of Jay's three reported facts failed the check, and the lesson opens
+  with that.** (1) The site sends no CSP at all — the `headers:` block is only
+  in the working tree, so the clean console proved nothing. (2) Live names are
+  `tracker-web-mxol` / `full-stack-learning-mmty`, the Blueprint says
+  `tasks-web` / `tasks-api`. **That answers lesson 61**: as written it would
+  create a second pair, not adopt. Fix is a rename.
+- Rule to remember: **a page with no policy and a page with a perfect policy
+  produce the same console.** Confirm the mechanism runs before reading its
+  output as a result. `curl -sI` is the disambiguator.
+- Rule to remember: **three uncoordinated senders** — helmet (code, API),
+  Render/Cloudflare (platform, static), the `headers:` block (static). Nothing
+  reconciles them; duplicate-header resolution is unpredictable. Measure, add
+  only the gap.
+- Gap is two lines: `Referrer-Policy`, `Permissions-Policy`. Four headers
+  deliberately NOT added, each with its reason — HSTS (Render's is stronger),
+  nosniff (present), `X-Frame-Options` (`frame-ancestors` supersedes),
+  COOP/COEP (cargo cult here).
+- `Referrer-Policy` named as already-the-browser-default, kept anyway for one
+  stated reason: a default is a decision someone else can change. Told him
+  which line actually buys something — third time naming a weak argument as
+  weak, and it is becoming the house move.
+- Loop: `curl` → deploy → `curl` → `diff`. A test he did not have to write.
+- **Lesson 62's honesty box closed by measurement**: proxied `/api/*` keeps
+  helmet's own headers; `path: /*` is not layered on top.
+- **Redis declined, by his pushback and my agreement.** The trigger is the
+  second instance, not app size; check Postgres first when it comes. Answer is
+  in the lesson's "left out" box, not hidden in chat. Streak intact: **no new
+  dependency, 63 lessons.** Suite stays **172**.
+- Next: he has a real deploy to do first, and the console walk finally becomes
+  meaningful. After that, `cache-control` on the static HTML (how stale a
+  deploy can look), or `report-uri` (needs a public unauthenticated route).

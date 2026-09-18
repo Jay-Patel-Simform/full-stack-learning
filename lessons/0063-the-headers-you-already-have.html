@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 63 &mdash; The headers you already have</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 63 &middot; Week 15&ndash;16 &middot; Deploy</p>
+<h1>The headers you already have</h1>
+
+<p class="lede">Lesson 62 ended with a list of other security headers and one instruction: <em>check what you are already being sent before adding any</em>. This lesson is that check, run for real against your live site. It turns out three parties are sending you headers and none of them knows about the others &mdash; and one of the three is sending nothing at all, which is not what you thought. The skill today is not writing headers. It is <b>measuring before writing</b>, which is the only way to avoid the two failure modes: the header you send twice, and the header you were sure you sent.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong><code>curl -sI &lt;url&gt;</code> is the whole tool.</strong> It fetches only the response headers. It is the fastest feedback loop you have on a deployed site &mdash; no browser, no cache, no guessing.</li>
+<li><strong>Your two services get headers from different places.</strong> The API gets them from <code>@fastify/helmet</code>, which is <em>your code</em>. The static site gets them from Render, which is <em>not</em>.</li>
+<li><strong>Your CSP is not live yet.</strong> I checked. The site sends no <code>Content-Security-Policy</code> of any kind, so last lesson&rsquo;s clean console was clean for the wrong reason.</li>
+<li><strong>Add only what is missing and not already covered.</strong> Two headers, that is all. A header you send twice is a bug; a header that duplicates a CSP directive is noise.</li>
+<li><strong>Lesson 62&rsquo;s open question is answered</strong>, by measurement: a proxied <code>/api/*</code> response keeps the API&rsquo;s own headers. The static site does not overwrite them.</li>
+</ul>
+</div>
+
+<h2>Before anything else: a claim of yours did not survive the check</h2>
+<p>You told me the console was clean and the policy was enforcing. I ran <code>curl</code> against your live site before writing this lesson, because a claim gets checked like any other. Here is the entire header set your site returns today:</p>
+
+<pre><code><span class="dim">$</span> curl -sI https://tracker-web-mxol.onrender.com/
+
+HTTP/2 200
+content-type: text/html; charset=utf-8
+cache-control: public, max-age=0, s-maxage=300
+strict-transport-security: max-age=315360000; includeSubdomains; preload
+x-content-type-options: nosniff
+etag: W/"2ef11ec220cae7493dd8016522977042"
+<span class="dim">&hellip; plus cloudflare and render bookkeeping</span></code></pre>
+
+<p>There is no <code>content-security-policy</code> line and no <code>content-security-policy-report-only</code> line. The block went into <code>render.yaml</code> on your laptop, and that file has not been committed and deployed yet. So the browser was never sent a policy, never evaluated one, and had nothing to complain about.</p>
+<p class="takeaway"><b>A clean console is only evidence if the header arrived.</b> &ldquo;No errors&rdquo; and &ldquo;no policy&rdquo; look identical from the console. They look completely different from <code>curl</code>. This is why the check comes before the conclusion &mdash; and it is the same lesson as lesson 61, where three of my own notes claimed a page did not exist while it sat on disk.</p>
+
+<div class="box">
+<div class="cap">and a second thing the check found</div>
+<div class="body">
+<div>Your live services are named <code>tracker-web-mxol</code> and <code>full-stack-learning-mmty</code>. <span class="dim">Your <code>render.yaml</code> names them <code>tasks-web</code> and <code>tasks-api</code>. A Render service&rsquo;s URL comes from its name, so those are <b>not</b> the same services. Whatever is deployed right now was not deployed from that file. This is exactly the lesson 61 question, and now you have the evidence rather than the worry: applying that Blueprint as written would create a second pair alongside these, not adopt them. The fix is one word each &mdash; rename the services in the file to match what is live. Do that before you deploy anything today.</span></div>
+</div>
+</div>
+
+<h2>Three senders, no coordination</h2>
+<p>Run <code>curl -sI</code> against the API too and you get a much longer list. That difference is the lesson:</p>
+
+<div class="scroll"><table>
+<tr><th>Who sends it</th><th>What it is</th><th>You change it by</th></tr>
+<tr><td><code>@fastify/helmet</code></td><td>Your own middleware, registered in <code>server/src/app.ts</code>. Every header on your API responses comes from here.</td><td>Editing TypeScript and deploying the API.</td></tr>
+<tr><td>Render + Cloudflare</td><td>The platform. It adds <code>strict-transport-security</code> and <code>x-content-type-options</code> to the static site for free, without being asked.</td><td>Nothing &mdash; you do not control these.</td></tr>
+<tr><td>Your <code>headers:</code> block</td><td>The <code>render.yaml</code> key from lesson 62. Applies to the static site only.</td><td>Editing YAML and deploying the Blueprint.</td></tr>
+</table></div>
+
+<p>Nothing reconciles the three. If Render sends <code>strict-transport-security</code> and you also add one, the browser receives the header twice. That is not an error the platform will warn you about, and which value wins depends on the header &mdash; some are first-wins, some last-wins, some are treated as invalid and dropped entirely. <b>The safe assumption is that you cannot predict it.</b></p>
+
+<h2>What your static site is missing</h2>
+<p>This is the measured gap, from the real output above &mdash; not a checklist from a blog post:</p>
+
+<div class="scroll"><table>
+<tr><th>Header</th><th>Status on your site</th><th>Verdict</th></tr>
+<tr><td><code>Strict-Transport-Security</code></td><td>Sent by Render, with <code>preload</code> and a ten-year max-age</td><td><b>Do not add.</b> Yours would be weaker and duplicated.</td></tr>
+<tr><td><code>X-Content-Type-Options</code></td><td>Sent by Render: <code>nosniff</code></td><td><b>Do not add.</b> Already correct.</td></tr>
+<tr><td><code>X-Frame-Options</code></td><td>Absent</td><td><b>Do not add.</b> <code>frame-ancestors 'none'</code> in your CSP is its replacement and is strictly better.</td></tr>
+<tr><td><code>Content-Security-Policy</code></td><td>Absent &mdash; the lesson 62 block is not deployed</td><td><b>Deploy it.</b> This is today&rsquo;s real task.</td></tr>
+<tr><td><code>Referrer-Policy</code></td><td>Absent</td><td><b>Add it.</b> See the honesty note below &mdash; it is cheap, not urgent.</td></tr>
+<tr><td><code>Permissions-Policy</code></td><td>Absent</td><td><b>Add it.</b> The only genuinely missing protection.</td></tr>
+</table></div>
+
+<p><b><code>Referrer-Policy</code></b> controls what goes in the <code>Referer</code> header when someone clicks a link off your site. Without it, a link out could carry the full URL of the page they were on &mdash; and your URLs contain team ids. <code>strict-origin-when-cross-origin</code> sends the full path to yourself and only the bare origin to anyone else.</p>
+<p><b><code>Permissions-Policy</code></b> switches off browser features your page will never use: camera, microphone, geolocation. Your app is a task tracker. If injected code ever tries to open the camera, this is the header that makes the browser refuse before the permission prompt ever appears &mdash; the same posture as CSP, applied to device APIs instead of resources.</p>
+
+<div class="box">
+<div class="cap">be honest about this one</div>
+<div class="body">
+<div><code>Referrer-Policy</code> is <b>already</b> the browser default. <span class="dim">Chrome, Firefox and Safari all default to <code>strict-origin-when-cross-origin</code> when no header is sent, so adding it changes nothing today. It is still worth one line, and the reason is a general one: <b>a default is a decision someone else can change.</b> Sending the header makes your requirement explicit, survives a browser that defaults differently, and tells the next reader that the value was chosen rather than inherited. That is a much weaker argument than the one for <code>Permissions-Policy</code>, and you should know which of the two lines is actually buying you something.</span></div>
+</div>
+</div>
+
+<h2>Into the file</h2>
+<p>Same <code>headers:</code> block on <code>tasks-web</code>, two entries added below the CSP. Each entry is a <code>path</code>, a <code>name</code> and a <code>value</code>:</p>
+
+<pre><code>    headers:
+      - path: /*
+        name: Content-Security-Policy-Report-Only
+        value: "default-src 'self'; script-src 'self'; &hellip;"
+      <span class="dim"># the Referer sent to other sites: origin only, never the path</span>
+      - path: /*
+        name: Referrer-Policy
+        value: strict-origin-when-cross-origin
+      <span class="dim"># an allowlist of device APIs. Empty () means "nobody, not even me"</span>
+      - path: /*
+        name: Permissions-Policy
+        value: camera=(), microphone=(), geolocation=()</code></pre>
+
+<p>Two things about that syntax. <b>1.</b> <code>Permissions-Policy</code> uses a structured syntax, not CSP&rsquo;s: features are comma-separated, each takes a parenthesised allowlist, and <code>()</code> is the empty list &mdash; deny to everyone including your own page. <code>(self)</code> would be &ldquo;my origin may&rdquo;. <b>2.</b> Neither value needs quoting in YAML, because neither contains a <code>:</code> &mdash; but quoting them anyway costs nothing and is one less rule to remember.</p>
+
+<h2>The loop: curl, deploy, curl, compare</h2>
+<p>This is the whole feedback loop, and it takes about a minute:</p>
+<ol>
+<li><b>Before.</b> <code>curl -sI https://tracker-web-mxol.onrender.com/ &gt; /tmp/before.txt</code></li>
+<li><b>Fix the names.</b> In <code>render.yaml</code>, rename <code>tasks-web</code> &rarr; <code>tracker-web-mxol</code> and <code>tasks-api</code> &rarr; <code>full-stack-learning-mmty</code>, so the file describes the services you actually have.</li>
+<li><b>Deploy.</b> <code>render blueprints validate</code>, then commit and push.</li>
+<li><b>After.</b> <code>curl -sI https://tracker-web-mxol.onrender.com/ &gt; /tmp/after.txt</code> then <code>diff /tmp/before.txt /tmp/after.txt</code></li>
+<li><b>Read the diff.</b> Three new lines, no duplicated ones. If a header appears twice, delete yours &mdash; the platform wins.</li>
+<li><b>Now</b> the console check from lesson 62 is worth running, because there is finally a policy to violate.</li>
+</ol>
+<p class="takeaway"><b><code>diff</code> of two <code>curl</code> outputs is a test you did not have to write.</b> It has the property every good check has: it fails loudly when you are wrong, and it costs nothing when you are right. Reuse this shape for any change whose entire visible effect is on the wire.</p>
+
+<h2>Practice &mdash; three</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why not add your own <code>Strict-Transport-Security</code> line?</p>
+<button>Render sends it only for HTML files</button>
+<button>Render sends it already, stronger than yours</button>
+<p class="why" hidden>Render&rsquo;s value is <code>max-age=315360000; includeSubdomains; preload</code> &mdash; ten years, subdomains included, and preload-eligible. Any hand-written line would be a second copy of a header that is already correct, and the browser&rsquo;s handling of a duplicated <code>Strict-Transport-Security</code> is not something you should be relying on. The rule generalises: <b>measure, then add only the gap.</b></p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">What does <code>camera=()</code> in Permissions-Policy mean?</p>
+<button>No origin may use it, yours included</button>
+<button>Only your own origin may use it here</button>
+<p class="why" hidden>The parentheses hold an allowlist of origins, and an empty list allows nobody &mdash; not even the page sending the header. <code>camera=(self)</code> would be the &ldquo;only me&rdquo; version. Since your task tracker never opens a camera, the empty list is correct and costs you nothing, which is the same trade as <code>object-src 'none'</code> in your CSP.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Your console showed zero CSP violations. What did that prove?</p>
+<button>The policy was correct for every screen</button>
+<button>Nothing, until curl shows it arriving</button>
+<p class="why" hidden>A page with no policy and a page with a perfect policy produce exactly the same console: silence. The console can only report violations of a policy the browser actually received, so it cannot distinguish &ldquo;nothing was wrong&rdquo; from &ldquo;nothing was checked&rdquo;. <code>curl -sI</code> can, because it shows you the header itself. Always confirm the mechanism is running before you read its output as a result.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  BR["the browser"] --> CF["Render + Cloudflare<br/><i>adds HSTS, nosniff</i>"]
+  CF -->|"path /*"| ST["tracker-web<br/><i>static files</i>"]
+  ST --> YH["your headers: block<br/><i>CSP, Referrer, Permissions</i>"]
+  CF -->|"path /api/*<br/>rewrite"| API["full-stack-learning-mmty<br/><i>fastify</i>"]
+  API --> HM["@fastify/helmet<br/><i>its own CSP, HSTS, nosniff</i>"]
+  YH -.->|"never applied here"| API
+</pre>
+<figcaption>Two paths through one hostname, and two different sets of headers. The dotted line is lesson 62&rsquo;s open question, now measured: your static site&rsquo;s <code>headers:</code> block does not reach a proxied API response.</figcaption>
+</figure>
+
+<div class="box">
+<div class="cap">measured &mdash; lesson 62&rsquo;s open box is now closed</div>
+<div class="body">
+<div><code>curl -sI https://tracker-web-mxol.onrender.com/api/health</code> <span class="dim">returns <code>content-security-policy: default-src 'none';frame-ancestors 'none'</code> &mdash; which is <b>helmet&rsquo;s</b> policy from your API, not the static site&rsquo;s. So a <code>path: /*</code> header is not applied on top of a rewritten-proxy response; the origin&rsquo;s own headers pass through intact. That is the behaviour you wanted, and now it is a fact rather than a hope. It also means your API&rsquo;s security headers are carried all the way to the browser through the proxy, which is the thing that would have been quietly broken if it were not true.</span></div>
+</div>
+</div>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div><b>Redis, and the answer to your question</b> <span class="dim">You asked whether an app this small needs Redis, and the answer is <b>no, not yet</b>. Your rate limiter counts in memory. That is wrong only when there are two processes, because then each keeps half the count and your limit of 100 is really 200. You have one instance on a free plan, so today the count is correct. The trigger to revisit is not app size &mdash; it is <b>the second instance</b>: scaling up, or enabling autoscaling. When that day comes, check whether Postgres can hold the counter first; you already have it, and a counter with a 60-second window is a small table and one atomic <code>UPDATE</code>. Redis is faster and purpose-built, and it is also a service to run, pay for and handle the failure of. 63 lessons, no new dependency. Keep it.</span></div>
+<div><code>report-uri</code> / <code>report-to</code> <span class="dim">still waiting on a public unauthenticated route with its own rate limit and size cap. Its own lesson.</span></div>
+<div><code>Cross-Origin-Opener-Policy</code> and friends <span class="dim">the COOP/COEP/CORP family. Real headers, but they exist to isolate pages that use <code>SharedArrayBuffer</code> or embed cross-origin content. You do neither. Adding them would be cargo cult.</span></div>
+<div>a <code>cache-control</code> pass <span class="dim">your static site sends <code>s-maxage=300</code> on the HTML, which is a correctness question rather than a security one &mdash; how stale a deploy can look. Worth a lesson, not today&rsquo;s.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Permissions-Policy">MDN &mdash; Permissions-Policy</a>. Read the syntax section and skim the feature list; you will recognise how few of them your app could ever want.</p>
+<p><b>Then this:</b> twenty minutes. (1) Run the <code>curl -sI</code> against your live site and read every line of the output, not just the ones named here. (2) Rename both services in <code>render.yaml</code> to match what is deployed. (3) Add the two header entries. (4) <code>render blueprints validate</code>, commit, push. (5) <code>curl</code> again and <code>diff</code> the two files. (6) <em>Now</em> do lesson 62&rsquo;s console walk and the <code>appendChild</code> test, and tell me what the console actually says this time.</p>
+<p><b>Reference card:</b> <a href="../reference/api-security-basics.html">API security basics</a> &mdash; the response-header section is the one this lesson fills in.</p>
+<p><b>Ask the community:</b> <a href="https://community.render.com/">Render Community</a> &mdash; you can now ask lesson 61&rsquo;s question with evidence attached: &ldquo;my Blueprint names differ from my existing services, does renaming them in the file adopt them or create new ones?&rdquo; A question with a <code>curl</code> output in it gets a better answer.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0062-the-header-that-says-no.html">&larr; Back</a>
+<a href="../reference/api-security-basics.html">API security basics &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

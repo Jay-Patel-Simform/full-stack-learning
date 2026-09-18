@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 62 &mdash; The header that says no</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 62 &middot; Week 15&ndash;16 &middot; Deploy</p>
+<h1>The header that says no</h1>
+
+<p class="lede">Every defence you have written so far runs on <em>your</em> server: the session check, <code>can()</code>, the rate limiter, the CSRF check. They all assume the browser is asking questions on your behalf. A Content Security Policy is the other kind of defence &mdash; it is you telling the <b>browser</b> what your page is allowed to do, and the browser enforcing it against code you did not write. Today it goes into <code>render.yaml</code>, in the <code>headers:</code> key lesson 61 left empty. The YAML is four lines. The hard part is the policy, and the hard part of the policy is your own app.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>CSP is an allowlist of sources, sent as a response header.</strong> The browser refuses anything not on it &mdash; a script, a stylesheet, a connection &mdash; and says so in the console.</li>
+<li><strong>It is a defence against injected code.</strong> If an attacker gets a <code>&lt;script src="evil.com"&gt;</code> onto your page, CSP is what stops the browser fetching it.</li>
+<li><strong>Write the policy from the app you actually built</strong>, not from a blog post. Your built page has one external script and no inline one &mdash; so <code>script-src 'self'</code> costs you nothing.</li>
+<li><strong>Your styles are the exception, and you must be honest about it.</strong> Radix and <code>motion</code> write <code>style="&hellip;"</code> onto elements, so <code>style-src</code> needs <code>'unsafe-inline'</code>. Name the hole rather than pretending it is not there.</li>
+<li><strong>Ship it in <code>Report-Only</code> first.</strong> Same policy, no enforcement, violations printed in the console. That is today&rsquo;s feedback loop.</li>
+</ul>
+</div>
+
+<h2>What CSP actually prevents</h2>
+<p>Imagine the bug you have not written yet: somewhere, a task title gets rendered as HTML instead of text, and a title reads <code>&lt;script src="https://evil.example/x.js"&gt;&lt;/script&gt;</code>. React makes this hard, which is not the same as impossible &mdash; one <code>dangerouslySetInnerHTML</code>, or one compromised npm package in your 15 dependencies, and it is on the page.</p>
+<p>Without a policy, the browser fetches that script and runs it with your origin&rsquo;s full authority: it can read your DOM, and because lesson 57 put the API on the <em>same origin</em>, every request it makes carries your session cookie. With a policy, the browser looks at <code>script-src 'self'</code>, sees <code>evil.example</code> is not <code>'self'</code>, and refuses to fetch it at all. The bug is still there. The exploit is not.</p>
+<p class="takeaway"><b>Every other defence you wrote trusts the browser. This one instructs it.</b> That is why CSP is the last header and not the first: it is worth nothing on its own, and it is the only thing that helps once something has already gone wrong on the page.</p>
+
+<h2>Read your own app first</h2>
+<p>A policy copied from the internet is either broken or useless. So before writing a line, answer four questions about the app you built &mdash; the answers are in your repo, and I have checked each one:</p>
+<div class="scroll"><table>
+<tr><th>Question</th><th>Where you look</th><th>Your answer</th></tr>
+<tr><td>Any inline <code>&lt;script&gt;</code> in the page?</td><td><code>web/dist/index.html</code> after a build</td><td>No &mdash; one <code>&lt;script type="module" src="/assets/&hellip;"&gt;</code></td></tr>
+<tr><td>Where do fonts come from?</td><td><code>package.json</code></td><td><code>@fontsource-variable/geist</code> &mdash; your own build, not Google</td></tr>
+<tr><td>Any inline <code>style=</code> attributes?</td><td><code>grep -rn "style=" src</code></td><td>Yes &mdash; <code>skeleton.tsx</code>, and Radix and <code>motion</code> at runtime</td></tr>
+<tr><td>What origins does it call?</td><td><code>VITE_API_URL</code> from lesson 57</td><td><code>/api</code> &mdash; same origin, thanks to the rewrite</td></tr>
+</table></div>
+<p>Three of those four answers make the policy <em>tighter</em> for free. That is not luck: it is lesson 57 and the Vite build paying you back. Self-hosted fonts, a same-origin API and a bundler that emits real files instead of inline blobs are each one fewer exception you have to write down.</p>
+
+<h2>The policy</h2>
+<p>Each directive names a resource kind and the sources allowed for it. <code>'self'</code> means &ldquo;my own origin&rdquo;; <code>'none'</code> means nothing at all.</p>
+
+<pre><code>default-src 'self';
+script-src 'self';
+style-src 'self' 'unsafe-inline';
+img-src 'self' data:;
+font-src 'self';
+connect-src 'self';
+frame-ancestors 'none';
+base-uri 'none';
+form-action 'self';
+object-src 'none'</code></pre>
+
+<div class="scroll"><table>
+<tr><th>Directive</th><th>Why that value, for <em>this</em> app</th></tr>
+<tr><td><code>default-src 'self'</code></td><td>The fallback for anything not listed below. Start closed; open one door at a time.</td></tr>
+<tr><td><code>script-src 'self'</code></td><td>The whole point. Your build emits one file from your own origin, so this costs nothing and blocks every injected <code>src</code>. It also blocks inline <code>&lt;script&gt;</code> and <code>eval</code> &mdash; and you have neither.</td></tr>
+<tr><td><code>style-src 'self' 'unsafe-inline'</code></td><td>The compromise. Radix positions menus and <code>motion</code> animates by writing <code>style="&hellip;"</code> onto elements. Without <code>'unsafe-inline'</code> your dropdowns land in the wrong place. See the honesty box below.</td></tr>
+<tr><td><code>img-src 'self' data:</code></td><td>Vite inlines small assets as <code>data:</code> URIs at build time. Drop <code>data:</code> and an icon silently disappears one day.</td></tr>
+<tr><td><code>font-src 'self'</code></td><td>Geist ships in your bundle. If you ever add Google Fonts, this line is what breaks &mdash; and that is the line telling you that you just added a third party.</td></tr>
+<tr><td><code>connect-src 'self'</code></td><td>Covers <code>fetch</code>/<code>XHR</code> &mdash; every axios call React Query makes. Same-origin <code>/api</code> means <code>'self'</code> is enough. <b>This is the one that stops stolen data being posted somewhere.</b></td></tr>
+<tr><td><code>frame-ancestors 'none'</code></td><td>Nobody may put your app in an <code>&lt;iframe&gt;</code>. This is clickjacking, and this directive is the modern replacement for <code>X-Frame-Options</code>.</td></tr>
+<tr><td><code>base-uri 'none'</code></td><td>An injected <code>&lt;base href&gt;</code> can repoint every relative URL on the page &mdash; including <code>/api</code>. Cheap to forbid, nasty to forget.</td></tr>
+<tr><td><code>form-action 'self'</code></td><td>A form may only submit to you. Your forms are all JavaScript anyway, so this is free.</td></tr>
+<tr><td><code>object-src 'none'</code></td><td><code>&lt;object&gt;</code>/<code>&lt;embed&gt;</code>. Legacy plugin surface, zero use to you.</td></tr>
+</table></div>
+
+<div class="box">
+<div class="cap">be honest about this one</div>
+<div class="body">
+<div><code>'unsafe-inline'</code> in <code>style-src</code> <span class="dim">is a real weakening, and the name is the warning. It permits <code>style="&hellip;"</code> attributes, which allow tricks like restyling an element to overlay a button. It is <b>much</b> less dangerous than the same word in <code>script-src</code> &mdash; CSS cannot read your session or call your API &mdash; but it is not nothing. The clean fix is a nonce, and a nonce needs a server that generates one per request and stamps it into the HTML. Your page is a static file on a CDN: there is no per-request server to do that. So the honest answer is &ldquo;this needs server-rendered HTML, which you do not have&rdquo;, and the dishonest answer is to leave it out of <code>script-src</code> and quietly pretend the page is stricter than it is. <b>Never put <code>'unsafe-inline'</code> in <code>script-src</code> to make an error go away.</b> That directive is the one doing the work.</span></div>
+</div>
+</div>
+
+<h2>Into the file</h2>
+<p>In <code>render.yaml</code>, on the <code>tasks-web</code> service only, as a sibling of <code>routes:</code>. Send the <code>Report-Only</code> name first:</p>
+
+<pre><code>  - type: web
+    name: tasks-web
+    runtime: static
+    <span class="dim"># &hellip; rootDir, buildCommand, staticPublishPath, envVars as in lesson 61 &hellip;</span>
+    headers:
+      <span class="dim"># Report-Only: the browser reports violations and blocks nothing.</span>
+      <span class="dim"># Rename to Content-Security-Policy once the console is clean.</span>
+      - path: /*
+        name: Content-Security-Policy-Report-Only
+        value: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'"
+    routes:
+      <span class="dim"># &hellip; unchanged &hellip;</span></code></pre>
+
+<p>Three things about that YAML, and each one has bitten somebody:</p>
+<p><b>1. The whole policy is one string on one line.</b> Directives are separated by <code>;</code> inside the value &mdash; they are not a YAML list. And the value <em>must</em> be quoted, because it contains <code>:</code> and <code>'</code>; double quotes outside, CSP&rsquo;s own single quotes inside.</p>
+<p><b>2. <code>path: /*</code> is a match, not a directory.</b> It applies the header to every response the static site serves, which is what you want &mdash; <code>index.html</code> and every hashed asset.</p>
+<p><b>3. It goes on the static site, not the API.</b> CSP governs a <em>page</em>. Your API returns JSON, which renders nothing and executes nothing. Putting a policy there is theatre.</p>
+
+<h2>The loop: watch it complain, then make it bite</h2>
+<p>Validate, deploy, then open the app and open the browser console. A <code>Report-Only</code> violation reads roughly:</p>
+<pre><code><span class="dim">[Report Only] Refused to load the font 'https://fonts.gstatic.com/&hellip;'
+because it violates the following Content Security Policy directive:
+"font-src 'self'".</span></code></pre>
+<p>That message names the resource and the directive that would have stopped it &mdash; which is the entire diagnosis. Now do the round trip properly:</p>
+<ol>
+<li><code>render blueprints validate</code>, commit, let it deploy.</li>
+<li>Open the site and <b>use it</b>: log in, open a team, open a dropdown, create a team, load the activity page. A policy is only tested by the screens you actually visit.</li>
+<li>Read every <code>[Report Only]</code> line. Each one is either <em>a real dependency you forgot</em> (widen that directive) or <em>something you do not want</em> (leave it blocked, and go find out what it is).</li>
+<li>Console clean? Delete <code>-Report-Only</code> from the header name. Deploy. Now it blocks.</li>
+<li><b>Prove it bites.</b> In the console on your live site, run <code>var s=document.createElement('script'); s.src='https://example.com/x.js'; document.body.appendChild(s)</code>. You should get a <code>Refused to load</code> error and no network request. If it loads, your header is not arriving &mdash; check it with <code>curl -sI https://&hellip;/ | grep -i content-security</code>.</li>
+</ol>
+<p class="takeaway"><b>Report-Only is how you ship a risky change to production without risking production.</b> The same shape as the expand/backfill/contract migration in lesson 10: make the new thing observable before you make it authoritative.</p>
+
+<h2>Practice &mdash; three</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Which directive stops stolen data being sent to an attacker?</p>
+<button>script-src, which blocks the script</button>
+<button>connect-src, which blocks the send</button>
+<p class="why" hidden>Both matter, but they stop different halves. <code>script-src</code> blocks code you did not ship from <em>running</em>. <code>connect-src</code> assumes something already runs &mdash; an inline handler, a compromised dependency inside your own bundle &mdash; and blocks the <code>fetch</code> that carries your data off the origin. That is why <code>connect-src 'self'</code> is worth writing even though it looks redundant next to <code>default-src 'self'</code>: it is the last line, after everything else has failed.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why does this app need <code>'unsafe-inline'</code> for styles?</p>
+<button>Radix and motion write style attributes</button>
+<button>Tailwind emits one large stylesheet file</button>
+<p class="why" hidden>Tailwind is fine &mdash; it compiles to a real <code>.css</code> file served from your own origin, which <code>'self'</code> already covers. The problem is runtime: Radix positions a dropdown by setting <code>style="transform:&hellip;"</code> on the element, <code>motion</code> animates the same way, and <code>skeleton.tsx</code> sets a width. Those are inline styles, and a static file on a CDN has no per-request server to issue a nonce for them.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">What does Content-Security-Policy-Report-Only actually do?</p>
+<button>Blocks resources and logs each one</button>
+<button>Logs each one and blocks nothing</button>
+<p class="why" hidden>It is the dry run. The browser evaluates the policy in full and prints every violation to the console, but loads the resource anyway. That is what makes it safe to deploy an untested policy to a live site: the worst case is a noisy console, not a blank page. You find the exceptions with real usage, fix the policy, then remove <code>-Report-Only</code> to turn the same string into enforcement.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  S["tasks-web<br/><i>static site</i>"] -->|"index.html<br/>+ CSP header"| B["the browser"]
+  B --> P{"allowed by<br/>the policy?"}
+  A["/assets/index-*.js<br/><i>'self'</i>"] --> P
+  X["evil.example/x.js<br/><i>injected</i>"] --> P
+  F["fetch to evil.example<br/><i>exfiltration</i>"] --> P
+  P -->|"yes"| R["runs"]
+  P -->|"no &mdash; console error"| N["never fetched"]
+  A -.-> R
+  X -.-> N
+  F -.-> N
+</pre>
+<figcaption>The policy is evaluated by the browser, on the user&rsquo;s machine, for every resource the page reaches for &mdash; including ones your server never saw.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div><code>report-uri</code> / <code>report-to</code> <span class="dim">CSP can POST every violation to an endpoint of yours instead of only the console. Useful when real users hit violations you never will. It needs a route that accepts unauthenticated JSON from anyone on the internet &mdash; so it needs a rate limit and a size cap, and that is its own lesson.</span></div>
+<div>a nonce or a hash for styles <span class="dim">the correct fix for <code>'unsafe-inline'</code>, and it needs server-rendered HTML. Reopen it if this app ever gains a server-rendered page.</span></div>
+<div>the other security headers <span class="dim"><code>Strict-Transport-Security</code>, <code>X-Content-Type-Options</code>, <code>Referrer-Policy</code>. Same <code>headers:</code> key, one line each, and Render already sets some of them. Check what you are actually being sent with <code>curl -sI</code> before adding any &mdash; a header you send twice is worse than one you never sent.</span></div>
+<div>a CSP on the API <span class="dim">deliberate. JSON renders nothing.</span></div>
+</div>
+</div>
+
+<div class="box">
+<div class="cap">not measured &mdash; check this on the deployed site</div>
+<div class="body">
+<div><span class="dim">Your <code>/api/*</code> rewrite proxies through the same static site. I have <b>not</b> tested whether Render applies a <code>path: /*</code> header to rewritten-proxy responses as well as to real files. It should not matter &mdash; a CSP on a JSON response changes nothing &mdash; but find out rather than assume: <code>curl -sI https://&lt;your-site&gt;/api/health | grep -i content-security</code>. Tell me what it says, and it goes in the reference card either way.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP">MDN &mdash; Content Security Policy</a>. Read the &ldquo;Fetch directives&rdquo; list and the section on inline code; skip the reporting API for now.</p>
+<p><b>Then this:</b> thirty minutes. (1) Add the <code>headers:</code> block to <code>tasks-web</code> in <code>render.yaml</code>, with the <code>-Report-Only</code> name. (2) <code>render blueprints validate</code>, commit, deploy. (3) Use every screen of the live site with the console open and write down every violation. (4) Fix the policy, drop <code>-Report-Only</code>, deploy again. (5) Run the <code>appendChild</code> test above and watch it be refused. (6) Paste your final policy string into <a href="https://csp-evaluator.withgoogle.com/">Google&rsquo;s CSP Evaluator</a> &mdash; it will flag your <code>style-src</code>, and you now know exactly why you are keeping it.</p>
+<p><b>Reference card:</b> <a href="../reference/api-security-basics.html">API security basics</a> &mdash; CSP is the page-side counterpart to the CORS and CSRF rules on that card. Same question, asked of a different party.</p>
+<p><b>Ask the community:</b> <a href="https://community.render.com/">Render Community</a> &mdash; and while you are there, the lesson 61 question is still unanswered: does a Blueprint adopt existing same-named services, or create a second pair?</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0061-the-deploy-that-is-a-file.html">&larr; Back</a>
+<a href="../reference/api-security-basics.html">API security basics &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>
