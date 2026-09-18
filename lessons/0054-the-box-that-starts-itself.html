@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 54 &mdash; The box that starts itself</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 54 &middot; Week 15&ndash;16 &middot; Docker + deploy</p>
+<h1>The box that starts itself</h1>
+<p class="lede">Lesson 53 promised one command and then gave you five. You ran <code>migrate deploy</code> by hand, <code>db seed</code> by hand, and piped a SQL file in by hand. You also hit a trap I did not warn you about: <code>docker compose up</code> ran an <b>old</b> copy of your seed file and the seed crashed. Today those three manual steps become part of starting the container, and you learn why the old copy was there. <b>Zero TypeScript changes. Suite stays at 172.</b></p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>An image is a snapshot, not a window.</strong> <code>COPY . .</code> copied your files at <em>build</em> time. Editing them afterwards changes nothing inside the image. <code>up</code> does not rebuild &mdash; <code>up --build</code> does.</li>
+<li><strong>An <dfn>entrypoint</dfn> (a script the container runs before your app) is where "set the database up, then serve" lives.</strong> One small shell file, four lines.</li>
+<li><strong><code>migrate deploy</code> is safe to run on every single boot.</strong> It applies what is pending and says <code>No pending migrations to apply.</code> when there is nothing. That property has a name: <dfn>idempotent</dfn> (running it twice does the same as running it once).</li>
+<li><strong>Two containers starting at once do not corrupt anything.</strong> Prisma takes a Postgres <dfn>advisory lock</dfn> (a lock you ask for by name, on no table at all). One migrates, the other waits. <b>I ran two at once against an empty database to check this.</b></li>
+<li><strong>Migrations start automatically. The seed does not, ever.</strong> A migration is part of the code. Fake rows are not.</li>
+<li><strong>Streak intact: no new dependency, 54 lessons.</strong></li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<pre><code>server: npm test          <b>172 passing</b>
+server: compose.yml, Dockerfile, .env.docker      lesson 52 + 53
+server: prisma/sql/tasks_app.sql       runs at db init
+server: prisma/sql/audit-lockdown.sql  <b>you run it by hand</b>
+Docker: db + api both up, seeded, <code>/health</code> answers</code></pre>
+<p>Nothing in <code>src/</code> is touched today. One new file, two new lines in the <code>Dockerfile</code>.</p>
+
+<h2>First: why your seed crashed</h2>
+<p>You ran the seed and Prisma threw <code>P2025</code> on this line:</p>
+<pre><code>const bulkOwner = await prisma.user.findUniqueOrThrow({
+  where: { email: "jay@example.com" },
+});
+<span class="dim">An operation failed because it depends on one or more records that were
+required but not found.</span></code></pre>
+<p>The user was missing. But <code>jay@example.com</code> <b>is</b> in your <code>seed.ts</code>, at the top, in the <code>tasks</code> object. You could open the file and read it.</p>
+<p>It was not in the file the container ran. Your <code>Dockerfile</code> says <code>COPY . .</code>, and that copy happened once, when the image was built &mdash; before you added that line. The container was running a seed file from the past, and the log proves it: two <code>seeded</code> lines, not three.</p>
+<p class="takeaway"><b>An image is a photograph of your source, not a window onto it.</b> Every edit you make after the build is invisible inside the container until you build again. <code>docker compose up</code> reuses an existing image and never checks whether it is stale. You want <code>docker compose up --build</code> while you are changing code.</p>
+<p>You will meet this again the first time a deploy &ldquo;ignores&rdquo; a fix. It did not ignore it. It was never given it.</p>
+
+<h2>The new file: <code>server/docker-entrypoint.sh</code></h2>
+<p>Four lines. Read them before the explanation.</p>
+<pre><code>#!/bin/sh
+set -e
+npx prisma migrate deploy
+npx prisma db execute --file prisma/sql/audit-lockdown.sql
+exec "$@"</code></pre>
+<div class="scroll"><table>
+<tr><th>Line</th><th>What it does, and why it matters</th></tr>
+<tr><td><code>set -e</code></td><td>Stop at the first command that fails. Without it the script would carry on to <code>exec</code> and <b>serve requests against a half-migrated database</b>. With it, the container exits and Docker marks it <code>Exited (1)</code>. A dead container is a much better outcome than a lying one.</td></tr>
+<tr><td><code>migrate deploy</code></td><td>The same command you typed by hand, now on every boot. It reads <code>DATABASE_URL</code> from <code>.env.docker</code> &mdash; the <b><code>tasks</code></b> owner role. Migrations still run as the owner, exactly as lesson 42 decided. Your app still serves as <code>tasks_app</code>.</td></tr>
+<tr><td><code>db execute --file</code></td><td>This is the homeless step from last lesson. <code>audit-lockdown.sql</code> could not run at db init, because it names a table. Here it can: migrations just finished, so <code>"AuditLog"</code> exists. <code>REVOKE</code> is idempotent, so running it every boot is free. And <code>prisma db execute</code> means the API image needs no <code>psql</code> installed.</td></tr>
+<tr><td><code>exec "$@"</code></td><td><code>"$@"</code> is whatever the <code>CMD</code> is &mdash; <code>npm start</code>. <code>exec</code> <b>replaces</b> this shell with that command instead of starting a child. Without <code>exec</code> the shell stays alive as the container's main process, and <code>SIGTERM</code> on shutdown stops at the shell &mdash; the same signal problem lesson 52 solved with the JSON <code>CMD</code>.</td></tr>
+</table></div>
+
+<h2>The two new lines in <code>server/Dockerfile</code></h2>
+<p>Put them at the end, after the existing <code>CMD</code>:</p>
+<pre><code>RUN chmod +x docker-entrypoint.sh
+
+ENTRYPOINT ["./docker-entrypoint.sh"]
+CMD ["npm", "start"]</code></pre>
+<p>The file already arrives in the image &mdash; <code>COPY . .</code> takes the whole <code>server/</code> directory. <code>chmod +x</code> is there because a file copied without the execute bit cannot be run, and whether it has one depends on your Mac.</p>
+<p><code>ENTRYPOINT</code> and <code>CMD</code> are not rivals. Docker joins them: <code>ENTRYPOINT</code> is the command, <code>CMD</code> is its arguments. So the container runs <code>./docker-entrypoint.sh npm start</code>, and <code>"$@"</code> on the last line is <code>npm start</code>.</p>
+<p class="takeaway"><b><code>ENTRYPOINT</code> is what the container always does; <code>CMD</code> is what it does by default.</b> That split is why <code>docker compose run --rm api npx prisma db seed</code> still works: it replaces the <code>CMD</code>, so the migrations still run first and then your seed runs instead of the server.</p>
+
+<h2>Run it</h2>
+<pre><code>cd server
+docker compose down -v            <span class="dim"># empty database, so you see it all happen</span>
+docker compose up -d db
+docker compose up -d --build      <span class="dim"># --build: the image is stale by definition now</span>
+docker compose logs api</code></pre>
+<p>This is the real log from my run, with the OpenSSL warnings cut out:</p>
+<pre><code>api-1  | Datasource "db": PostgreSQL database "tasks", schema "public" at "db:5432"
+api-1  | 15 migrations found in prisma/migrations
+api-1  | Applying migration `20260901075820_init`
+<span class="dim">...</span>
+api-1  | Applying migration `20260916063848_audit_log_at_index`
+api-1  | Script executed successfully.
+api-1  | &gt; server@1.0.0 start
+api-1  | {"level":30,...,"msg":"Server listening at http://172.18.0.3:3000"}</code></pre>
+<p>Migrations, then the revoke, then the server. One command. Now restart it and read the log again:</p>
+<pre><code>docker compose restart api
+<span class="dim">api-1  | No pending migrations to apply.</span></code></pre>
+<p>That line is the whole reason this is safe to leave in. The second boot costs a query and changes nothing.</p>
+
+<h3>Still by hand: the seed</h3>
+<p>A fresh volume has no users, so you still cannot log in. Run it once, deliberately:</p>
+<pre><code>docker compose run --rm api npx prisma db seed</code></pre>
+<p>This stays manual on purpose, and the reason is not laziness. A migration is <b>part of your code</b> &mdash; the same 15 files run on your Mac, in CI and on the server, and the schema is worthless without them. A seed is <b>500 fake tasks</b>. Wire that into container start and the day you deploy, your production database gets <code>Fake task 1</code> through <code>Fake task 500</code> and a user whose password is in a public repository.</p>
+<p class="takeaway"><b>Automate the step that must happen everywhere. Keep your hand on the step that must happen nowhere but here.</b></p>
+
+<h2>Two containers, one empty database</h2>
+<p>The obvious worry: at deploy you often start more than one copy of the API. If every copy runs <code>migrate deploy</code> at the same second against an empty database, do they collide?</p>
+<p>I ran exactly that &mdash; two containers, started together, empty volume:</p>
+<pre><code>docker compose down -v &amp;&amp; docker compose up -d db
+docker compose run --rm --no-deps api sh -c 'npx prisma migrate deploy' &amp;
+docker compose run --rm --no-deps api sh -c 'npx prisma migrate deploy' &amp;
+wait</code></pre>
+<p>Both exited 0. One applied the 15 migrations; the other printed <code>No pending migrations to apply.</code> Nothing ran twice.</p>
+<p>The reason is a Postgres <b>advisory lock</b>. That is a lock with a number you choose, attached to no table &mdash; Postgres just promises that only one connection holds it at a time. Prisma takes one before it touches <code>_prisma_migrations</code>. The second container blocks on that lock, and by the time it gets in, the work is done and there is nothing pending.</p>
+<p>This is worth knowing beyond Prisma. Any time two processes must not do the same job at once, and the job is not one row you can lock, an advisory lock is the tool.</p>
+
+<h2>The failure you should cause on purpose</h2>
+<p>My first version of the entrypoint had a wrong flag. Prisma 7 removed <code>--schema</code> from <code>db execute</code>:</p>
+<pre><code>api-1  | unknown or unexpected option: --schema
+<span class="dim">$ docker compose ps -a</span>
+server-api-1   ...   <b>Exited (1)</b>
+server-db-1    ...   Up (healthy)</code></pre>
+<p>Look at what did <em>not</em> happen. The API never started. <code>/health</code> did not answer. No request ever reached a database in an unknown state. That is <code>set -e</code> doing its one job, and it is why a startup script without it is dangerous: it would have printed the error, ignored it, and served.</p>
+<p>Break it yourself. Add a line that fails, such as <code>false</code>, rebuild, and watch the container die. Then take it out.</p>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why did the container run a seed file you had already fixed?</p>
+<button><code>COPY</code> ran at build time, not at start</button>
+<button>Compose cached the old container</button>
+<p class="why" hidden>The image holds a copy of your source made when it was built. <code>docker compose up</code> reuses that image and never compares it to your disk. Use <code>up --build</code>, or <code>docker compose build api</code>, whenever you have edited code the image contains.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why is <code>exec "$@"</code> the last line, and not just <code>"$@"</code>?</p>
+<button>It makes the app start faster</button>
+<button>The app replaces the shell, so it gets the signals</button>
+<p class="why" hidden>Without <code>exec</code>, the shell stays as the container's main process and the app is its child. Docker sends <code>SIGTERM</code> to the main process, so shutdown would stop at a shell that ignores it. <code>exec</code> hands the process over &mdash; the same reason lesson 52 used the JSON form of <code>CMD</code>.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Migrations run on every boot. Why not the seed too?</p>
+<button>The seed is slower to run</button>
+<button>The seed is fake data, only wanted here</button>
+<p class="why" hidden>Migrations are part of the code and must run on every machine. A seed writes 500 fake tasks and a user with a known password. Automating it would put both into production on your first deploy. Automate what must happen everywhere; keep your hand on what must happen only on your laptop.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Last lesson you were the arrow between &ldquo;container starts&rdquo; and &ldquo;database is ready for it&rdquo;. Today the script is.</p>
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  START["docker compose up --build"] --> BUILD["build image<br/>COPY . . takes today's source"]
+  BUILD --> WAIT["wait: db healthcheck passes"]
+  WAIT --> EP["ENTRYPOINT<br/>docker-entrypoint.sh"]
+  EP --> M["prisma migrate deploy<br/>as role tasks"]
+  M -->|fails| DIE["set -e<br/>container Exited (1)<br/>nothing is served"]
+  M -->|ok| SQL["prisma db execute<br/>audit-lockdown.sql"]
+  SQL --> APP["exec npm start<br/>app serves as tasks_app"]
+  SEED["prisma db seed"] -.->|"by hand, once, never automatic"| APP
+</pre>
+<figcaption>The whole boot. The only dotted arrow is the one step you keep doing yourself &mdash; and that is the point of it being dotted.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div>a rollback <span class="dim">there is no <code>migrate undo</code>, and there should not be. A migration that breaks the old code is fixed by a new migration, forward. This becomes real when the deploy has users on it.</span></div>
+<div>waiting for the database in the script <span class="dim">no <code>wait-for-it</code> loop. Compose's <code>condition: service_healthy</code> from lesson 53 already does it. On Fly.io there is no compose, and the loop comes back.</span></div>
+<div>a separate migration job <span class="dim">the grown-up version: one container migrates, then the app containers start. Compose cannot express it well. Fly.io has <code>release_command</code> for exactly this, and that is where you will meet it.</span></div>
+<div>the front end <span class="dim">still not a service. Still next, or after the deploy.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://docs.docker.com/reference/dockerfile/#entrypoint">Docker &mdash; <code>ENTRYPOINT</code></a>, especially the table showing how <code>ENTRYPOINT</code> and <code>CMD</code> combine. Then <a href="https://www.prisma.io/docs/orm/prisma-migrate/workflows/development-and-production">Prisma &mdash; development and production</a>, which is the official version of &ldquo;never <code>migrate dev</code> near a deploy&rdquo;.</p>
+<p><b>Then this:</b> two experiments, five minutes. First, add <code>false</code> to the entrypoint, rebuild, and confirm the container exits and <code>/health</code> does not answer. Second, change one word in a <code>console.log</code> in <code>src/</code>, run <code>docker compose up -d</code> <em>without</em> <code>--build</code>, and confirm your change is not there. Then add <code>--build</code>. Feel that one once and you will never debug it again.</p>
+<p><b>Reference card:</b> <a href="../reference/environment.html">Environment</a> &mdash; the entrypoint uses <code>DATABASE_URL</code> (owner) and the app uses <code>APP_DATABASE_URL</code> (restricted). Two roles, one container, and the boot is the only moment the owner one is needed.</p>
+<p><b>Ask the community:</b> <a href="https://stackoverflow.com/questions/tagged/prisma+docker">Stack Overflow, <code>prisma</code> + <code>docker</code></a>. Good question for them: <em>entrypoint migrations or a separate release command &mdash; what breaks first when you scale to more than one container?</em></p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0053-one-command-two-machines.html">&larr; Back</a>
+<a href="../reference/environment.html">Environment reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 53 &mdash; One command, two machines</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 53 &middot; Week 15&ndash;16 &middot; Docker + deploy</p>
+<h1>One command, two machines</h1>
+<p class="lede">Last lesson your API ran in a box and reached back out to the Postgres on your Mac through <code>host.docker.internal</code> &mdash; a Docker Desktop convenience that does not exist on a server. Today Postgres moves into a box of its own, the two boxes get a private network where <code>db</code> is a real hostname, and <code>docker compose up</code> starts the whole stack. <b>Zero TypeScript changes. Suite stays at 172.</b> The interesting part is that your lesson-41 role script is about to fail, and the reason is worth the whole lesson.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>A compose file is the <code>docker run</code> flags you were typing, written down.</strong> Ports, env file, build context &mdash; same things, in YAML, under version control, for two containers instead of one.</li>
+<li><strong>Containers on one compose network reach each other by service name.</strong> <code>db:5432</code>. No <code>host.docker.internal</code>, no IP, and the same string works on Fly.io.</li>
+<li><strong>A container is throwaway; a volume is not.</strong> That is the only reason a database in a box is not a joke. <code>docker compose down</code> keeps your rows, <code>down -v</code> burns them.</li>
+<li><strong>The database init script runs exactly once &mdash; on an empty volume, before any table exists.</strong> Your <code>tasks_app.sql</code> ends with a <code>REVOKE</code> on <code>"AuditLog"</code>, which is not there yet. It will crash the init. You will watch it, then split the file.</li>
+<li><strong>Streak intact: no new dependency, 53 lessons.</strong> Compose ships with Docker; you installed it last lesson.</li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<pre><code>server: npm test          <b>172 passing</b>
+server: Dockerfile, .dockerignore, .env.docker   built and run in lesson 52
+Mac:    Postgres 5432, roles <b>tasks</b> and <b>tasks_app</b>, ~15 migrations applied
+Docker: Desktop installed, one image <code>tasks-api</code></code></pre>
+<p>Nothing in <code>src/</code> is touched today. If you find yourself editing a route, stop &mdash; you have wandered.</p>
+
+<h2>Why the Mac's Postgres cannot come with you</h2>
+<p>Your container currently says <code>host.docker.internal:5432</code>. That name is invented by Docker Desktop for exactly this case: a container that needs to talk back to the laptop hosting it. On a Fly.io machine, an EC2 box or a colleague's Linux desktop, resolving it gets you nothing. So the address in your config is <b>true in one place only</b>, which is the same failure shape as <code>HOST=127.0.0.1</code> last lesson: a value that is correct, and correct about the wrong machine.</p>
+<p class="takeaway"><b>An address that only resolves where you are standing is a note, not a configuration.</b> Compose fixes it by making the name real: it puts every service on one network and registers each service name in DNS. <code>db</code> resolves on your Mac, on a server, and in CI &mdash; because <code>db</code> is a thing you declared, not a thing the host offered you.</p>
+
+<h2>The file</h2>
+<p>One new file, <code>server/compose.yaml</code>. Read it before you run it &mdash; every line is a flag you typed by hand last lesson, or a thing you had no way to type at all.</p>
+<pre><code>services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: tasks
+      POSTGRES_PASSWORD: tasks
+      POSTGRES_DB: tasks
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./prisma/sql/tasks_app.sql:/docker-entrypoint-initdb.d/10-roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tasks -d tasks"]
+      interval: 2s
+      retries: 15
+
+  api:
+    build: .
+    env_file: .env.docker
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:</code></pre>
+<p>Four things in there are new ideas rather than new syntax.</p>
+<div class="scroll"><table>
+<tr><th>Line</th><th>What it actually does</th></tr>
+<tr><td><code>image:</code> vs <code>build:</code></td><td><code>db</code> is pulled from Docker Hub as-is; <code>api</code> is built from your <code>Dockerfile</code>, with <code>.</code> as the build context. You never write a Dockerfile for a database &mdash; somebody already did, better.</td></tr>
+<tr><td><code>volumes: pgdata:</code></td><td>A named volume, managed by Docker, mounted where Postgres keeps its data directory. <b>Without this line the database is a scratchpad</b> that dies with the container.</td></tr>
+<tr><td><code>docker-entrypoint-initdb.d</code></td><td>A convention of the <code>postgres</code> image: every <code>.sql</code> and <code>.sh</code> in that directory runs <b>once</b>, when the data directory is empty. Alphabetical, hence the <code>10-</code>.</td></tr>
+<tr><td><code>condition: service_healthy</code></td><td><code>depends_on</code> alone only orders <em>starting</em>. Postgres accepts connections several seconds after its container starts, so without the healthcheck your API boots, fails to connect, and exits. Start order is not readiness.</td></tr>
+</table></div>
+
+<h3>And the env file it reads</h3>
+<p>Rewrite <code>server/.env.docker</code> &mdash; every address in it now points at the other container, not at your Mac:</p>
+<pre><code>DATABASE_URL=postgres://tasks:tasks@<b>db</b>:5432/tasks
+APP_DATABASE_URL=postgres://tasks_app:tasks_app@<b>db</b>:5432/tasks
+NODE_ENV=development
+ALLOWED_ORIGINS=http://localhost:5173
+TRUST_PROXY=false
+HOST=0.0.0.0
+PORT=3000</code></pre>
+<p><b>Those passwords are not your Mac's passwords, and that is the point.</b> This is a different database on a different machine that happens to be running on your desk. <code>POSTGRES_PASSWORD: tasks</code> in the compose file and <code>tasks_app</code> in your SQL script are throwaway values for a throwaway database. The day this goes to Fly.io, both come from the platform's secret store and neither is in a file. <span class="dim">Your Mac's <code>tasks_app</code> password is still the one from lesson 41's script, still in <code>.env</code>, still unrotated. Fourth ask.</span></p>
+
+<h2>Now watch it fail on your own file</h2>
+<p>Start the database alone, and read the log:</p>
+<pre><code>cd server
+docker compose up db</code></pre>
+<p>It will not come up. In the flood of init output:</p>
+<pre><code>ERROR:  relation "AuditLog" does not exist
+STATEMENT:  REVOKE UPDATE, DELETE, TRUNCATE ON "AuditLog" FROM tasks_app;</code></pre>
+<p>Open <code>prisma/sql/tasks_app.sql</code> and look at what you wrote in lesson 41. The comment at the top says it: <em>run this once, as the postgres superuser, against the tasks database</em>. Against a database that <b>already had fifteen migrations in it</b>. Every statement in the file assumed tables. Now it is running against an empty one, and two different things go wrong &mdash; only one of them loudly.</p>
+<div class="scroll"><table>
+<tr><th>Statement</th><th>On a full database</th><th>On an empty one</th></tr>
+<tr><td><code>CREATE ROLE tasks_app</code></td><td>makes the login</td><td>makes the login &mdash; fine</td></tr>
+<tr><td><code>GRANT &hellip; ON ALL TABLES</code></td><td>grants on 8 tables</td><td><b>succeeds, grants nothing.</b> Silent.</td></tr>
+<tr><td><code>ALTER DEFAULT PRIVILEGES</code></td><td>covers future tables</td><td>covers <em>all</em> of them &mdash; this line is now doing the whole job</td></tr>
+<tr><td><code>REVOKE &hellip; ON "AuditLog"</code></td><td>the wall</td><td><b>errors, and aborts the init</b></td></tr>
+</table></div>
+<p class="takeaway"><b>A grant is a statement about rows that exist; a default privilege is a statement about rows that do not yet.</b> You wrote both in lesson 41 and only needed one of them. On a fresh database the ordering inverts: <code>ON ALL TABLES</code> is the decoration and <code>ALTER DEFAULT PRIVILEGES</code> is the mechanism. The audit revoke is neither &mdash; it names one specific table, so it simply cannot run before that table is born.</p>
+
+<h3>The half-built volume</h3>
+<p>Before you fix anything: the init crashed <em>partway</em>. The data directory is not empty any more, so Docker will never run the init scripts again &mdash; it will start that half-configured database and act like nothing happened. This is the one moment where the throwaway machine is not a metaphor:</p>
+<pre><code>docker compose down -v</code></pre>
+<p><code>-v</code> deletes the named volume. Without it you fix the SQL, run <code>up</code> again, and spend twenty minutes wondering why your change had no effect. <b>Init is once per volume, and the only undo for a bad init is deleting the volume.</b></p>
+
+<h2>The fix: split the file by when it can run</h2>
+<p>Two files, because there are two moments. Cut the last <code>REVOKE</code> line out of <code>prisma/sql/tasks_app.sql</code> (keep its comment block &mdash; it is the best paragraph in your repo) and put it in a new file:</p>
+<pre><code>-- prisma/sql/audit-lockdown.sql
+-- Lesson 53: split out of tasks_app.sql. This one names a TABLE, so it can
+-- only run AFTER migrations. tasks_app.sql names only roles and defaults, so
+-- it can run on an empty database -- which is what a container start is.
+REVOKE UPDATE, DELETE, TRUNCATE ON "AuditLog" FROM tasks_app;</code></pre>
+<p>Then the full sequence, from nothing to a running app:</p>
+<pre><code>docker compose down -v                                   <span class="dim"># throw the bad volume away</span>
+docker compose up -d db                                  <span class="dim"># init runs clean now</span>
+docker compose run --rm api npx prisma migrate deploy     <span class="dim"># 15 migrations, into the box</span>
+docker compose run --rm api npx prisma db seed            <span class="dim"># users, a team, some tasks</span>
+docker compose exec -T db psql -U tasks -d tasks &lt; prisma/sql/audit-lockdown.sql
+docker compose up                                         <span class="dim"># the whole stack</span></code></pre>
+<p><code>curl localhost:3000/health</code>. Then log in at <code>user1@example.com</code> / <code>correct horse battery</code> and look at a list of tasks that exist nowhere on your Mac.</p>
+<div class="scroll"><table>
+<tr><th>Command</th><th>Why that one</th></tr>
+<tr><td><code>migrate deploy</code></td><td>Not <code>migrate dev</code>. <code>deploy</code> applies pending migrations and nothing else &mdash; it never writes a new one, never prompts, never resets. <b>The only migration command that belongs anywhere near a deploy.</b></td></tr>
+<tr><td><code>run --rm api</code></td><td>A one-off container from the same image and env file, deleted when it exits. It reads <code>DATABASE_URL</code> &mdash; the owner role &mdash; so migrations keep running as <code>tasks</code>, exactly like lesson 42 decided.</td></tr>
+<tr><td><code>exec -T db psql</code></td><td><code>exec</code> runs inside the container that is already up. <code>psql</code> is in the Postgres image, so you need no client on your Mac. <code>-T</code> because you are piping a file in, not typing.</td></tr>
+</table></div>
+<p><b>Prove the wall survived the move.</b> It is one line, and it is the test lesson 41 taught you to run:</p>
+<pre><code>docker compose exec db psql -U tasks_app -d tasks \
+  -c 'delete from "AuditLog";'
+<span class="dim">ERROR:  permission denied for table AuditLog</span></code></pre>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why <code>db</code> instead of <code>host.docker.internal</code>?</p>
+<button>Compose containers share one IP</button>
+<button>A service name is real everywhere</button>
+<p class="why" hidden>Compose puts the services on one network and registers each service name in its DNS, so <code>db</code> resolves wherever the compose file runs. <code>host.docker.internal</code> is a Docker Desktop convenience that names the laptop, and there is no laptop on a server.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why did the <code>REVOKE</code> abort the database init?</p>
+<button>It names a table migrations make</button>
+<button>Only a superuser may revoke it</button>
+<p class="why" hidden>Init scripts run once, on an empty data directory, before a single migration. A <code>GRANT ON ALL TABLES</code> over zero tables succeeds silently; a statement naming <code>"AuditLog"</code> cannot. Split by when a statement can run: roles and default privileges at init, anything naming a table afterwards.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why is <code>condition: service_healthy</code> needed?</p>
+<button>Compose starts services in parallel</button>
+<button>Started is not the same as ready</button>
+<p class="why" hidden>Plain <code>depends_on</code> waits for the container to start, and Postgres accepts connections several seconds after that. The healthcheck polls <code>pg_isready</code> until it answers, so the API boots into a database that can talk. The same gap exists at deploy, at scale, and in CI.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Last lesson's diagram had one box inside your Mac reaching back out. Today there are two boxes and a network of their own &mdash; and the only thing that outlives <code>down</code> is the cylinder.</p>
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  subgraph MAC["your Mac"]
+    CURL["curl :3000"]
+    subgraph NET["compose network"]
+      API["api (Fastify)"]
+      DB["db (postgres:17)"]
+    end
+    VOL[("pgdata volume")]
+    OLD[("Mac Postgres :5432")]
+  end
+  CURL -->|"ports 3000:3000"| API
+  API -->|"db:5432"| DB
+  DB --- VOL
+</pre>
+<figcaption>Two containers, one private network, one volume. Your Mac's Postgres is still there with all your real rows &mdash; nothing today reached it.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div>migrations on start <span class="dim">no entrypoint script running <code>migrate deploy</code> before the app. Two containers starting at once would both try. It is a real deploy problem and it gets its own lesson.</span></div>
+<div>the front end <span class="dim">a third service, a static build, and the nginx config already sitting in <code>deploy/</code>. Not today.</span></div>
+<div>a <code>web</code> profile for tests <span class="dim"><code>npm test</code> still runs against your Mac's Postgres. It works, it is fast, and a second database would only give you two places for the suite to be wrong.</span></div>
+<div>secrets <span class="dim">throwaway passwords in a file you can read. Correct for a laptop, wrong for Fly.io, and the fix is the platform's, not yours.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://docs.docker.com/compose/intro/features-uses/">Docker &mdash; Compose, and why</a>, then the <a href="https://hub.docker.com/_/postgres">official <code>postgres</code> image docs</a>. The second one is the more useful page today: the &ldquo;Initialization scripts&rdquo; and &ldquo;Where to store data&rdquo; sections are exactly the two things that bit you.</p>
+<p><b>Then this:</b> run <code>docker compose down</code> (no <code>-v</code>), then <code>docker compose up</code>, and log in again. Your seeded tasks are still there. Now do it with <code>-v</code>. That two-minute experiment is the whole idea of a volume, and you should feel it once rather than believe it.</p>
+<p><b>Reference card:</b> <a href="../reference/environment.html">Environment</a> &mdash; the <code>DATABASE_URL</code> host now has a third correct value (<code>localhost</code>, <code>host.docker.internal</code>, <code>db</code>), and which is right depends entirely on who is asking.</p>
+<p><b>Ask the community:</b> <a href="https://stackoverflow.com/questions/tagged/docker-compose+postgresql">Stack Overflow, <code>docker-compose</code> + <code>postgresql</code></a>. Good question for them: <em>where do you run <code>migrate deploy</code> &mdash; an init container, the app's entrypoint, or a manual step in the deploy pipeline?</em> You will meet all three answers and the disagreement is the useful part.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0052-the-machine-you-can-throw-away.html">&larr; Back</a>
+<a href="../reference/environment.html">Environment reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

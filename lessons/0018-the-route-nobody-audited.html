@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 18 — User enumeration</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.chan { list-style: none; padding: 0; margin: 1.2rem 0 2.4rem; }
+.chan li { display: grid; grid-template-columns: 5.5rem 1fr 1fr; gap: .9rem;
+  align-items: start; padding: .8rem .9rem; border: 1px solid var(--rule);
+  border-radius: 5px; margin-bottom: .35rem; font-size: .84rem; line-height: 1.5; }
+.chan .name { font-family: var(--mono); font-size: .7rem; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); padding-top: .15rem; }
+.chan .leak { color: var(--bad); }
+.chan .shut { color: var(--ok); }
+.chan .head { border: 0; padding-bottom: .1rem; margin-bottom: .1rem; }
+.chan .head span { font-family: var(--mono); font-size: .66rem; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--muted); }
+
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.2rem 0 2.4rem; }
+.two > div { border: 1px solid var(--rule); border-radius: 6px; padding: 1rem 1.1rem; }
+.two h3 { margin: 0 0 .6rem; font-size: .95rem; }
+.two p { margin: 0 0 .5rem; font-size: .83rem; color: var(--muted); line-height: 1.55; }
+.two p:last-child { margin-bottom: 0; }
+.two .tag { font-family: var(--mono); font-size: .66rem; letter-spacing: .12em;
+  text-transform: uppercase; display: block; margin-bottom: .5rem; }
+.good { border-color: #b6d3ba; background: #f7faf6; }
+.good .tag { color: var(--ok); }
+.bad { border-style: dashed; }
+.bad .tag { color: var(--bad); }
+.ms { font-family: var(--mono); font-size: .78rem; }
+
+pre { font-size: .78rem; }
+h2 { margin-top: 2.6rem; }
+.rule { font-size: .95rem; padding: .8rem 1rem; border-left: 3px solid var(--accent);
+  background: var(--code-bg); border-radius: 0 4px 4px 0; margin: 1.4rem 0 2rem; }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 18 &middot; Week 7&ndash;8 &middot; API security</p>
+<h1>User enumeration</h1>
+<p class="lede">Six lessons hardened <code>POST /auth/login</code>. <code>POST /auth/register</code> sits four lines above it in the same file and got none of it.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>User enumeration</strong>: any reply that tells a stranger whether an email has an account here.</li>
+<li>Three channels leak it: the <strong>message</strong>, the <strong>status code</strong>, the <strong>clock</strong>.</li>
+<li>Your login is clean on all three &mdash; measured, 237 ms vs 236 ms.</li>
+<li>Register leaks it perfectly: 409 means taken, 201 means free.</li>
+<li>So it does not hide it &mdash; it <strong>charges</strong> for it. Five free probes, then lesson 11's backoff.</li>
+</ul>
+</div>
+
+<h2>The picture &mdash; why register was missed</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  REQ["request"] --> HOOKS["app-level hooks<br/>rate limit, CSRF, strict bodies"]
+  HOOKS --> LOGIN["POST /auth/login<br/>+ one message<br/>+ email backoff<br/>+ DUMMY_HASH"]
+  HOOKS --> REG["POST /auth/register<br/>(nothing extra)"]
+  HOOKS -.->|"free to every route"| NOTE1["rules that live in a HOOK"]
+  LOGIN -.->|"written by hand, once"| NOTE2["rules that live in a HANDLER"]
+</pre>
+<figcaption>Register obeyed every rule that lives in an app-level hook and none of the rules that live in a handler. That is the whole lesson: a hook protects routes you have not written yet; a handler protects one route.</figcaption>
+</figure>
+
+<h2>The three channels</h2>
+<table>
+<tr><th>Channel</th><th>Leaks how</th><th>Login</th></tr>
+<tr><td>Message</td><td>"no such user" vs "wrong password"</td><td class="yes">one message</td></tr>
+<tr><td>Status code</td><td>404 vs 401</td><td class="yes">always 401</td></tr>
+<tr><td>Clock</td><td>fast when no user (no hash was run)</td><td class="yes">DUMMY_HASH</td></tr>
+</table>
+
+<p><code>DUMMY_HASH</code> is the subtle one. If no user exists you have nothing to compare against, so the naive code returns instantly &mdash; and the timing alone answers the attacker's question. You hash against a fixed dummy value instead, and pay the 252 ms anyway.</p>
+
+<p class="takeaway">"Cheap check first" holds only when the cheap check leaks less. A wasted hash can be load-bearing.</p>
+
+<h2>The decision: hide it, or charge for it</h2>
+<p>Those are the only two moves against an oracle. A public signup form <em>cannot</em> hide it &mdash; if two people may not share an address, the form must eventually say so.</p>
+<div class="vs">
+<div class="yes">
+<h4>Now: charge for it</h4>
+<pre><code>409 stays.
+Register now pays lesson 11's
+per-email backoff:
+5 free probes, then seconds.</code></pre>
+</div>
+<div class="no">
+<h4>Week 13-14: hide it</h4>
+<pre><code>202 "check your email", always.
+Needs the invite mailer and
+unverified accounts, which
+that week builds anyway.</code></pre>
+</div>
+</div>
+
+<h2>Found while measuring: two rows, one person</h2>
+<p><code>Jay@x.com</code> and <code>jay@x.com</code> were two accounts. The throttle key was lower-cased back in lesson 11; the database lookup was not. Register in one case, log in in the other, get a permanent 401 &mdash; with a green test on top claiming case was handled.</p>
+
+<pre><code>// src/routes/auth.schema.ts — fixed at the door
+email: z.string().trim().toLowerCase().pipe(z.email())</code></pre>
+
+<p>Order matters: <strong>zod chains run left to right.</strong> <code>z.email().trim()</code> would validate the <em>untrimmed</em> string. Normalise first, then <code>.pipe()</code> into the validation. Plus a data-only migration for the rows already saved.</p>
+
+<p class="takeaway">Half a normalisation is worse than none.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="0">
+<p class="q">How should you test a timing defence?</p>
+<button>Assert that both paths are slow</button>
+<button>Assert that both times are close</button>
+<p class="why" hidden>Asserting the two durations are within a few milliseconds is flaky on a busy laptop, and a flaky security test gets deleted. Assert a floor on each path instead.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><code>npm test</code> &mdash; 109 tests, eight new in <code>src/routes/enumeration.test.ts</code>.</li>
+<li>Time both login paths: <code>time curl</code> with a real email, then a nonexistent one. Both ~237 ms.</li>
+<li>Probe register six times with different emails. Watch the backoff arrive.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Three pictures. The channels a reply leaks through, the hash you must not optimise, and the normalisation you did half of.</p>
+
+<h2>1. One question, three answers</h2>
+<p>&ldquo;Does <code>jay@work.com</code> have an account here?&rdquo; A reply can answer it three separate ways.</p>
+<ul class="chan">
+  <li class="head"><span>channel</span><span>how it leaks</span><span>how login shuts it</span></li>
+  <li>
+    <span class="name">Message</span>
+    <span class="leak">&ldquo;wrong password&rdquo; vs &ldquo;no such user&rdquo;</span>
+    <span class="shut">One string for both. Byte-identical.</span>
+  </li>
+  <li>
+    <span class="name">Status</span>
+    <span class="leak"><code>409</code> vs <code>201</code>. Or a real email flipping to <code>429</code> while a fake one stays <code>401</code>.</span>
+    <span class="shut"><code>401</code> either way, and the throttle is keyed on the <em>typed</em> email.</span>
+  </li>
+  <li>
+    <span class="name">Clock</span>
+    <span class="leak">No user &rarr; skip the hash &rarr; <span class="ms">2 ms</span> instead of <span class="ms">237 ms</span>.</span>
+    <span class="shut"><code>DUMMY_HASH</code>. Hash against nothing rather than branch.</span>
+  </li>
+</ul>
+<p><strong>Your login closes all three. Your register closes the clock and leaks the other two</strong> &mdash; measured <span class="ms">250 ms / 409</span> against <span class="ms">242 ms / 201</span>. A perfect timing defence is worth nothing next to a status code that just says it.</p>
+
+<h2>2. The hash you must not optimise</h2>
+<p>Register hashes a password, <em>then</em> finds out the email was taken. 250 ms of work thrown away. Fixing it opens the channel the login closed.</p>
+<div class="two">
+<div class="bad">
+<span class="tag">Faster &middot; leaks</span>
+<h3>Check first</h3>
+<pre><code>if (await exists(email))
+  return 409;          // 2 ms
+await hashPassword(pw); // 250 ms
+create(...)</code></pre>
+<p>Taken &rarr; <span class="ms">2 ms</span>. Free &rarr; <span class="ms">250 ms</span>.</p>
+<p>Now delete the <code>409</code> and answer <code>201</code> to everybody: <strong>the clock still gives the answer back.</strong></p>
+</div>
+<div class="good">
+<span class="tag">Wasteful &middot; silent</span>
+<h3>Hash first</h3>
+<pre><code>const hash = await hashPassword(pw);
+const user = await create(email, hash);
+if (!user) return 409;  // 250 ms
+return 201;             // 250 ms</code></pre>
+<p>Taken &rarr; <span class="ms">250 ms</span>. Free &rarr; <span class="ms">242 ms</span>.</p>
+<p>One channel already shut, for free, before you decide anything about the status code.</p>
+</div>
+</div>
+<p class="rule"><strong>&ldquo;Cheap check first&rdquo; (lesson 12) holds only when the cheap check leaks <em>less</em>.</strong> On login it did. On register it leaks more &mdash; so the wasted hash is load-bearing. A rule has a domain.</p>
+
+<h2>3. Half a normalisation</h2>
+<p>Two lines of the same handler. One lower-cased the address, the other did not.</p>
+<pre><code>const key = email.toLowerCase();          // the throttle counter  ->  jay@x.com
+const user = await findUserByEmail(email); // the database lookup   ->  Jay@x.com
+                       ^^^^^ raw</code></pre>
+<figure class="fig">
+<pre class="mermaid">flowchart TB
+  I["POST /auth/register<br/>Jay@x.com"] --> R1["row 720<br/>'Jay@x.com'"]
+  I2["POST /auth/register<br/>jay@x.com"] --> R2["row 721<br/>'jay@x.com'"]
+  R1 --> P["One person.<br/>Two accounts."]
+  R2 --> P
+  L["POST /auth/login<br/>jay@x.com"] --> X["401, forever"]
+  R1 -.->|"never matched"| X</pre>
+<figcaption>iOS capitalises the first letter of a text field by default. The user reports this as &ldquo;your site lost my password&rdquo;.</figcaption>
+</figure>
+<p>And this test, from lesson 11, was <strong>green the whole time</strong> &mdash; because it only ever exercised the key, never the lookup:</p>
+<pre><code>test("case does not open a side door", ...)   // ok 41</code></pre>
+<p class="rule"><strong>Half a normalisation is worse than none.</strong> With none, you find the bug the first time you type a capital letter. With half, a passing test tells you not to look.</p>
+
+<h2>The fix has one location</h2>
+<p>Count the places a raw address can enter: login, register, every route after this one. It has one door, and it is not the query.</p>
+<pre><code>// src/schemas/auth.schema.ts
+const emailField = z.string().trim().toLowerCase();
+
+export const Register = z.object({
+  email: emailField.pipe(z.email().max(254)),   // normalise, THEN validate
+  ...
+});</code></pre>
+<div class="two">
+<div class="bad">
+<span class="tag">Reads right &middot; wrong</span>
+<pre><code>z.email().trim().toLowerCase()
+// "  Jay@x.com "  ->  400</code></pre>
+<p><code>.email()</code> judged the string before <code>.trim()</code> touched it.</p>
+</div>
+<div class="good">
+<span class="tag">Correct</span>
+<pre><code>z.string().trim().toLowerCase()
+  .pipe(z.email().max(254))
+// "  Jay@x.com "  ->  "jay@x.com"</code></pre>
+<p>A zod chain runs left to right. Transforms are not preprocessing.</p>
+</div>
+</div>
+
+<hr>
+<p class="nav">The lesson: <a href="./0018-the-route-nobody-audited.html">Lesson 18 &mdash; The route nobody audited</a> &middot; Reference: <a href="../reference/api-security-basics.html#enumeration">Enumeration channels</a></p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html#authentication-and-error-messages">OWASP, Authentication and Error Messages</a>.</p>
+<p><b>The long version:</b> <a href="./long/0018-the-route-nobody-audited.html">the full audit, rule by rule</a>.</p>
+<p>Forgot-password does not exist yet. When we build it, it goes design-A from line one. Ask me why.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0017-the-key-you-did-not-name.html">&larr; Back</a>
+<a href="./0019-the-row-that-outlives-the-user.html">Next &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

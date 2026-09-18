@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference &mdash; Tests in this project</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<p class="kicker">Reference &middot; Tooling</p>
+<h1>Tests in this project</h1>
+<p class="lede">How the suite is run, what each kind of test is for, and the four ways a test can pass without proving anything. Open this before you add a test file. From lessons <a href="../lessons/0006-a-door-that-stays-open.html">6</a>, <a href="../lessons/0034-the-log-that-keeps-the-secret.html">34</a> and <a href="../lessons/0035-the-test-that-never-ran.html">35</a>.</p>
+
+<h2>The rule</h2>
+<p class="takeaway">A test you have never seen fail is not a test. It is a file.</p>
+
+<h2>The commands</h2>
+<div class="scroll">
+<table>
+<tr><th>Command</th><th>Where</th><th>What it does</th></tr>
+<tr><td><code>npm test</code></td><td><code>server/</code></td><td>All server tests. Hits the <b>real</b> Postgres. Expect <b>155</b>.</td></tr>
+<tr><td><code>npm test</code></td><td><code>web/</code></td><td>Pure front-end logic only, no browser. Expect <b>5</b>.</td></tr>
+<tr><td><code>npx tsx --test src/x.test.ts</code></td><td><code>server/</code></td><td>One file, while you are writing it. Add <code>LOG_LEVEL=silent</code> in front to keep it quiet.</td></tr>
+<tr><td><code>npm run typecheck</code></td><td><code>server/</code></td><td><code>tsc --noEmit</code>. Not a test. It cannot see a wrong value, only a wrong type.</td></tr>
+<tr><td><code>npx tsc -b</code></td><td><code>web/</code></td><td>Same job on the front end.</td></tr>
+</table>
+</div>
+<p>No Jest, no Vitest, no test framework installed. The runner is <code>node:test</code>, which ships inside Node, driven through <code>tsx</code> so it reads TypeScript. Decided in lesson 6 and still the right call. Vitest arrives only when the first <em>component</em> test needs a DOM.</p>
+
+<h2>Globs: quote them, always</h2>
+<pre><code>"test": "LOG_LEVEL=silent tsx --test <b>\"</b>src/**/*.test.ts<b>\"</b>"</code></pre>
+<div class="word"><b>shell expansion</b> &mdash; the shell replaces the pattern with matching file names <em>before</em> your program starts. Quoted, it does not touch the pattern, and the runner does the matching itself.</div>
+<div class="word"><b>globstar</b> &mdash; <code>**</code> meaning &ldquo;any number of directories&rdquo;. On in zsh. <b>Off in sh and bash</b>, where <code>**</code> is an ordinary <code>*</code> &mdash; one level only.</div>
+<p><code>npm run</code> uses sh, your terminal uses zsh. Unquoted, the same script gives different suites in the two places. Measured in lesson 35: 154 through <code>npm test</code>, 155 pasted into the terminal.</p>
+<p><b>The check, any project, any runner:</b></p>
+<pre><code>find src -name '*.test.ts' | wc -l        <b>22</b>   files on disk
+sh -c 'set -- src/**/*.test.ts; echo $#'  <b>21</b>   files the runner gets</code></pre>
+<p>When those two numbers disagree, some test file is never running and nothing will tell you.</p>
+
+<h2>The four silent passes</h2>
+<div class="scroll">
+<table>
+<tr><th>Failure</th><th>Cause</th><th>How to catch it</th></tr>
+<tr><td>The file never ran</td><td>A glob the shell ate</td><td>Expect a number. A new file must move it.</td></tr>
+<tr><td>It ran with nothing to read</td><td><code>LOG_LEVEL=silent</code>, an empty stream, an empty list</td><td><code>assert.ok(all.length &gt; 0)</code> <b>first</b>, before any &ldquo;is not present&rdquo; check.</td></tr>
+<tr><td>It asserted the obvious</td><td>Both branches give the same answer on your data</td><td>Use data where the right and wrong answers differ.</td></tr>
+<tr><td>The type checker passed</td><td><code>tsc</code> believes a declared type; it does not check a value</td><td><code>tsc</code> is not a test. Run the code.</td></tr>
+</table>
+</div>
+<p class="takeaway">One habit covers all four: break the code, watch the test go red, put the code back.</p>
+
+<h2>Two kinds of test, and which to write</h2>
+<div class="vs">
+<div class="yes"><h4>decision test</h4><pre><code>can("VIEWER", "task:update")
+// false</code></pre>
+<p style="font-size:0.82rem">Pure function, no app, no database. Fast, and it can cover every role and action. Use it for the <em>rule</em>.</p></div>
+<div class="yes"><h4>enforcement test</h4><pre><code>await app.inject({
+  method: "PATCH", url: "...",
+  cookies: { sid } })
+// 403</code></pre>
+<p style="font-size:0.82rem"><code>app.inject()</code> runs a real request through the real pipeline &mdash; hooks, CSRF, zod, Postgres &mdash; with no port and no network. Use it for the <em>wiring</em>.</p></div>
+</div>
+<p>A passing decision test with no enforcement test means the rule is correct and possibly not called. Seventeen test files use <code>app.inject()</code>; that is the shape to copy.</p>
+
+<h2>Fixtures: every file is its own process</h2>
+<p>The runner starts <b>one process per file</b> and runs up to 8 of them at once on this machine. So two files that seed rows with the same key will delete each other&rsquo;s data, and the failure looks like a random 401. This cost an afternoon in lesson 10.</p>
+<div class="scroll">
+<table>
+<tr><th>Rule</th><th>Why</th></tr>
+<tr><td>Each file makes its own fixture</td><td>No shared setup file to depend on, and no order between files.</td></tr>
+<tr><td>Make every key unique per file</td><td><code>const stamp = Date.now()</code> is not enough on its own &mdash; add the file&rsquo;s own prefix.</td></tr>
+<tr><td>Never share state between files</td><td>There is no order and no lock. Two files are genuinely concurrent.</td></tr>
+<tr><td>Clean up rows you seeded</td><td>The dev database is also the app&rsquo;s database.</td></tr>
+</table>
+</div>
+
+<h2>Reading a log line in a test</h2>
+<pre><code>const out: string[] = [];
+const sink = new Writable({
+  write(chunk, _enc, cb) { out.push(chunk.toString()); cb(); },
+});
+const app = await buildApp(sink);        <b>// a stream raises the level too</b>
+// ... make it log ...
+const all = out.join("");
+assert.ok(all.length &gt; 0, "the log wrote nothing - check the level");</code></pre>
+<p><code>buildApp(logStream?)</code> exists because a log line has no failing state &mdash; the only way to test one is to read it. Passing a stream is the signal that you intend to read the log, so <code>buildApp</code> raises the level above <code>LOG_LEVEL=silent</code>. Without that, the test reads nothing and passes forever.</p>
+
+<h2>Sources</h2>
+<p><a href="https://nodejs.org/api/test.html">Node &mdash; Test runner</a>. The command-line section covers glob patterns and the default file patterns; the &ldquo;test isolation&rdquo; part covers the process-per-file behaviour.</p>
+<p><a href="https://fastify.dev/docs/latest/Guides/Testing/">Fastify &mdash; Testing</a>. This is where <code>app.inject()</code> comes from, and why you never need to listen on a port in a test.</p>
+<p><a href="https://www.gnu.org/software/bash/manual/bash.html#The-Shopt-Builtin">Bash manual &mdash; <code>globstar</code></a>. Two sentences, and they are the whole of lesson 35.</p>
+
+<nav class="nav">
+<a href="../lessons/index.html">All lessons</a>
+<a href="../lessons/0035-the-test-that-never-ran.html">Lesson 35</a>
+<a href="./logging.html">Logging reference</a>
+</nav>
+
+</body>
+</html>

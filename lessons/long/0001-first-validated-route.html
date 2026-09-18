@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 — Your First Validated Route</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 01 &middot; Week 1 &middot; API Basics</p>
+<h1>Your first validated route</h1>
+<p class="lede">You already write TypeScript. Today you point it at a port instead of a browser. One win: a running API that <em>refuses bad input at the door</em>.</p>
+
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>A server is just a function that runs when a request arrives.</li>
+<li>Check the request <em>before</em> your code touches it. This line is the <strong>trust boundary</strong>.</li>
+<li>Use the <em>checked</em> copy of the data. Never the raw one.</li>
+<li>You will build: <code>POST /tasks</code> that says 400 to bad input.</li>
+</ul>
+</div>
+
+<h2>Why this first</h2>
+<p>Every later thing in this workspace &mdash; login, roles, audit logs &mdash; is a function that runs on a request before your real code does. So the very first thing to learn is the shape of a request handler, and the very first habit to build is <strong>validate at the trust boundary</strong>.</p>
+
+<p>A <strong>trust boundary</strong> is the line where data you control meets data a stranger sent you. Inside your server, you trust your own variables. At the boundary, you trust nothing. Validation is the only wall there. <a href="https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html">OWASP puts it the same way</a>: validate on the server, always, even if the browser already did.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  C["Anyone<br/>curl, React, a bot"] -- "POST /tasks" --> F["Fastify<br/>opens the port"]
+  F --> W{"Zod schema<br/>the wall"}
+  W -- "shape is wrong" --> B["400<br/>stop here"]
+  W -- "shape is right" --> H["Your handler<br/>trusted data only"]
+  H --> R["201 + the new task"]
+</pre>
+<figcaption>The wall sits before your code, not inside it. Everything you build later &mdash; login, roles, limits &mdash; slots into that same gap.</figcaption>
+</figure>
+
+<p class="takeaway">The front end validates to be kind to the user. The back end validates to stay alive.</p>
+
+<h2>Set it up</h2>
+<p>Run these in <code>/Users/jay/learning/full-stack-learning</code>:</p>
+<pre><code>mkdir -p api &amp;&amp; cd api
+npm init -y
+npm i fastify zod
+npm i -D typescript tsx @types/node
+npx tsc --init</code></pre>
+
+<p>Three packages, three jobs:</p>
+<div class="scroll">
+<table>
+<tr><th>Package</th><th>Job</th></tr>
+<tr><td><code>fastify</code></td><td>Listens on a port. Turns HTTP into a function call.</td></tr>
+<tr><td><code>zod</code></td><td>Describes the shape input must have. Rejects anything else.</td></tr>
+<tr><td><code>tsx</code></td><td>Runs TypeScript directly, no build step while learning.</td></tr>
+</table>
+</div>
+
+<h2>The code</h2>
+<p>Create <code>api/src/server.ts</code>:</p>
+<pre><code>import Fastify from "fastify";
+import { z } from "zod";
+
+const app = Fastify({ logger: true });
+
+// The wall. Anything not matching this never reaches the handler.
+const CreateTask = z.object({
+  title: z.string().min(1).max(200),
+  done: z.boolean().default(false),
+});
+
+const tasks: Array&lt;z.infer&lt;typeof CreateTask&gt; &amp; { id: number }&gt; = [];
+
+app.get("/health", async () =&gt; ({ ok: true }));
+
+app.post("/tasks", async (request, reply) =&gt; {
+  const parsed = CreateTask.safeParse(request.body);
+  if (!parsed.success) {
+    return reply.code(400).send({ error: "invalid body" });
+  }
+  const task = { id: tasks.length + 1, ...parsed.data };
+  tasks.push(task);
+  return reply.code(201).send(task);
+});
+
+app.get("/tasks", async () =&gt; tasks);
+
+app.listen({ port: 3000 }).catch((err) =&gt; {
+  app.log.error(err);
+  process.exit(1);
+});</code></pre>
+
+<p>Start it:</p>
+<pre><code>npx tsx watch src/server.ts</code></pre>
+
+<h2>Now attack it</h2>
+<p>This is the part that teaches. Run each command and predict the status code <em>before</em> you press enter.</p>
+
+<pre><code># 1. should work
+curl -i -X POST localhost:3000/tasks \
+  -H 'content-type: application/json' \
+  -d '{"title":"buy milk"}'
+
+# 2. empty title
+curl -i -X POST localhost:3000/tasks \
+  -H 'content-type: application/json' \
+  -d '{"title":""}'
+
+# 3. wrong type
+curl -i -X POST localhost:3000/tasks \
+  -H 'content-type: application/json' \
+  -d '{"title":"x","done":"yes please"}'
+
+# 4. extra field you never asked for
+curl -i -X POST localhost:3000/tasks \
+  -H 'content-type: application/json' \
+  -d '{"title":"x","isAdmin":true}'</code></pre>
+
+<p>Number 4 is the important one. Look at what came back. The <code>isAdmin</code> field is <em>gone</em> &mdash; because you built the task from <code>parsed.data</code>, not from <code>request.body</code>. That accident-proofing has a name: it stops <strong>mass assignment</strong>, where an attacker sets a field you never meant to expose. Had you written <code>{ id, ...request.body }</code>, the extra field would have sailed straight in.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  BODY["request.body<br/>{ title, isAdmin: true }"]
+  BODY -- "you spread this" --> BAD["{ id, title, isAdmin: true }<br/>the extra field got in"]
+  BODY --> Z["Zod keeps only<br/>the keys you named"]
+  Z --> GOOD["parsed.data<br/>{ title, done }"]
+  GOOD -- "you spread this" --> OK["{ id, title, done }<br/>the extra field is gone"]
+</pre>
+<figcaption>Same request, two habits. The left path is called <strong>mass assignment</strong>. The right path is one word different in your code.</figcaption>
+</figure>
+
+<div class="aside"><strong>Habit to keep for 16 weeks:</strong> never read <code>request.body</code> after validating. Read the parsed result. Same for <code>request.query</code> and <code>request.params</code>.</div>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">The React form already blocks an empty title. Why validate on the server too?</p>
+<button>Because Zod runs faster on a server than it does inside a browser</button>
+<button>Because a stranger can send a request without ever opening your form</button>
+<p class="why" hidden>Right: <code>curl</code>, Postman, or a script never load your front end. Client validation is a nicety; server validation is the actual boundary.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Which line lets an attacker smuggle an unexpected field into your object?</p>
+<button><code>const task = { id: 1, ...request.body };</code></button>
+<button><code>const task = { id: 1, ...parsed.data };</code></button>
+<p class="why" hidden>Right: spreading the raw body copies every key the sender chose. Spreading the parsed result copies only keys your schema named.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Test 3 sent <code>"done": "yes please"</code>. What should the server answer?</p>
+<button>201, then quietly coerce the string into the boolean true</button>
+<button>400, because the value does not match the declared schema</button>
+<p class="why" hidden>Right: silent coercion hides bugs. Reject at the boundary and say so with a 400.</p>
+</div>
+
+<h2>Read this</h2>
+<p><strong>Primary source:</strong> <a href="https://fastify.dev/docs/latest/Reference/Validation-and-Serialization/">Fastify &mdash; Validation and Serialization</a>. Read it and notice that Fastify has its own schema system built in. Next lesson you will move validation into the route definition, so the wall is declared rather than remembered.</p>
+<p>Also skim: <a href="https://zod.dev/?id=basic-usage">Zod basic usage</a>.</p>
+
+<h2>Do this before lesson 2</h2>
+<ol>
+<li>Get all four curl tests running and note each status code.</li>
+<li>Add a <code>PATCH /tasks/:id</code> route. Validate <code>:id</code> too &mdash; params are input as well.</li>
+<li>Break it on purpose: change <code>parsed.data</code> to <code>request.body</code> and re-run test 4. See the field appear.</li>
+</ol>
+
+<hr>
+<footer>
+<p><strong>Stuck, or something felt hand-wavy?</strong> Ask me. I am your teacher here, not just the person who wrote the page. Say what confused you and I will re-teach it a different way, or write a follow-up lesson.</p>
+<p>Keep for reference: <a href="../../reference/api-security-basics.html">API Security Basics cheat sheet</a>. Mission: <a href="../../MISSION.md">MISSION.md</a>. Sources: <a href="../../RESOURCES.md">RESOURCES.md</a>.</p>
+<p class="nav"><a href="../../reference/api-security-basics.html">Cheat sheet &rarr;</a></p>
+</footer>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

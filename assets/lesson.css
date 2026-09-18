@@ -1,0 +1,117 @@
+/* Shared stylesheet for every lesson and reference doc in this workspace. */
+:root {
+  --bg: #fffdf9;
+  --ink: #1c1a17;
+  --muted: #5f5a52;
+  --rule: #e2dcd1;
+  --accent: #8a3324;
+  --code-bg: #f4f0e8;
+  --ok: #2f6b3a;
+  --bad: #93231a;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14130f; --ink: #ece7dd; --muted: #a09a8f; --rule: #33302a;
+    --accent: #e08a72; --code-bg: #1e1c17; --ok: #7fbf8d; --bad: #e58c80;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14130f; --ink: #ece7dd; --muted: #a09a8f; --rule: #33302a;
+  --accent: #e08a72; --code-bg: #1e1c17; --ok: #7fbf8d; --bad: #e58c80;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font-family: var(--serif); font-size: 19px; line-height: 1.6;
+  margin: 0 auto; padding: 4rem 1.5rem 6rem; max-width: 40rem;
+  text-rendering: optimizeLegibility;
+}
+.kicker { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: 0.6rem; }
+h1 { font-size: 2.1rem; line-height: 1.15; margin: 0 0 0.4rem; font-weight: 600; }
+h2 { font-size: 1.3rem; margin: 2.6rem 0 0.6rem; font-weight: 600; }
+h3 { font-size: 1.05rem; margin: 1.8rem 0 0.4rem; font-weight: 600; }
+.lede { color: var(--muted); font-size: 1.08rem; margin: 0 0 2rem; }
+hr { border: 0; border-top: 1px solid var(--rule); margin: 3rem 0; }
+a { color: var(--accent); text-decoration: none; border-bottom: 1px solid var(--rule); }
+a:hover { border-bottom-color: var(--accent); }
+code { font-family: var(--mono); font-size: 0.82em; background: var(--code-bg);
+  padding: 0.1em 0.35em; border-radius: 3px; }
+pre { background: var(--code-bg); border-left: 3px solid var(--rule);
+  padding: 1rem 1.1rem; overflow-x: auto; font-size: 0.8rem; line-height: 1.55; border-radius: 3px; }
+pre code { background: none; padding: 0; font-size: inherit; }
+blockquote { margin: 1.6rem 0; padding-left: 1.1rem; border-left: 3px solid var(--accent);
+  color: var(--muted); font-style: italic; }
+.aside { font-size: 0.86rem; color: var(--muted); background: var(--code-bg);
+  padding: 0.9rem 1.1rem; border-radius: 4px; margin: 1.6rem 0; }
+.aside strong { color: var(--ink); }
+table { width: 100%; border-collapse: collapse; font-size: 0.86rem; margin: 1.4rem 0; }
+th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-family: var(--mono); font-size: 0.7rem; text-transform: uppercase;
+  letter-spacing: 0.09em; color: var(--muted); font-weight: 500; }
+.scroll { overflow-x: auto; }
+ol, ul { padding-left: 1.3rem; }
+li { margin: 0.4rem 0; }
+.nav { display: flex; gap: 1.2rem; flex-wrap: wrap; font-family: var(--mono);
+  font-size: 0.74rem; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 3rem; }
+footer { margin-top: 3.5rem; padding-top: 1.4rem; border-top: 1px solid var(--rule);
+  font-size: 0.86rem; color: var(--muted); }
+@media print {
+  body { max-width: none; font-size: 11pt; padding: 0; }
+  pre, .aside, table { break-inside: avoid; }
+  .quiz, .nav { display: none; }
+  .fig, .tldr { break-inside: avoid; }
+  a { border: 0; color: var(--ink); }
+}
+
+/* Table cell that marks "this layer covers it". Added in lesson 12. */
+td.yes { color: var(--ok); font-weight: 600; }
+
+/* --- Diagrams. Rendered by assets/diagram.js from <pre class="mermaid">. --- */
+.fig { margin: 1.8rem 0; padding: 0; text-align: center; }
+.fig .mermaid { background: none; border: 0; padding: 0; margin: 0; overflow-x: auto;
+  font-family: var(--mono); font-size: 0.8rem; color: var(--muted); }
+.fig .mermaid svg { max-width: 100%; height: auto; }
+.fig figcaption { font-size: 0.8rem; color: var(--muted); margin-top: 0.7rem;
+  text-align: left; border-left: 3px solid var(--rule); padding-left: 0.8rem; }
+
+/* --- "In one minute" box at the top of every page. --- */
+.tldr { border: 1px solid var(--rule); border-left: 3px solid var(--accent);
+  border-radius: 4px; padding: 1rem 1.2rem 1.1rem; margin: 0 0 2.2rem; }
+.tldr h2 { font-family: var(--mono); font-size: 0.7rem; text-transform: uppercase;
+  letter-spacing: 0.11em; color: var(--muted); margin: 0 0 0.6rem; font-weight: 500; }
+.tldr ul { margin: 0; padding-left: 1.1rem; font-size: 0.92rem; }
+.tldr li { margin: 0.35rem 0; }
+
+/* --- Key sentence worth remembering. --- */
+.takeaway { font-size: 1.02rem; font-weight: 600; border: 0; border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule); padding: 0.9rem 0; margin: 1.8rem 0;
+  font-style: normal; color: var(--ink); }
+
+/* --- Short-format components (2026-09-07 rewrite). --- */
+
+/* Side-by-side "the wrong shape / the right shape". Stacks on narrow screens. */
+.vs { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; margin: 1.6rem 0; }
+.vs > div { min-width: 0; }
+.vs h4 { font-family: var(--mono); font-size: 0.68rem; text-transform: uppercase;
+  letter-spacing: 0.1em; margin: 0 0 0.4rem; font-weight: 500; }
+.vs .no h4 { color: var(--bad); }
+.vs .yes h4 { color: var(--ok); }
+.vs pre { margin: 0; font-size: 0.72rem; }
+@media (max-width: 34rem) { .vs { grid-template-columns: 1fr; } }
+
+/* Plain-words gloss for one new term. */
+.word { margin: 1.2rem 0; padding-left: 0.9rem; border-left: 3px solid var(--rule); font-size: 0.92rem; }
+.word b { font-family: var(--mono); font-size: 0.82em; color: var(--accent); }
+
+/* Footer block: primary source, the long version, the reminder to ask. */
+.ask { font-size: 0.86rem; }
+.ask p { margin: 0.5rem 0; }
+
+/* Table cell that marks "this layer refuses it". Added in lesson 42. */
+td.no { color: var(--bad); font-weight: 600; }
+
+/* Inline "this cannot be undone" mark. Added in lesson 43. */
+.warn { color: var(--bad); font-weight: 600; }

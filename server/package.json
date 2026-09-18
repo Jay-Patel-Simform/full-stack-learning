@@ -1,0 +1,39 @@
+{
+  "name": "server",
+  "version": "1.0.0",
+  "description": "",
+  "keywords": [],
+  "license": "ISC",
+  "author": "",
+  "type": "module",
+  "main": "src/server.ts",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "test": "NODE_ENV=test LOG_LEVEL=silent tsx --test \"src/**/*.test.ts\"",
+    "audit:prune": "tsx src/audit/prune.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint",
+    "format": "oxfmt .",
+    "log": "psql \"$(grep -m1 DATABASE_URL .env | cut -d'\"' -f2)\" -c 'select at, \"userId\", \"teamId\", method, route, status from \"AuditLog\" order by at desc limit 20;'"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/helmet": "^13.1.1",
+    "@fastify/rate-limit": "^11.2.0",
+    "@prisma/adapter-pg": "^7.10.0",
+    "@prisma/client": "^7.10.0",
+    "fastify": "^5.12.1",
+    "pg": "^8.23.0",
+    "prisma": "^7.10.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.0",
+    "dotenv": "^17.4.2",
+    "oxfmt": "^0.65.0",
+    "oxlint": "^1.80.0",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}

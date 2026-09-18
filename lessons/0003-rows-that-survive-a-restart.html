@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 3 — Prisma: schema, migration, client</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 03 &middot; Week 1&ndash;2 &middot; Database</p>
+<h1>Prisma: schema, migration, client</h1>
+<p class="lede">Your tasks live in an array. Stop the server and they are gone. Today they move into Postgres.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>An array dies with the process. A table lives on disk.</li>
+<li>Three new words: <strong>schema</strong> (the shape), <strong>migration</strong> (the change), <strong>client</strong> (typed code to talk to it).</li>
+<li>Only the store file changes. Your routes barely move &mdash; that is the point of having a store file.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  S["schema.prisma<br/>the shape you want"] -- "prisma migrate dev" --> M["migration.sql<br/>a file in git"]
+  M -- "runs once" --> DB[("Postgres<br/>on disk")]
+  S -- "prisma generate" --> C["Prisma client<br/>typed functions"]
+  C --> DB
+  ROUTES["your routes"] --> ST["task.store.ts"] --> C
+</pre>
+<figcaption>You edit one file, the shape. Two things fall out of it: a SQL file that changes the real database, and typed code your app calls. Routes never see any of this.</figcaption>
+</figure>
+
+<h2>The idea</h2>
+<p>Right now <code>const tasks = []</code> holds everything. That array is inside the Node process. Kill the process, kill the data.</p>
+<p>Postgres is a separate program that writes to disk. It is already running on this Mac (about 15 MB), so you install nothing new.</p>
+
+<div class="word"><b>schema</b> &mdash; the shape you <em>want</em>. One file, <code>schema.prisma</code>.</div>
+<div class="word"><b>migration</b> &mdash; the <em>change</em> from the old shape to the new one, saved as SQL in git. It runs once, everywhere.</div>
+<div class="word"><b>client</b> &mdash; generated TypeScript functions that match your schema, so a typo is a compile error.</div>
+
+<h2>The code</h2>
+<pre><code>// prisma/schema.prisma — the shape
+model Task {
+  id     Int     @id @default(autoincrement())
+  title  String
+  done   Boolean @default(false)
+  owner  String
+}</code></pre>
+<pre><code>npx prisma migrate dev --name task   # writes the SQL, runs it
+</code></pre>
+<pre><code>// src/tasks/task.store.ts — the only file that changed
+export const store = {
+  list:   ()      =&gt; prisma.task.findMany(),
+  create: (data)  =&gt; prisma.task.create({ data }),
+};</code></pre>
+
+<p class="takeaway">A boundary earns its keep the day the thing behind it is replaced.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">Why keep the migration SQL file in git?</p>
+<button>So Prisma can read your schema later</button>
+<button>So every machine makes the same change</button>
+<p class="why" hidden>The migration is a record of the change. Your laptop, a colleague's laptop and the server all run the same file in the same order, so all three end up with the same table.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><code>POST</code> two tasks. Restart the server. <code>GET /tasks</code>. They are still there.</li>
+<li>Open <code>prisma/migrations/</code> and read the SQL. It is short.</li>
+<li>In <code>psql</code>: <code>select * from "Task";</code></li>
+</ol>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://www.prisma.io/docs/orm/prisma-migrate/getting-started">Prisma Migrate, Getting Started</a>.</p>
+<p><b>Reference card:</b> <a href="../reference/prisma-postgres.html">Prisma + Postgres cheat sheet</a>.</p>
+<p><b>The long version:</b> <a href="./long/0003-rows-that-survive-a-restart.html">every command, step by step</a>.</p>
+<p>If a command fails, paste the error at me.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0002-schemas-at-the-door.html">&larr; Back</a>
+<a href="./0004-rows-that-point-at-rows.html">Next: rows that point at rows &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

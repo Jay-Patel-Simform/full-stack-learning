@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 33 &mdash; Query keys as questions</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; margin: 1.1rem 0; }
+  .two h4 { font-family: var(--mono); font-size: 0.66rem; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--muted); margin: 0 0 0.2rem; font-weight: 600; }
+  @media (max-width: 34rem) { .two { grid-template-columns: 1fr; } }
+
+  .box { font-family: var(--mono); font-size: 0.72rem; margin: 0.8rem 0;
+    border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  .box > .cap { background: var(--code-bg); color: var(--muted); font-size: 0.66rem;
+    padding: 0.35rem 0.7rem; border-bottom: 1px solid var(--rule); }
+  .box .body { padding: 0.6rem 0.7rem; overflow-x: auto; }
+  .box .body > div { padding: 0.12rem 0; white-space: nowrap; }
+
+  .bad { color: var(--bad); font-weight: 600; }
+  .ok { color: var(--ok); font-weight: 600; }
+  .dim { color: var(--muted); }
+  .acc { color: var(--accent); font-weight: 600; }
+
+  .tbl { font-family: var(--mono); font-size: 0.7rem; margin: 1.1rem 0;
+    border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  .tbl .row { display: grid; grid-template-columns: 1fr 8rem 8rem;
+    border-top: 1px solid var(--rule); }
+  .tbl .row:first-child { border-top: 0; background: var(--code-bg); color: var(--muted);
+    font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.08em; }
+  .tbl .row > div { padding: 0.4rem 0.7rem; }
+  .tbl .row > div + div { border-left: 1px solid var(--rule); text-align: right; }
+  @media (max-width: 34rem) { .tbl .row { grid-template-columns: 1fr 5.5rem 5.5rem; } }
+
+  .strip { font-family: var(--mono); font-size: 0.72rem; margin: 1rem 0;
+    display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .strip span { border: 1px solid var(--rule); border-radius: 3px; padding: 0.25rem 0.5rem; }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 33 &middot; Week 11 &middot; Real world</p>
+<h1>Query keys as questions</h1>
+<p class="lede">Today the task list stops being &ldquo;the tasks&rdquo; and becomes <b>the tasks that match what you asked for</b>. Two filters: <code>?done=</code> and <code>?q=</code>. The server part is six lines. The front-end part is one line &mdash; and if you write that one line wrong, ticking a filter sends <b>no request at all</b>, and the &ldquo;Load more&rdquo; button quietly mixes two different lists into one. I measured it. That is the lesson.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>A filter is an input to the answer, so it belongs in the query key.</strong> Measured with the filter left out: the user asks for done-only, <b>0 requests go out</b>, the old list stays on screen. Then &ldquo;Load more&rdquo; sends the filtered request with the <em>unfiltered</em> cursor and appends rows to a list they do not belong to.</li>
+<li><strong>Put it in the key and paging resets for free.</strong> Measured: a new key means a new cache entry, so the request goes out with <b>no cursor</b>. You wrote no code to reset anything.</li>
+<li><strong><code>done</code> has three answers, not two.</strong> <code>true</code>, <code>false</code>, and absent. Three buttons, not a checkbox. This is the same shape as the session in <a href="./0022-the-browser-does-not-know-you.html">lesson 22</a>.</li>
+<li><strong>Trap, measured: <code>z.coerce.boolean()</code> reads the string <code>"false"</code> as <code>true</code>.</strong> It is JavaScript&rsquo;s <code>Boolean()</code>, and a five-letter string is not empty. <code>z.stringbool()</code> knows the words.</li>
+<li><strong>Trap, measured: Postgres <code>LIKE</code> is case sensitive.</strong> <code>contains: "buy"</code> found <b>2 of 4</b> rows a person would call a match. <code>mode: "insensitive"</code> is the fix.</li>
+<li><strong>And the second-order cost: one team now has many cache entries.</strong> A write that changes <em>whether a row still belongs in the list</em> can no longer be patched in by hand. One of your three mutations keeps its surgical edit; two go back to asking.</li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<p>Checked before writing, as always. You typed lesson 32&rsquo;s tests and they pass:</p>
+<pre><code>server: npm test          <b>146 passing</b>  -&gt; now <b>154</b> with today's work
+web:    npm test          <b>4 passing</b>    &lt;- you wrote these
+web:    npx tsc -b        <b>clean</b>
+web:    npm run build     <b>clean</b></code></pre>
+<p><b>And the trim fix is done.</b> I said I would stop asking and just do it, so it is done, with two tests. <code>title: z.string().trim().min(1).max(200)</code>. A title of three spaces is now a <code>400</code>, and <code>"&nbsp;&nbsp;padded&nbsp;&nbsp;"</code> is stored as <code>"padded"</code>. <code>PATCH</code> got it for free, because <code>UpdateTask</code> reuses <code>CreateTask.shape.title</code> &mdash; one place, two routes, which is why that reuse was worth writing back in lesson 3.</p>
+<div class="aside"><b>The order matters, and it is the rule from <a href="./0018-the-route-nobody-audited.html">lesson 18</a>.</b> A zod chain runs left to right. Measured, on the string <code>"&nbsp;&nbsp;&nbsp;"</code>:
+<pre><code>z.string()<b>.trim().min(1)</b>  -&gt; <b>throws</b>   "Too small: expected >=1 characters"
+z.string()<b>.min(1).trim()</b>  -&gt; <b>""</b>       a 200, and an empty title in Postgres</code></pre>
+Same two words, opposite outcomes. The second order checks the untrimmed string, passes it, <em>then</em> destroys it.</div>
+
+<h2>Part one: the server. Six lines, two traps.</h2>
+<p>I applied this side. It is mechanical, and it is safe to apply first &mdash; nothing calls the new filters yet, so the app kept working. Two new fields on the query schema:</p>
+<pre><code>// server/src/schemas/task.schema.ts, inside TaskQuery
+<b>done: z.stringbool().optional(),</b>
+<b>q: z.string().trim().min(1).max(100).optional(),</b></code></pre>
+<p>And the <code>where</code> clause in the store:</p>
+<pre><code>// server/src/store/task.store.ts, inside listTasks
+where: {
+  teamId,
+  <b>...(done === undefined ? {} : { done }),</b>
+  <b>...(q === undefined</b>
+    <b>? {}</b>
+    <b>: { title: { contains: q, mode: "insensitive" as const } }),</b>
+},</code></pre>
+<p>That is the whole feature. Now the two things in it that would have shipped as bugs.</p>
+
+<h3>Trap one: <code>coerce</code> is not <em>parse</em></h3>
+<p>The obvious way to read a boolean out of a URL is <code>z.coerce.boolean()</code>. It looks right and it is a disaster. Measured, with zod 4.5.4:</p>
+<div class="vs">
+<div class="no"><h4><code>z.coerce.boolean()</code></h4><pre><code>.parse("false")  -&gt; <b>true</b>
+.parse("")       -&gt; false
+.parse("maybe")  -&gt; <b>true</b></code></pre><p><code>coerce</code> calls JavaScript&rsquo;s <code>Boolean()</code>. Every non-empty string is <code>true</code>. So <code>?done=false</code> means <em>done</em>, and your &ldquo;Open&rdquo; filter shows the finished tasks.</p></div>
+<div class="yes"><h4><code>z.stringbool()</code></h4><pre><code>.parse("false")  -&gt; <b>false</b>
+.parse("0")      -&gt; false
+.parse("maybe")  -&gt; <b>400</b></code></pre><p>It knows the words: <code>true/1/yes/on/y/enabled</code> and <code>false/0/no/off/n/disabled</code>. Anything else is rejected at the door, with the list in the message.</p></div>
+</div>
+<p class="takeaway"><b>Coercion converts; parsing decides.</b> <code>coerce.number()</code> is fine, because <code>Number("abc")</code> gives <code>NaN</code> and zod then refuses it &mdash; the conversion can still fail. <code>Boolean()</code> <em>can never fail</em>. A conversion with no failing state is not a check, and lesson 29 already taught you what code with no failing state does: it never turns a light red.</p>
+
+<h3>Trap two: <code>LIKE</code> reads capital letters</h3>
+<p>Twelve rows, four of them with some form of &ldquo;buy&rdquo; in the title. Measured against the real Postgres:</p>
+<pre><code>contains: "buy"                        -&gt; <b>[ 'buy bread', 'buy coffee' ]</b>
+contains: "buy", mode: "insensitive"   -&gt; <b>[ 'Buy MILK', 'buy bread', 'buy coffee', 'Buy tickets' ]</b></code></pre>
+<p>The first one is a search box that finds tasks only if you typed them in lower case. Nobody would report that as a bug; they would just stop using the search. <code>mode: "insensitive"</code> makes Prisma emit <code>ILIKE</code> instead of <code>LIKE</code>. Confirmed in the query plan: <code>Filter: ((title)::text <b>~~*</b> '%buy%')</code> &mdash; and <code>~~*</code> is Postgres&rsquo; internal name for <code>ILIKE</code>.</p>
+
+<div class="aside"><b><code>q</code> is a value. <code>sort</code> was not.</b> Back in <a href="./0020-the-column-that-cannot-be-a-parameter.html">lesson 20</a> you learned that a column name has to be part of the SQL text, so <code>?sort=</code> needed an allowlist and there was no escaping move available. <code>?q=</code> is the opposite case and it is worth feeling the difference: a search word is a <b>value</b>. It travels beside the query as a parameter, Prisma sends it separately, and there is nothing to allowlist. That is why <code>q</code> is a free-text <code>z.string()</code> and <code>sort</code> is an <code>enum</code>. Same file, two inputs, two completely different reasons.</div>
+
+<div class="aside"><b>Honest note: the compiler corrected my comment.</b> I first wrote <code>where: { teamId, done }</code> with a comment saying the spread was only for tidiness, since <code>done: undefined</code> is how Prisma spells &ldquo;no filter&rdquo;. <code>tsc</code> refused it: <code>TS2375 ... with 'exactOptionalPropertyTypes: true'</code>. That flag in your <code>tsconfig</code> says an optional property may be <em>absent</em> or a <em>boolean</em>, but never present-and-undefined. So the spread is load-bearing, not decoration. And it has to test <code>=== undefined</code>: the shorter <code>...(done &amp;&amp; { done })</code> silently drops <code>done: false</code>, which is the filter people use most.</div>
+
+<h2>Part two: the front end. The one line that matters.</h2>
+<p>The hook takes the filter now, and the key includes it:</p>
+<pre><code>export type TaskFilter = { done?: boolean; q?: string };
+
+// the PREFIX - what a mutation talks to
+export const tasksScope = (teamId: number) =&gt; ["teams", teamId, "tasks"] as const;
+
+// the WHOLE key - what a read talks to
+export const tasksKey = (teamId: number, filter: TaskFilter) =&gt;
+  [<b>...tasksScope(teamId), filter</b>] as const;</code></pre>
+<p>That <code>filter</code> at the end of the array is the entire lesson. Here is what happens without it. I ran a real React Query client with a real observer, twelve fake tasks, four of them done, four rows per page. The user loads the list, then clicks &ldquo;Done&rdquo;, then clicks &ldquo;Load more&rdquo;.</p>
+
+<div class="vs">
+<div class="no"><h4>filter NOT in the key</h4><pre><code>on screen:      100,101,102,103
+clicks "Done"
+on screen:      <b>100,101,102,103</b>
+requests sent:  <b>[ done=undefined ]</b>
+
+clicks "Load more"
+requests sent:  [ done=undefined,
+                  <b>done=true cursor=103</b> ]
+on screen:      100,101,102,103,<b>106,109</b></code></pre></div>
+<div class="yes"><h4>filter IS in the key</h4><pre><code>on screen:      100,101,102,103
+clicks "Done"
+on screen:      <b>100,103,106,109</b>
+requests sent:  [ done=undefined,
+                  <b>done=true cursor=undefined</b> ]
+
+clicks "Load more"
+on screen:      100,103,106,109
+(no next page - the server said so)</code></pre></div>
+</div>
+
+<p>Read the left column twice, because it fails in three separate ways and only the third one is visible.</p>
+<ol>
+<li><b>The click sends nothing.</b> The key did not change, so React Query is looking at the same cache entry, and that entry is fresh for 30 seconds. Nothing is stale, so nothing refetches. Your filter is a no-op.</li>
+<li><b>The cursor survives across questions.</b> When something finally does fetch, it sends <code>cursor=103</code> &mdash; a position in the <em>unfiltered</em> list &mdash; while asking the filtered question. On the server that is not even an error. Measured against real Postgres: it returned <b>one row</b> where the correct filtered list has four, because ids 100 and 103 sit before the cursor and were skipped. A cursor is a bookmark in one specific list. Hand it to a different list and it points at a page that does not exist.</li>
+<li><b>Two answers to two different questions end up in one array.</b> <code>data.pages</code> is a list of pages, and page 2 came from a different query than page 1. Your <code>flatMap</code> cannot tell. The screen shows six rows: four of everything, then two done ones.</li>
+</ol>
+<p class="takeaway"><b>Everything the answer depends on goes in the key.</b> The team id has been in there since lesson 24 for exactly this reason. The filter is the same kind of thing. If two different requests can produce two different answers, they are two different keys &mdash; and the cache will happily serve you the wrong one, quickly and with no error.</p>
+
+<h3>The reward: paging resets and you wrote nothing</h3>
+<p>Look at the right-hand column again: <code>done=true <b>cursor=undefined</b></code>. Because the key is new, the entry is empty, so there are no pages, so <code>initialPageParam</code> is used and the request starts at the beginning. You did not write a &ldquo;reset the cursor when the filter changes&rdquo; line. There is nothing to reset. This is the <a href="./0023-the-button-you-can-still-press.html">derive, never store</a> rule paying out again: the cursor was never a variable you owned.</p>
+<p>And switching back is free. Measured: going from &ldquo;Done&rdquo; back to &ldquo;All&rdquo; cost <b>0 new requests</b> &mdash; the old answer is still in its own entry, still fresh. Two entries now exist:</p>
+<pre><code>["teams",7,"tasks",<b>{}</b>]
+["teams",7,"tasks",<b>{"done":true}</b>]</code></pre>
+<p>Note the first one. The filter object was <code>{ done: undefined }</code>, and it hashed to <code>{}</code>. React Query drops undefined values when it hashes a key, so &ldquo;no filter&rdquo; and &ldquo;a filter set to nothing&rdquo; are the same entry. That is why <code>onChange({ ...filter, q: undefined })</code> is safe in the filter bar.</p>
+
+<h2>The word pair</h2>
+<div class="word"><b>key prefix</b> &mdash; the first part of a key. <code>["teams", 7, "tasks"]</code>. It is not an entry itself; it <em>matches</em> every entry that starts with it. This is what <code>invalidateQueries</code> and <code>setQueriesData</code> take.</div>
+<div class="word"><b>whole key</b> &mdash; one exact entry, filter included. <code>["teams", 7, "tasks", { done: true }]</code>. This is what a <code>useQuery</code> reads and what <code>setQueryData</code> writes.</div>
+<p class="takeaway">Fourteenth pair, and the test it gives you: <b>am I talking about one answer, or about every answer to a family of questions?</b> A read always means one. A write almost always means every.</p>
+
+<h2>The part nobody warns you about: one write, many keys</h2>
+<p>Before today, one team had one cache entry, so <a href="./0025-send-the-value-not-the-verb.html">lesson 25</a>&rsquo;s trick worked perfectly: the <code>PATCH</code> reply <em>is</em> the new row, so write it straight into the cache and pay no second round trip. Now one team has an entry per filter the user has looked at. Watch what that does. Measured, with two entries cached and lesson 25&rsquo;s write applied to the one on screen:</p>
+<pre><code>before             ["teams",7,"tasks",{}]            -&gt; 100:true,101:false,102:false,103:true
+before             ["teams",7,"tasks",{"done":false}] -&gt; 101:false,102:false
+
+  user ticks task 101 while looking at the "Open" list
+  setQueryData maps the row in that one entry
+
+after setQueryData ["teams",7,"tasks",{}]            -&gt; 100:true,<b>101:false</b>,102:false,103:true
+after setQueryData ["teams",7,"tasks",{"done":false}] -&gt; <b>101:true</b>,102:false</code></pre>
+<p>Two things are now wrong. The <b>&ldquo;Open&rdquo; list contains a done task</b> &mdash; row 101 is sitting in a list of things that are not done, with its box ticked. And the <b>&ldquo;All&rdquo; entry still says 101 is open</b>, so switching filters shows the old value.</p>
+<p>The fix is not a bigger write. It is noticing what you stopped knowing:</p>
+<div class="vs">
+<div class="no"><h4>what you know</h4><p>The row&rsquo;s new <b>contents</b>. The server told you: <code>{ id: 101, title: "...", done: true }</code>. That has not changed since lesson 25.</p></div>
+<div class="no"><h4>what you no longer know</h4><p>The row&rsquo;s <b>membership</b>. Does it still answer the question this list is asking? A task that just became done does not belong in a <code>?done=false</code> list at all &mdash; and only the server can say what the list is now.</p></div>
+</div>
+<p class="takeaway">This is <a href="./0026-the-request-you-cannot-repeat.html">lesson 26</a>&rsquo;s rule, second use: <b>put the reply in the cache when you know where it goes, and ask again when you do not.</b> Last time it was a create, and the &ldquo;where&rdquo; you did not know was the position. This time it is an update, and the &ldquo;where&rdquo; you do not know is whether it is in the list at all.</p>
+
+<h3>So: two mutations ask, one still patches</h3>
+<pre><code><b>useSetTaskDone</b>  onSuccess: () =&gt; client.invalidateQueries({ queryKey: tasksScope(teamId) })
+<b>useCreateTask</b>   onSuccess: () =&gt; client.invalidateQueries({ queryKey: tasksScope(teamId) })
+<b>useDeleteTask</b>   onSuccess: (_nothing, id) =&gt;
+                    editPages(client, <b>tasksScope(teamId)</b>, (items) =&gt;
+                      items.filter((t) =&gt; t.id !== id))</code></pre>
+<p>Delete is the exception, and the reason is worth saying out loud: <b>a deleted row leaves every question at once.</b> No filter can still want it. There is no membership left to be unsure about, so the surgical edit is not a guess &mdash; it is a fact, and it costs zero requests.</p>
+<p>To make that work, <code>editPages</code> changed by one word. It takes the <b>prefix</b> now and uses <code>setQueriesData</code>, plural:</p>
+<pre><code>client.<b>setQueriesData</b>&lt;InfiniteData&lt;TaskPage&gt;&gt;(<b>{ queryKey: key }</b>, (data) =&gt; ...</code></pre>
+<p>One call, every filter the user has looked at, the row gone from all of them. Your four tests from lesson 32 still pass unchanged, because an exact key is also a prefix of itself.</p>
+
+<div class="aside"><b>The honest price of the invalidate.</b> Prefix matching marks <em>every</em> entry stale &mdash; measured, <b>2 of 2</b>. But <code>invalidateQueries</code> only <em>refetches</em> the queries something is currently watching. Measured, with two filter entries cached, one on screen, two pages held: <b>2 requests</b>, both for the mounted key, one per page. The unmounted entry is left stale and unfetched, and refetches only if the user goes back to it. So the cost is &ldquo;the pages of the list you are looking at&rdquo;, which is the same price lesson 31 already quoted you for a create.</div>
+
+<h2>Two small things I put in, and one I did not</h2>
+<p><b>In: one line for the blank screen.</b> A new key means an empty entry, which means <code>isPending</code> is <code>true</code>, which means the panel is replaced by &ldquo;Asking&hellip;&rdquo; &mdash; <em>including the filter bar</em>, so there is briefly no way back. Measured, then fixed with one line:</p>
+<pre><code>                          isPending   data
+no placeholder            <b>true</b>        undefined     &lt;- the screen empties
+placeholderData:
+  keepPreviousData        <b>false</b>       100,101,102,103   isPlaceholderData: <b>true</b></code></pre>
+<p>The old rows stay on screen while the new ones load. One line, a real visible bug, and it costs nothing.</p>
+<p><b>In: three buttons, and an empty state that tells the truth.</b> &ldquo;No tasks yet&rdquo; is a lie when a filter is on &mdash; there may be plenty of tasks and none of them done. The panel now says <em>&ldquo;No tasks match that&rdquo;</em> instead, and the filter bar stays above it, or you are stuck.</p>
+<p><b>Not in: a debounce.</b> Every keystroke in a search box would be a new key and a new request. The usual answer is a timer and a <code>useEffect</code>, and this app has had <b>zero</b> <code>useEffect</code> since lesson 22. So the search box is a <code>&lt;form&gt;</code>: the words being typed live in <code>useState</code>, and they only join the query key when you press Enter. One request per Enter, not per letter. <b>A form is the debounce.</b> Work hangs off the event that caused it &mdash; the same rule, for the fifth time.</p>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="0">
+<p class="q">The filter is <em>not</em> in the query key. The user clicks &ldquo;Done&rdquo;. What goes out?</p>
+<button>No request leaves the browser</button>
+<button>One request carrying the filter</button>
+<p class="why" hidden>Measured: <code>[ done=undefined ]</code> and nothing else. React Query decides whether to fetch by looking at the key. Same key, same entry &mdash; and that entry is fresh for 30 seconds, so there is nothing to do. The <code>queryFn</code> did change, but nobody asked it anything. This is the failure that is hardest to debug, because there is no error, no network row, and no wrong data: the screen just does not react.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">zod: what does <code>z.coerce.boolean()</code> make of the string <code>"false"</code>?</p>
+<button>false, because the word says so</button>
+<button>true, because it is not empty</button>
+<p class="why" hidden>Measured: <code>true</code>. <code>coerce</code> means &ldquo;run JavaScript&rsquo;s <code>Boolean()</code> over it&rdquo;, and every non-empty string is truthy. So <code>?done=false</code> would filter for <em>done</em> tasks, and your &ldquo;Open&rdquo; button would show the finished ones. <code>z.stringbool()</code> is the parser that knows the words <code>true/1/yes/on</code> and <code>false/0/no/off</code>, and answers 400 to anything else. Coercion converts; parsing decides.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Now that filters exist, which write may still edit the cache by hand?</p>
+<button>The delete: no filter wants it</button>
+<button>The toggle: the reply is fresh</button>
+<p class="why" hidden>The delete. The reply&rsquo;s freshness was never the question &mdash; the toggle&rsquo;s <code>PATCH</code> hands back the whole new row, and it is still not enough. What you lose with filters is <b>membership</b>: whether the row still answers the question this list asks. Ticking <code>done</code> can move a row out of a <code>?done=false</code> list, and only the server knows the new list. A delete has no such doubt: the row leaves every possible question at once, so <code>setQueriesData</code> can drop it from all of them and pay nothing.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Prefix invalidate: two filter entries cached, one on screen holding two pages. Requests?</p>
+<button>Four: every page of both keys</button>
+<button>Two: the pages of one key</button>
+<p class="why" hidden>Measured: 2, both for the key on screen, one per page held. Invalidating marks every matching entry stale &mdash; 2 of 2 &mdash; but it only <em>refetches</em> queries that something is currently watching. The unmounted entry stays stale and unfetched until the user goes back to it, and then it costs one request. This is the same distinction that fooled me while writing lesson 31: a measurement can be perfectly correct and be answering a different question than the one you asked.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>Start with the pair.</strong> From the repo root: <code>(cd server &amp;&amp; npm test) &amp;&amp; (cd web &amp;&amp; npm test)</code>. <b>Expect 154 and 4.</b> The server went 146 &rarr; 154: six filter tests and two trim tests.</li>
+
+<li><strong>Use it, with the network tab open.</strong> <code>cd web &amp;&amp; npm run dev</code>, sign in, open your team. Click <b>All / Open / Done</b> and watch the requests: <code>?done=false</code>, <code>?done=true</code>, and no <code>done</code> at all for All. Then click a filter you have already used and confirm <b>no request goes out</b>. Type <code>BUY</code> in the search and press Enter &mdash; confirm it finds lower-case titles too.</li>
+
+<li><strong>Break the key on purpose. This is the ten-second version of the whole lesson.</strong> In <code>web/src/features/tasks/tasks.ts</code>, make <code>tasksKey</code> ignore its filter:
+<pre><code>export const tasksKey = (teamId: number, filter: TaskFilter) =&gt;
+  [...tasksScope(teamId)] as const;   // filter dropped</code></pre>
+<b>Expect <code>npx tsc -b</code> to stay clean</b> &mdash; nothing can see this. Then reload, click &ldquo;Done&rdquo;, and watch the network tab stay empty while the list stays wrong. Then click &ldquo;Load more&rdquo; and watch the mixed list appear. Put the filter back. A bug with no error message is the kind you must have seen once.</li>
+
+<li><strong>Then break the write, and see the other failure.</strong> In <code>useSetTaskDone</code>, swap the invalidate back for lesson 25&rsquo;s cache write:
+<pre><code>onSuccess: (task) =&gt;
+  editPages(client, tasksScope(teamId), (items) =&gt;
+    items.map((t) =&gt; (t.id === task.id ? task : t))),</code></pre>
+Reload, click <b>Open</b>, and tick a task. <b>Expect the row to stay on screen with its box ticked</b>, in a list of things that are not done. Put the invalidate back. Lesson 25 was right, and it is now not enough &mdash; because the list stopped being &ldquo;the tasks&rdquo;.</li>
+
+<li><strong>Write one test, and make it the one that proves today&rsquo;s claim.</strong> Add a fifth test to <code>web/src/features/tasks/edit-pages.test.ts</code>: seed <b>two</b> entries under the same prefix &mdash; <code>["teams",1,"tasks",{}]</code> and <code>["teams",1,"tasks",{done:false}]</code> &mdash; then call <code>editPages</code> with the <b>prefix</b> <code>["teams",1,"tasks"]</code> and a filter that removes one id. Assert the row is gone from <b>both</b>. <b>Expect 5 passing.</b> Then change <code>setQueriesData</code> back to <code>setQueryData</code> in <code>edit-pages.ts</code> and run it again: <b>expect your new test to fail and the other four to pass</b>. That failure is the difference between the two words, written down.</li>
+
+<li><strong>One thing to think about, no code.</strong> The search does <code>title ILIKE '%buy%'</code>. I looked at the query plan: Postgres uses your <code>teamId</code> index to find the team&rsquo;s rows, then checks every one of them against the pattern (<code>Rows Removed by Filter: 8</code>). A leading <code>%</code> means no plain index can help. At twelve rows this is free. At a million rows per team it is not, and the answer has a name &mdash; look up Postgres <code>pg_trgm</code>, and tell me next session whether you think this app should ever need it. My answer is no, and I want to hear yours.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Three pictures. What the cache holds when the filter is in the key and when it is not. Why a cursor cannot cross from one list to another. And what one write has to reach, now that one team has many entries.</p>
+
+<h2>1. The same three clicks, two different keys</h2>
+
+<div class="two">
+<div>
+<h4>filter left out of the key</h4>
+<div class="box"><div class="cap">one entry &nbsp;&rarr;&nbsp; <span class="bad">no refetch</span></div><div class="body">
+<div><span class="dim">key</span> ["teams",7,"tasks"]</div>
+<div>&nbsp;</div>
+<div>load &nbsp;&nbsp;&nbsp;&nbsp;&rarr; <span class="dim">GET ?sort=id</span></div>
+<div>screen &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;100,101,102,103</div>
+<div>&nbsp;</div>
+<div>click Done &rarr; <span class="bad">nothing sent</span></div>
+<div>screen &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="bad">100,101,102,103</span></div>
+<div>&nbsp;</div>
+<div>Load more &nbsp;&rarr; <span class="dim">?done=true</span></div>
+<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="bad">&amp;cursor=103</span></div>
+<div>screen &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;100,101,102,103,</div>
+<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="bad">106,109</span> <span class="dim">&larr; two lists</span></div>
+</div></div>
+</div>
+
+<div>
+<h4>filter in the key</h4>
+<div class="box"><div class="cap">one entry per question &nbsp;&rarr;&nbsp; <span class="ok">correct</span></div><div class="body">
+<div><span class="dim">key</span> ["teams",7,"tasks",<span class="acc">{}</span>]</div>
+<div>&nbsp;</div>
+<div>load &nbsp;&nbsp;&nbsp;&nbsp;&rarr; <span class="dim">GET ?sort=id</span></div>
+<div>screen &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;100,101,102,103</div>
+<div>&nbsp;</div>
+<div>click Done &rarr; <span class="ok">new key</span></div>
+<div><span class="dim">key</span> [...,<span class="acc">{done:true}</span>]</div>
+<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="dim">?done=true</span></div>
+<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="ok">no cursor</span></div>
+<div>screen &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="ok">100,103,106,109</span></div>
+<div>&nbsp;</div>
+<div>back to All &rarr; <span class="ok">0 requests</span></div>
+</div></div>
+</div>
+</div>
+
+<p class="takeaway">The empty entry is what resets the paging. No cache means no pages, which means <code>initialPageParam</code>, which means no cursor. <b>You wrote no reset code because there is nothing to reset.</b></p>
+
+<h2>2. A cursor is a bookmark in <em>one</em> list</h2>
+
+<div class="box"><div class="cap">12 rows, every third one done. limit 4.</div><div class="body">
+<div><span class="dim">all tasks &nbsp;&nbsp;&nbsp;</span> 100 101 102 103 <span class="dim">|</span> 104 105 106 107 <span class="dim">|</span> ...</div>
+<div><span class="dim">page 1 ends at</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="acc">&#8593;</span> <span class="acc">cursor=103</span></div>
+<div>&nbsp;</div>
+<div><span class="dim">done only &nbsp;&nbsp;</span> <span class="ok">100</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="ok">103</span> <span class="dim">|</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <span class="ok">106</span> &nbsp;&nbsp;&nbsp;&nbsp;<span class="dim">|</span> <span class="ok">109</span></div>
+<div><span class="dim">the same cursor</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="acc">&#8593;</span> <span class="dim">&larr; row 3 of 4, not row 1</span></div>
+</div></div>
+
+<div class="tbl">
+<div class="row"><div>what the server was asked</div><div>rows back</div><div>correct?</div></div>
+<div class="row"><div><code>?done=true</code> <span class="dim">no cursor</span></div><div>4</div><div class="ok">yes</div></div>
+<div class="row"><div><code>?done=true&amp;cursor=103</code></div><div class="bad">1</div><div class="bad">no</div></div>
+</div>
+
+<p class="takeaway">Measured against real Postgres. Not an error, not an empty answer &mdash; <b>one row where four belong</b>, because 100 and 103 sit before that cursor in the filtered list and got skipped. The cursor was valid. It was valid <em>for a different question</em>.</p>
+
+<h2>3. One team, many entries. What must a write reach?</h2>
+
+<div class="strip">
+<span class="dim">["teams",7,"tasks",{}]</span>
+<span class="dim">["teams",7,"tasks",{done:false}]</span>
+<span class="dim">["teams",7,"tasks",{q:"buy"}]</span>
+</div>
+
+<div class="tbl">
+<div class="row"><div>the write</div><div>do you know where the row goes?</div><div>so</div></div>
+<div class="row"><div><b>tick done</b> <span class="dim">contents known, membership not</span></div><div class="bad">no</div><div class="bad">invalidate</div></div>
+<div class="row"><div><b>create</b> <span class="dim">which page is last?</span></div><div class="bad">no</div><div class="bad">invalidate</div></div>
+<div class="row"><div><b>delete</b> <span class="dim">no question still wants it</span></div><div class="ok">yes</div><div class="ok">setQueriesData</div></div>
+</div>
+
+<div class="two">
+<div>
+<h4>setQueryData &mdash; one entry</h4>
+<div class="box"><div class="cap">delete row 101</div><div class="body">
+<div>{} &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="bad">101 still here</span></div>
+<div>{done:false} &nbsp;<span class="ok">101 gone</span></div>
+<div>{q:"buy"} &nbsp;&nbsp;&nbsp;&nbsp;<span class="bad">101 still here</span></div>
+</div></div>
+</div>
+<div>
+<h4>setQueriesData &mdash; the prefix</h4>
+<div class="box"><div class="cap">delete row 101</div><div class="body">
+<div>{} &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="ok">101 gone</span></div>
+<div>{done:false} &nbsp;<span class="ok">101 gone</span></div>
+<div>{q:"buy"} &nbsp;&nbsp;&nbsp;&nbsp;<span class="ok">101 gone</span></div>
+</div></div>
+</div>
+</div>
+
+<p class="takeaway"><b>Contents versus membership.</b> The <code>PATCH</code> reply is still the whole new row &mdash; lesson 25 was not wrong. What filters took away is knowing whether the row still answers the question. Only a delete escapes that doubt, because nothing can want a row that is gone.</p>
+
+<p style="font-size:0.78rem">And the invalidate is cheaper than it looks. Measured with two entries cached, one on screen holding two pages: it marks <b>2 of 2</b> stale and sends <b>2</b> requests &mdash; both for the list you are looking at. Stale is not the same as fetched.</p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://tkdodo.eu/blog/effective-react-query-keys">TkDodo &mdash; Effective React Query Keys</a>. Written by the library&rsquo;s maintainer, and it is the single best page on today&rsquo;s subject. The &ldquo;<em>use query keys like a dependency array</em>&rdquo; part is exactly the rule you learned by measurement.</p>
+<p><b>Then this:</b> <a href="https://www.prisma.io/docs/orm/prisma-client/queries/filtering-and-sorting#case-insensitive-filtering">Prisma &mdash; case-insensitive filtering</a>. Short, and it says plainly which databases support <code>mode: "insensitive"</code> and what it compiles to.</p>
+<p><b>Also:</b> <a href="https://zod.dev/api?id=stringbool">zod &mdash; <code>z.stringbool()</code></a>. Read the accepted-words list once. Then read <a href="https://zod.dev/api?id=coercion">coercion</a> right after, so the difference between converting and parsing is fixed in your head.</p>
+<p><b>Reference card:</b> <a href="../reference/react-query-rules.html">React Query, the rules so far</a> &mdash; updated today with the key rules, the prefix/whole-key pair, and the write table. Also <a href="../reference/pagination-and-indexes.html">pagination and indexes</a>, which now says what a cursor is a bookmark <em>in</em>.</p>
+<p><b>Ask the community:</b> <a href="https://github.com/TanStack/query/discussions">TanStack Query Discussions</a> &mdash; search &ldquo;filter query key&rdquo;. You will find the same mistake many times over, usually reported as &ldquo;my query does not refetch when state changes&rdquo;. Reading three of those is worth more than my paragraph on it.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0032-the-function-you-cannot-import.html">&larr; Back</a>
+<a href="../reference/react-query-rules.html">React Query reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

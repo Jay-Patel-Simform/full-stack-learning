@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 4 — Foreign keys and relations</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 04 &middot; Week 1&ndash;2 &middot; Database</p>
+<h1>Foreign keys and relations</h1>
+<p class="lede">Every task carries the text <code>"jay@example.com"</code>. That is a sticky note, not an owner. Today a task points at a real row.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>A task should point at a user <em>row</em>, not at a copy of their email.</li>
+<li>The pointer is a <strong>foreign key</strong>. Postgres refuses ids that do not exist.</li>
+<li>One line &mdash; <code>where: { ownerId }</code> &mdash; is the first real security in this app.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+erDiagram
+  User ||--o{ Task : owns
+  User {
+    Int id PK
+    String email
+  }
+  Task {
+    Int id PK
+    String title
+    Int ownerId FK
+  }
+</pre>
+<figcaption>One user, many tasks. <code>ownerId</code> is not text that happens to match &mdash; it is a pointer Postgres itself enforces. An id that names no user cannot be stored.</figcaption>
+</figure>
+
+<h2>The idea</h2>
+<p>A copied email goes stale. Change your address and every old task still says the old one. Worse, nothing stops a task from claiming an owner who does not exist.</p>
+<p>A foreign key fixes both. The task holds a number. That number must name a real <code>User</code> row, or the write fails.</p>
+<p>And now the security part. Once the database knows whose task it is, you can filter by it:</p>
+
+<div class="vs">
+<div class="no">
+<h4>Everyone sees everything</h4>
+<pre><code>prisma.task.findMany()</code></pre>
+</div>
+<div class="yes">
+<h4>You see yours</h4>
+<pre><code>prisma.task.findMany({
+  where: { ownerId },
+})</code></pre>
+</div>
+</div>
+
+<div class="word"><b>IDOR</b> &mdash; Insecure Direct Object Reference. You ask for <code>/tasks/5</code>, task 5 is not yours, and the server hands it over anyway. Leaving out the <code>where</code> clause is how it happens.</div>
+
+<h2>The code</h2>
+<pre><code>model User {
+  id    Int    @id @default(autoincrement())
+  email String @unique
+  tasks Task[]
+}
+
+model Task {
+  id      Int    @id @default(autoincrement())
+  title   String
+  owner   User   @relation(fields: [ownerId], references: [id])
+  ownerId Int
+}</code></pre>
+
+<p class="takeaway">Store the pointer, not the copy. Then filter by the pointer, every single query.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="0">
+<p class="q">You forget <code>where: { ownerId }</code> on one route. What happens?</p>
+<button>Every user reads everyone else's tasks</button>
+<button>Every query fails until you add it</button>
+<p class="why" hidden>Nothing errors. The route works perfectly and leaks everything. This is why lesson 7 moves the decision out of individual queries and into one place.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li>Try to insert a task with <code>ownerId: 999</code>. Read the error Postgres gives you.</li>
+<li>Delete <code>where: { ownerId }</code> from <code>list</code>. Log in as user 2. See user 1's tasks. Put it back.</li>
+</ol>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://owasp.org/Top10/A01_2021-Broken_Access_Control/">OWASP A01: Broken Access Control</a> &mdash; IDOR is the first example.</p>
+<p><b>The long version:</b> <a href="./long/0004-rows-that-point-at-rows.html">including the same query in raw SQL</a>.</p>
+<p>Ask me anything that did not land.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0003-rows-that-survive-a-restart.html">&larr; Back</a>
+<a href="./0005-passwords-you-cannot-read-back.html">Next: passwords &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

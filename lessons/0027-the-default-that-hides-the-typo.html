@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 27 &mdash; Env config with no defaults</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.2rem 0 .8rem; }
+.two > div { border: 1px solid var(--rule); border-radius: 6px; padding: .9rem 1rem;
+  font-family: var(--mono); font-size: .72rem; line-height: 1.8; }
+.two h4 { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
+  text-transform: uppercase; margin: 0 0 .6rem; color: var(--muted); font-weight: 500; }
+.two .good { border-color: var(--ok); }
+.two .bad { border-color: var(--bad); border-style: dashed; }
+.two .end { margin: .7rem 0 0; font-family: var(--serif); font-size: .82rem; font-weight: 600; }
+.two .good .end { color: var(--ok); }
+.two .bad .end { color: var(--bad); }
+.file { color: var(--muted); font-size: .66rem; }
+
+table.env { font-family: var(--mono); font-size: .7rem; width: 100%; }
+table.env th { font-size: .64rem; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted); font-weight: 500; }
+table.env td { vertical-align: top; }
+.ok200 { color: var(--ok); font-weight: 600; }
+.gone { color: var(--bad); font-weight: 600; }
+.kept { color: var(--muted); }
+
+.flow { display: grid; grid-template-columns: 1fr auto 1fr; align-items: stretch;
+  gap: .5rem; margin: 1.2rem 0 .6rem; }
+.flow > div { border: 1px solid var(--rule); border-radius: 6px; padding: .8rem .9rem;
+  font-family: var(--mono); font-size: .72rem; line-height: 1.7; }
+.flow .arrow { border: none; display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 1rem; padding: 0; }
+.flow h4 { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
+  text-transform: uppercase; margin: 0 0 .5rem; color: var(--muted); font-weight: 500; }
+.flow .out { margin: .6rem 0 0; font-family: var(--serif); font-size: .82rem; font-weight: 600; }
+.flow .hit { border-color: var(--ok); } .flow .hit .out { color: var(--ok); }
+.flow .no { border-color: var(--bad); border-style: dashed; } .flow .no .out { color: var(--bad); }
+
+.rule { font-size: .95rem; padding: .8rem 1rem; border-left: 3px solid var(--accent);
+  background: var(--code-bg); border-radius: 0 4px 4px 0; margin: 1.3rem 0 2.2rem; }
+@media (max-width: 46rem) { .two, .flow { grid-template-columns: 1fr; }
+  .flow .arrow { transform: rotate(90deg); } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 27 &middot; Week 11 &middot; Deploy</p>
+<h1>Env config with no defaults</h1>
+<p class="lede">Week 11 starts. Before the app can go anywhere, it has to say out loud what it needs. Right now it does not &mdash; and every safety wall you built in weeks 7&ndash;10 can be switched off by one misspelled variable, with no error, no log line, and a healthy <code>200</code>.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>Your app reads 7 environment variables from 4 files.</strong> Nothing lists them. Nothing checks them.</li>
+<li><strong>Six of the seven fall back silently.</strong> Only <code>DATABASE_URL</code> is loud. A fallback means a missing value is indistinguishable from a correct one.</li>
+<li><strong>Measured below:</strong> <code>NODE_ENV=Production</code> silently drops HSTS <em>and</em> the <code>Secure</code> flag on your session cookie. <code>TRUST_PROXY=1</code> silently turns the whole internet into one rate-limit bucket. Both boot fine. Both answer <code>200</code>.</li>
+<li><strong>The fix is one file:</strong> <code>src/config.ts</code>. One zod schema over <code>process.env</code>, parsed once, at boot.</li>
+<li><strong>The safety variables get no default.</strong> No value, no boot &mdash; and the process exits <code>1</code>, listing every problem at once.</li>
+</ul>
+</div>
+
+<h2>The word pair</h2>
+<div class="word"><b>fail fast</b> &mdash; refuse to start when the setup is wrong. The error arrives while you are still watching the deploy log.</div>
+<div class="word"><b>fail quiet</b> &mdash; start anyway, with a fallback. The error arrives weeks later, as a security incident nobody can date.</div>
+<p class="takeaway">A default turns fail-fast into fail-quiet. That is what it is <em>for</em> &mdash; so only give one to a value where being wrong is obvious in a second.</p>
+
+<h2>Count the places</h2>
+<p>Same counting question as <a href="./0009-the-third-argument.html">lesson 9</a> and <a href="./0010-a-task-belongs-to-a-team.html">lesson 10</a>. Grep your own server:</p>
+<pre><code>$ grep -rn "process.env" src --include="*.ts" | grep -v generated</code></pre>
+<div class="scroll">
+<table>
+<tr><th>Variable</th><th>Read in</th><th>Today, if it is missing or misspelled</th></tr>
+<tr><td><code>DATABASE_URL</code></td><td><code>src/db.ts</code></td><td>Throws. <b>The only one that is loud.</b></td></tr>
+<tr><td><code>NODE_ENV</code></td><td><code>src/app.ts</code>, <code>src/auth/session.ts</code></td><td>No HSTS, no <code>Secure</code> cookie. Boots.</td></tr>
+<tr><td><code>ALLOWED_ORIGINS</code></td><td><code>src/app.ts</code></td><td>Falls back to <code>http://localhost:5173</code>. Your real front end is blocked. Boots.</td></tr>
+<tr><td><code>TRUST_PROXY</code></td><td><code>src/app.ts</code></td><td><code>=== "true"</code> is false for anything else. One rate-limit bucket for everyone. Boots.</td></tr>
+<tr><td><code>PORT</code></td><td><code>src/server.ts</code></td><td><code>Number("")</code> is <code>0</code> &mdash; a random free port. Boots.</td></tr>
+<tr><td><code>HOST</code></td><td><code>src/server.ts</code></td><td>Falls back to loopback. Boots.</td></tr>
+<tr><td><code>LOG_LEVEL</code></td><td><code>src/app.ts</code></td><td>Falls back to <code>info</code>. Boots.</td></tr>
+</table>
+</div>
+<p>Seven names, four files, one list that exists only in your head and in <code>server/CLAUDE.md</code>. That is the same shape as <a href="./0003-rows-that-survive-a-restart.html">lesson 3</a>: <em>declare the wall, do not remember it.</em> You declared the database&rsquo;s shape to Postgres and the request&rsquo;s shape to zod. The environment is the last input you still trust by hand &mdash; and it is caller input too. The caller is the deploy.</p>
+
+<h2>Measured, on your API, just now</h2>
+<p>Your real <code>buildApp()</code>, unchanged, booted four times with a different environment each time. Every run answered <code>GET /health</code> with <code>200</code>.</p>
+<pre><code>NODE_ENV=production TRUST_PROXY=true   HSTS: max-age=31536000  cookie: …; Secure   request.ip: 9.9.9.9
+NODE_ENV=Production TRUST_PROXY=true   HSTS: <b>(none)</b>            cookie: <b>(no Secure)</b>    request.ip: 9.9.9.9
+NODE_ENV=production TRUST_PROXY=1      HSTS: max-age=31536000  cookie: …; Secure   request.ip: <b>127.0.0.1</b>
+NODE_ENV=production ALLOWED_ORIGIN=…   access-control-allow-origin for https://app.example: <b>(none)</b></code></pre>
+<p>Read line 2 again. One capital letter, and the session cookie your users carry all day is allowed to travel over plain <code>http</code> &mdash; the exact flag <a href="./0006-a-door-that-stays-open.html">lesson 6</a> was about. Nothing logged it.</p>
+<p>Line 3 is the one from <code>deploy/nginx.conf</code>. Behind nginx every request arrives from <code>127.0.0.1</code>, so <code>request.ip</code> is the proxy: your 100-per-minute floor (<a href="./0012-the-floor-under-everything.html">lesson 12</a>) becomes 100 per minute <em>for the whole internet</em>, and every audit row records the same address. <code>TRUST_PROXY=1</code> is a completely reasonable thing to type. It reads as true. It is false.</p>
+<div class="aside"><b>Why these are worse than a crash.</b> A crash at boot costs you five minutes and a deploy log. These cost you nothing today and everything on the day someone looks. Third member of the family you already know: the quiet strip (<a href="./0017-the-key-you-did-not-name.html">lesson 17</a>), the missing <code>querystring</code> schema (<a href="./0020-the-column-that-cannot-be-a-parameter.html">lesson 20</a>), and now the fallback default.</div>
+
+<h2>The code &mdash; type it yourself</h2>
+
+<h3>1. <code>server/src/config.ts</code> &mdash; new file</h3>
+<pre><code>import { z } from "zod";
+
+// ? Read .env into process.env. Built into Node, so no dotenv at runtime.
+// ! In production there is no file - the variables come from the environment.
+try {
+  process.loadEnvFile();
+} catch {
+  // ? no .env here, so process.env is already the whole story
+}
+
+// * Every variable this app reads, in one place, with its type.
+// ! A .default() is a place a typo can hide. The four that decide whether
+// ! production is SAFE have no default: no value, no boot.
+const Env = z.object({
+  DATABASE_URL: z.url(),
+  NODE_ENV: z.enum(["development", "test", "production"]),
+  ALLOWED_ORIGINS: z
+    .string()
+    .min(1)
+    .transform((s) =&gt; s.split(",").map((o) =&gt; o.trim()).filter(Boolean)),
+  // ? stringbool accepts true/1/yes/on and false/0/no/off, and REFUSES
+  // ? anything else. `=== "true"` accepted everything and answered false.
+  TRUST_PROXY: z.stringbool(),
+
+  // * These three only decide where it listens and how loud it is. Being
+  // * wrong is visible in one second, so here a default is honest.
+  PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+  HOST: z.string().min(1).default("127.0.0.1"),
+  LOG_LEVEL: z.enum(["silent", "error", "warn", "info", "debug", "trace"]).default("info"),
+});
+
+const parsed = Env.safeParse(process.env);
+
+if (!parsed.success) {
+  // ! console.error + exit(1), not throw: a stack trace buries the one thing
+  // ! you need to read, and exit(1) is how the host knows the boot failed.
+  console.error("Bad environment:\n" + z.prettifyError(parsed.error));
+  process.exit(1);
+}
+
+// * Parsed, typed, and never read from process.env again.
+export const config = parsed.data;</code></pre>
+<p>Note what <code>config</code> is now: <code>PORT</code> is a <code>number</code>, <code>TRUST_PROXY</code> is a <code>boolean</code>, <code>ALLOWED_ORIGINS</code> is a <code>string[]</code>, and <code>NODE_ENV</code> is one of three literals. Every <code>process.env</code> read is a <code>string | undefined</code>; every <code>config</code> read is the type you actually wanted. The parse did the coercing once, at the door &mdash; the same move as the route schemas.</p>
+
+<h3>2. Replace the seven reads</h3>
+<pre><code>// src/db.ts  - delete the loadEnvFile block AND the DATABASE_URL check; config did both
+import { config } from "./config.ts";
+const adapter = new PrismaPg({ connectionString: config.DATABASE_URL });
+
+// src/app.ts
+import { config } from "./config.ts";
+const ALLOWED_ORIGINS = config.ALLOWED_ORIGINS;      // the split/trim/filter moved into the schema
+    logger: { level: config.LOG_LEVEL },
+    trustProxy: config.TRUST_PROXY,
+    hsts: config.NODE_ENV === "production" ? { maxAge: 31_536_000, includeSubDomains: true } : false,
+
+// src/auth/session.ts
+import { config } from "../config.ts";
+    ...(config.NODE_ENV === "production" ? ["Secure"] : []),
+  const secure = config.NODE_ENV === "production" ? "; Secure" : "";
+
+// src/server.ts
+import { config } from "./config.ts";
+    port: config.PORT,
+    host: config.HOST,</code></pre>
+
+<h3>3. <code>server/.env</code> &mdash; three new lines</h3>
+<p>The four required variables now have to be somewhere, and in development that somewhere is <code>.env</code>. Without this, <code>npm test</code> will not start.</p>
+<pre><code>NODE_ENV=development
+ALLOWED_ORIGINS=http://localhost:5173
+TRUST_PROXY=false</code></pre>
+
+<h2>What it looks like when it is wrong</h2>
+<p>Booted with no <code>.env</code> and an empty environment &mdash; what a fresh server actually looks like:</p>
+<pre><code>$ npm start
+Bad environment:
+✖ Invalid input: expected string, received undefined
+  → at DATABASE_URL
+✖ Invalid option: expected one of "development"|"test"|"production"
+  → at NODE_ENV
+✖ Invalid input: expected string, received undefined
+  → at ALLOWED_ORIGINS
+✖ Invalid input: expected string, received undefined
+  → at TRUST_PROXY
+$ echo $?
+1</code></pre>
+<p><b>All four at once</b>, not the first one. That is <code>safeParse</code> collecting every issue instead of throwing on the first &mdash; one restart to fix four things, not four restarts. And the typo cases now read the same way: <code>NODE_ENV=Production</code> lists <code>NODE_ENV</code>, <code>TRUST_PROXY=banana</code> lists <code>TRUST_PROXY</code>, <code>PORT=abc</code> says <code>expected number, received NaN</code>.</p>
+<p class="takeaway">The whole lesson is the difference between that screen and a <code>200</code>.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">Why does <code>ALLOWED_ORIGINS</code> lose its default and <code>LOG_LEVEL</code> keep one?</p>
+<button>Because one is a list and one is a word</button>
+<button>Because one is wrong for weeks</button>
+<p class="why" hidden>A wrong <code>LOG_LEVEL</code> shows up the first time you look at the output, so the fallback costs you a second. A wrong <code>ALLOWED_ORIGINS</code> falls back to <code>localhost:5173</code>, which is correct on your laptop and silently wrong in production &mdash; your own front end gets no <code>access-control-allow-origin</code> and you debug CORS instead of reading one line. The test for a default is never &ldquo;is there a sensible value&rdquo;; it is <em>how long does being wrong stay invisible</em>.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">What did <code>TRUST_PROXY=1</code> do before today?</p>
+<button>Shared one rate limit for everyone</button>
+<button>Let a caller forge their own IP</button>
+<p class="why" hidden><code>process.env.TRUST_PROXY === "true"</code> is <code>false</code> for <code>"1"</code>, so Fastify ignored <code>X-Forwarded-For</code> and <code>request.ip</code> stayed <code>127.0.0.1</code> &mdash; nginx. Measured above. Every caller then shares one bucket in the 100/minute floor, and every audit row records the proxy. The other answer is the opposite mistake: trusting the header with <em>no</em> proxy in front, which is why this is opt-in and not always-on.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why <code>process.exit(1)</code> rather than <code>throw</code>?</p>
+<button>Because a throw is caught by Fastify</button>
+<button>Because the exit code is the message</button>
+<p class="why" hidden>A thrown error prints a stack trace, and the one line you need &mdash; the variable name &mdash; is buried in it. More importantly the host (Fly, systemd, Docker) reads the exit code to decide whether the boot failed: a non-zero exit stops the rollout, and a crashed-on-import process may not. The console line is for you; the <code>1</code> is for the machine.</p>
+</div>
+
+<h2>What this does NOT do</h2>
+<table>
+<tr><th>Gap</th><th>Why it is still open</th></tr>
+<tr><td>A misspelled <em>optional</em> variable is still silent</td><td><code>Env</code> ignores keys it does not name, and it must &mdash; <code>process.env</code> holds <code>PATH</code>, <code>HOME</code> and forty others. <code>LOG_LEVL=debug</code> still does nothing. The defence is <b>having no default</b>, not the schema.</td></tr>
+<tr><td>It does not check that the values are <em>true</em></td><td><code>z.url()</code> proves <code>DATABASE_URL</code> is shaped like a URL, not that a database answers there. That is a health check, not a schema.</td></tr>
+<tr><td>Secrets are still in a file on disk</td><td><code>.env</code> is fine for your laptop. In week 12 the same names come from <code>fly secrets set</code> and there is no file at all &mdash; which is exactly why <code>loadEnvFile()</code> is wrapped in a <code>try</code>.</td></tr>
+<tr><td>Nothing stops you committing <code>.env</code></td><td>Check <code>server/.gitignore</code> yourself. Step 5 below.</td></tr>
+</table>
+
+<h2>Do this</h2>
+<ol>
+<li>Run the grep at the top. Count the lines yourself before you trust my table.</li>
+<li>Write <code>server/src/config.ts</code>, swap the seven reads, add the three lines to <code>.env</code>. Then <code>cd server &amp;&amp; npm run typecheck &amp;&amp; npm test</code>. <b>Expect 141 passing</b> &mdash; this changes no behaviour, only what happens when the setup is wrong.</li>
+<li><strong>Prove it fails.</strong> <code>NODE_ENV=Production npm start</code>. It must refuse to boot. Then <code>TRUST_PROXY=banana npm start</code>, then <code>PORT=abc npm start</code>. Three different messages, all naming the variable.</li>
+<li><strong>Prove it still boots.</strong> <code>npm run dev</code>, then <code>curl -i localhost:3000/health</code>. Then <code>NODE_ENV=production TRUST_PROXY=true ALLOWED_ORIGINS=https://app.example npm start</code> and check the reply now carries <code>strict-transport-security</code>.</li>
+<li><strong>Write <code>server/.env.example</code></strong> &mdash; the same seven names, with fake values and one comment each. This is the file you commit; <code>.env</code> is the file you never do. Confirm <code>.env</code> is in <code>.gitignore</code>.</li>
+<li><strong>Break it on purpose.</strong> Give <code>NODE_ENV</code> back its default: <code>.default("development")</code>. Now <code>NODE_ENV=Production npm start</code> boots happily with no <code>Secure</code> cookie again. That one word is the whole lesson. Put it back.</li>
+<li><strong>Update the docs you contradicted.</strong> <code>server/CLAUDE.md</code> says &ldquo;Everything has a working default, so <code>npm run dev</code> needs none of them.&rdquo; That is now false for four of them. Rewrite that section from your schema.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Three pictures. What a wrong variable actually costs, where the reads live today, and what the boot gate does instead.</p>
+
+<h2>1. The same request, four setups, four <span class="ok200">200</span>s</h2>
+<p><code>GET /health</code> against your real <code>buildApp()</code>. Only the environment changed. Nothing logged a warning anywhere.</p>
+<div class="scroll">
+<table class="env">
+<tr><th>Environment</th><th>Status</th><th>HSTS</th><th>Session cookie</th><th>request.ip</th><th>CORS allow-origin</th></tr>
+<tr>
+  <td>NODE_ENV=<b>production</b><br>TRUST_PROXY=<b>true</b><br>ALLOWED_ORIGINS=&hellip;</td>
+  <td class="ok200">200</td><td class="kept">max-age=31536000</td><td class="kept">&hellip;; Secure</td>
+  <td class="kept">9.9.9.9</td><td class="kept">https://app.example</td>
+</tr>
+<tr>
+  <td>NODE_ENV=<b>Production</b><br><span class="file">one capital letter</span></td>
+  <td class="ok200">200</td><td class="gone">(none)</td><td class="gone">no Secure</td>
+  <td class="kept">9.9.9.9</td><td class="kept">https://app.example</td>
+</tr>
+<tr>
+  <td>TRUST_PROXY=<b>1</b><br><span class="file">reads as true</span></td>
+  <td class="ok200">200</td><td class="kept">max-age=31536000</td><td class="kept">&hellip;; Secure</td>
+  <td class="gone">127.0.0.1</td><td class="kept">https://app.example</td>
+</tr>
+<tr>
+  <td>ALLOWED_<b>ORIGIN</b>=&hellip;<br><span class="file">singular</span></td>
+  <td class="ok200">200</td><td class="kept">max-age=31536000</td><td class="kept">&hellip;; Secure</td>
+  <td class="kept">9.9.9.9</td><td class="gone">(none)</td>
+</tr>
+</table>
+</div>
+<p>Row 2 hands your users a session cookie that will travel over plain <code>http</code> &mdash; the flag <a href="./0006-a-door-that-stays-open.html">lesson 6</a> was about. Row 3 makes <code>request.ip</code> the nginx loopback, so the 100/minute floor from <a href="./0012-the-floor-under-everything.html">lesson 12</a> is one bucket for the entire internet. Row 4 blocks your own front end and looks like a CORS bug.</p>
+<p class="rule">Every wall from weeks 7&ndash;10 is still in the code. Three of them are switched off by a spelling, and the health check says <span class="ok200">200</span>.</p>
+
+<h2>2. Where the reads live</h2>
+<div class="two">
+<div class="bad"><h4>before &mdash; 7 reads, 4 files</h4>
+src/db.ts<br>
+&nbsp;&nbsp;loadEnvFile() &middot; DATABASE_URL<br>
+src/app.ts<br>
+&nbsp;&nbsp;ALLOWED_ORIGINS ?? "localhost:5173"<br>
+&nbsp;&nbsp;LOG_LEVEL ?? "info"<br>
+&nbsp;&nbsp;TRUST_PROXY === "true"<br>
+&nbsp;&nbsp;NODE_ENV === "production"<br>
+src/auth/session.ts<br>
+&nbsp;&nbsp;NODE_ENV === "production" &times;2<br>
+src/server.ts<br>
+&nbsp;&nbsp;Number(PORT ?? 3000) &middot; HOST ?? &hellip;<br>
+<span class="file">every value: string | undefined</span>
+<p class="end">The list exists only in your head.</p></div>
+<div class="good"><h4>after &mdash; 1 parse, 1 file</h4>
+src/config.ts<br>
+&nbsp;&nbsp;loadEnvFile()<br>
+&nbsp;&nbsp;z.object({ &hellip;7 names&hellip; })<br>
+&nbsp;&nbsp;safeParse(process.env)<br>
+&nbsp;&nbsp;export const config<br>
+<br>
+src/db.ts &rarr; config.DATABASE_URL<br>
+src/app.ts &rarr; config.ALLOWED_ORIGINS &hellip;<br>
+src/auth/session.ts &rarr; config.NODE_ENV<br>
+src/server.ts &rarr; config.PORT, config.HOST<br>
+<span class="file">string[] &middot; boolean &middot; number &middot; 3 literals</span>
+<p class="end">The list is the schema.</p></div>
+</div>
+<p>The coercion happened once, at the door &mdash; the same move as a route&rsquo;s zod schema, one layer further out. After the parse, <code>config.PORT</code> is a <code>number</code> and <code>config.TRUST_PROXY</code> is a <code>boolean</code>, so <code>=== "true"</code> cannot be written again.</p>
+
+<h2>3. The gate</h2>
+<div class="flow">
+<div><h4>boot</h4>
+try { loadEnvFile() }<br>
+<span class="file">no file in production &mdash; fine</span><br>
+Env.safeParse(process.env)
+<p class="out">one question</p></div>
+<div class="arrow">&rarr;</div>
+<div class="no"><h4>&#x2718; not ok</h4>
+Bad environment:<br>
+&nbsp;&rarr; DATABASE_URL<br>
+&nbsp;&rarr; NODE_ENV<br>
+&nbsp;&rarr; ALLOWED_ORIGINS<br>
+&nbsp;&rarr; TRUST_PROXY<br>
+process.exit(<b>1</b>)<br>
+<span class="file">all four at once, measured</span>
+<p class="out">nothing starts</p></div>
+</div>
+<div class="flow">
+<div><h4>boot</h4>
+Env.safeParse(process.env)
+<p class="out">one question</p></div>
+<div class="arrow">&rarr;</div>
+<div class="hit"><h4>&#x2713; ok</h4>
+export const config = parsed.data<br>
+<br>
+db &middot; app &middot; session &middot; server<br>
+read <b>config</b>, never process.env<br>
+<span class="file">141 tests still pass</span>
+<p class="out">it listens</p></div>
+</div>
+<p><code>safeParse</code> collects every problem instead of throwing on the first, so a fresh server is one restart away from correct, not four. And the <code>1</code> is not decoration &mdash; it is how Fly, systemd or Docker learn the boot failed and stop the rollout.</p>
+<p class="rule"><b>A <code>.default()</code> is a place a typo can hide.</b> Give one only where being wrong is visible in a second. <code>PORT</code>, <code>HOST</code>, <code>LOG_LEVEL</code> qualify. The four that decide whether production is safe do not.</p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://12factor.net/config">The Twelve-Factor App &mdash; III. Config</a>. One screen, written in 2011, and it is the origin of the rule you just implemented. The test it gives is sharp: <em>could you open-source the repo this minute without leaking any credential?</em></p>
+<p><b>Also:</b> <a href="https://nodejs.org/api/process.html#processloadenvfilepath">Node docs &mdash; <code>process.loadEnvFile()</code></a>. Two paragraphs. Note it throws when the file is missing &mdash; which is the normal case in production, and why the <code>try</code> is not laziness.</p>
+<p><b>Reference card:</b> <a href="../reference/environment.html">Environment and config &mdash; the whole table</a> &mdash; new today, and the one you will open during the deploy.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/node/">r/node</a> &mdash; ask where people draw the line between a required variable and a defaulted one. Watch how many answers are &ldquo;default everything so it always starts&rdquo;. Ask them what happens on the day it starts wrong.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0026-the-request-you-cannot-repeat.html">&larr; Back</a>
+<a href="../reference/the-whole-arc.html">The whole arc, one page &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

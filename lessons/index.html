@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Secure Full-Stack APIs — All Lessons</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<p class="kicker">Course map &middot; Team Task Tracker</p>
+<h1>All lessons</h1>
+<p class="lede">Twenty-eight lessons, each one short. Read the rule; if it does not land, open the lesson. Rewritten 2026-09-07 to be shorter and more visual &mdash; the older, longer versions are still in <code>lessons/long/</code>.</p>
+
+<div class="tldr">
+<h2>How to use this page</h2>
+<ul>
+<li>Reading top to bottom takes about ten minutes and rebuilds the whole story.</li>
+<li>Each lesson is ~5 minutes plus a small task at the end.</li>
+<li>One page with just the rules: <a href="../reference/the-whole-arc.html">the whole arc</a>.</li>
+</ul>
+</div>
+
+<h2>Week 1&ndash;2 &middot; API basics and the database</h2>
+<table>
+<tr><td>01</td><td><a href="./0001-first-validated-route.html">Validating a route with zod</a></td><td>The back end validates to stay alive, not to be kind.</td></tr>
+<tr><td>02</td><td><a href="./0002-schemas-at-the-door.html">Making validation the default</a></td><td>Make the safe thing the default. Then forgetting is impossible.</td></tr>
+<tr><td>03</td><td><a href="./0003-rows-that-survive-a-restart.html">Prisma: schema, migration, client</a></td><td>Schema is the shape, migration is the change, client is the code.</td></tr>
+<tr><td>04</td><td><a href="./0004-rows-that-point-at-rows.html">Foreign keys and relations</a></td><td>Store the pointer, not the copy. Then filter by it.</td></tr>
+</table>
+
+<h2>Week 3&ndash;4 &middot; Auth you wrote yourself</h2>
+<table>
+<tr><td>05</td><td><a href="./0005-passwords-you-cannot-read-back.html">Hashing passwords with scrypt</a></td><td>A shredder, not a locked box. Salted, and slow on purpose.</td></tr>
+<tr><td>06</td><td><a href="./0006-a-door-that-stays-open.html">Sessions and cookies</a></td><td>Hand out a ticket, keep the facts. Logout is one DELETE.</td></tr>
+</table>
+
+<h2>Week 5&ndash;6 &middot; Roles and permissions</h2>
+<table>
+<tr><td>07</td><td><a href="./0007-one-place-that-says-no.html">Deny-by-default permissions</a></td><td>Roles are data. Permissions are code. Deny by default.</td></tr>
+<tr><td>08</td><td><a href="./0008-a-role-is-a-row.html">Roles as membership rows</a></td><td>The role belongs to the pair. Routes ask for a job, not a badge.</td></tr>
+<tr><td>09</td><td><a href="./0009-the-third-argument.html">Scoped permission checks</a></td><td>Count the nouns in the rule, then count your parameters.</td></tr>
+<tr><td>10</td><td><a href="./0010-a-task-belongs-to-a-team.html">Team-scoped routes</a></td><td>A permission needs a scope, so the scope goes in the URL.</td></tr>
+</table>
+
+<h2>Week 7&ndash;8 &middot; API security</h2>
+<table>
+<tr><td>11</td><td><a href="./0011-five-tries-then-wait.html">Login throttling</a></td><td>Rate-limit the thing the attacker has only one of.</td></tr>
+<tr><td>12</td><td><a href="./0012-the-floor-under-everything.html">Choosing security libraries</a></td><td>Reject a library on its defaults; take it when no decisions remain.</td></tr>
+<tr><td>13</td><td><a href="./0013-same-site-is-not-same-origin.html">CORS: same-site vs same-origin</a></td><td>CORS is advice to a browser. It stops nobody with curl.</td></tr>
+<tr><td>14</td><td><a href="./0014-one-origin-no-question.html">Avoiding cross-origin entirely</a></td><td>The best answer to a cross-origin question is to stop being cross-origin.</td></tr>
+<tr><td>15</td><td><a href="./0015-headers-for-json-not-pages.html">Security headers for a JSON API</a></td><td>A library can be right about the facts and wrong about your situation.</td></tr>
+<tr><td>16</td><td><a href="./0016-who-asked-for-this-write.html">CSRF: who may write</a></td><td>Reading is CORS. Writing is CSRF. Never the same defence.</td></tr>
+<tr><td>17</td><td><a href="./0017-the-key-you-did-not-name.html">Mass assignment</a></td><td>Strip is safe. Reject is safe and honest.</td></tr>
+<tr><td>18</td><td><a href="./0018-the-route-nobody-audited.html">User enumeration</a></td><td>Hide it, or charge for it. Those are the only two moves.</td></tr>
+<tr><td>19</td><td><a href="./0019-the-row-that-outlives-the-user.html">Audit rows that survive deletion</a></td><td>An audit row that vanishes with the person it accuses is not evidence.</td></tr>
+<tr><td>20</td><td><a href="./0020-the-column-that-cannot-be-a-parameter.html">SQL injection and sort columns</a></td><td>A value can travel beside the query. An identifier has to be part of it.</td></tr>
+<tr><td>21</td><td><a href="./0021-what-a-crash-is-allowed-to-say.html">Error handling: 4xx vs 5xx</a></td><td>A 4xx is the caller&rsquo;s fault, so name the field. A 5xx is yours, so tell the log.</td></tr>
+</table>
+
+<h2>Week 9&ndash;10 &middot; The front end</h2>
+<table>
+<tr><td>22</td><td><a href="./0022-the-browser-does-not-know-you.html">Auth state in the browser</a></td><td>&ldquo;Logged in&rdquo; is not a fact the page holds. It is a question the page asks.</td></tr>
+<tr><td>23</td><td><a href="./0023-the-button-you-can-still-press.html">Client UI is not a permission</a></td><td>The page hides what your role may not do. Un-hide it and the server still refuses.</td></tr>
+<tr><td>24</td><td><a href="./0024-two-ways-to-say-no.html">403 vs 404</a></td><td>Tasks on screen. 403 is about you and runs first; 404 is about the row and is deliberately vague.</td></tr>
+<tr><td>25</td><td><a href="./0025-send-the-value-not-the-verb.html">Mutations from the front end</a></td><td>The first write from the page. Say where you want to end up, and let the reply be the new row.</td></tr>
+<tr><td>26</td><td><a href="./0026-the-request-you-cannot-repeat.html">Double-submit and idempotency</a></td><td>A create is not idempotent. When you cannot make it safe to repeat, make it hard to repeat.</td></tr>
+<tr><td>28</td><td><a href="./0028-the-reply-that-says-nothing.html">204 responses and cache updates</a></td><td>Deleting from the page. A 204 carries no body, so the id you filter by is the id you sent.</td></tr>
+</table>
+
+<h2>Week 11&ndash;12 &middot; Deploy</h2>
+<table>
+<tr><td>27</td><td><a href="./0027-the-default-that-hides-the-typo.html">Env config with no defaults</a></td><td>One misspelled variable switches off HSTS, the Secure cookie or the rate limit &mdash; and the app boots.</td></tr>
+<tr><td>29</td><td><a href="./0029-the-logout-that-keeps-the-session.html">Finishing a refactor: one reader</a></td><td>Finishing lesson 27. One fact, one reader &mdash; and why an unfinished refactor has no failing state.</td></tr>
+<tr><td>30</td><td><a href="./0030-the-list-with-no-end.html">Cursor pagination</a></td><td>A list route with no limit. Cursor pagination, one query instead of two, and reading a plan.</td></tr>
+<tr><td>31</td><td><a href="./0031-the-pages-you-threw-away.html">React Query cache and pages</a></td><td><code>useInfiniteQuery</code> and a &ldquo;Load more&rdquo;. The cache stops being an array, and <code>tsc</code> mentions only half of what broke.</td></tr>
+<tr><td>32</td><td><a href="./0032-the-function-you-cannot-import.html">Testing a module you cannot import</a></td><td>The first front-end test. The blocker is the <code>@/</code> alias, not the browser &mdash; and the test finds structural sharing.</td></tr>
+<tr><td>33</td><td><a href="./0033-the-list-is-a-question.html">Query keys as questions</a></td><td><code>?done=</code> and <code>?q=</code>. A filter is an input to the answer, so it belongs in the query key &mdash; leave it out and the click sends nothing at all.</td></tr>
+<tr><td>34</td><td><a href="./0034-the-log-that-keeps-the-secret.html">Log redaction</a></td><td>The log is a second wire out of your app, and it has no schema. <code>{ err }</code> printed a password hash. Redaction is the net; choosing the fields is the plan.</td></tr>
+<tr><td>35</td><td><a href="./0035-the-test-that-never-ran.html">Globs and test discovery</a></td><td>Your suite said 154 when it should have said 155. The shell expands the glob before the runner sees it, and <code>**</code> means one level in sh. A test you have never seen fail is not a test.</td></tr>
+<tr><td>36</td><td><a href="./0036-the-row-that-outlives-the-row.html">Audit logs store copies, not pointers</a></td><td>72 audit rows point at a deleted task and cannot say what it was. An audit log stores copies, not pointers &mdash; and <code>onResponse</code> is too late to take the copy.</td></tr>
+<tr><td>37</td><td><a href="./0037-two-kinds-of-nothing.html">SQL NULL vs JSON null</a></td><td>A <code>jsonb</code> column can be empty, or it can hold the word <code>null</code>. <code>IS NULL</code> only sees the first. 3,960 of your audit rows are the second kind, and one word in Prisma decides which you get.</td></tr>
+<tr><td>38</td><td><a href="./0038-reading-the-audit-log.html">Reading the audit log</a></td><td>The log gets a reader. <code>audit:read</code> is a power of its own &mdash; a MEMBER may delete a task and still not see who else did. The index you wrote decides the filters you may offer, and the refused read writes itself into the log.</td></tr>
+<tr><td>39</td><td><a href="./0039-the-audit-page-in-the-front-end.html">The audit page in the front end</a></td><td>The log gets a screen, and the browser turns out to keep two stale copies of the reply. <code>can.includes("audit:read")</code> is <code>TS2345</code>; <code>at: Date</code> is silent and prints raw ISO text. Checked vs believed.</td></tr>
+<tr><td>40</td><td><a href="./0040-a-believed-type-can-check-itself.html">A believed type can check itself</a></td><td>Lesson 39's gap, closed. A full validator costs 91.5&nbsp;KB gzip for one small schema; a 15-line hand-written guard costs 0. Both catch the same wrong-type bug. No new dependency, 40 lessons running.</td></tr>
+<tr><td>41</td><td><a href="./0041-the-role-that-can-erase-the-evidence.html">The role that can erase the evidence</a></td><td>The permission system under the app: database roles. Measured &mdash; <code>REVOKE UPDATE, DELETE</code> works even on the owner, <code>TRUNCATE</code> slips past it, the owner grants it back in one line, and the lock breaks 3 tests and 0 routes. Homework 9 answered: retention.</td></tr>
+<tr><td>42</td><td><a href="./0042-two-database-logins.html">Two database logins</a></td><td>Wiring <code>tasks_app</code> in. <code>APP_DATABASE_URL</code> for the server, <code>DATABASE_URL</code> for migrations and tests, chosen by one ternary in <code>src/db.ts</code>. Four tests that ask the database to refuse (<code>42501</code>). Measured: a shell variable beats <code>.env</code>. Plus &ldquo;hint vs gate&rdquo;, taught instead of asked.</td></tr>
+<tr><td>43</td><td><a href="./0043-deleting-the-audit-log-on-purpose.html">Deleting the audit log on purpose</a></td><td>Retention. <code>pruneAuditLog()</code> opens its own connection as the <b>owner</b>, because the app role is refused. Cron is the scheduler &mdash; no new dependency. <code>AUDIT_RETENTION_DAYS</code>, default 90, <code>min(1)</code> because 0 days means every row. Three tests, planted 400 days back so real rows are never in range.</td></tr>
+<tr><td>51</td><td><a href="./0051-the-resource-nobody-can-see.html">The resource nobody can see</a></td><td><code>Project</code> has a model, a migration, a store, two routes and six tests &mdash; and <b>0 rows</b>, because there is no <code>GET</code> route and no <code>project:read</code> action. Adding one word to <code>VIEWER</code> fails two tests on purpose (<b>168/2</b>), and both are allowlists doing their job. Then the rule that decides the gate: <b>a <code>where</code> clause is a scope only when you chose its value</b> &mdash; session id, no gate; URL id, gate. The projects screen, list plus create. <b>172</b>. No new dependency, 51 lessons.</td></tr>
+<tr><td>52</td><td><a href="./0052-the-machine-you-can-throw-away.html">The machine you can throw away</a></td><td>The first container. Two deliberate failures teach it: <code>HOST=127.0.0.1</code> is correct on a machine and unreachable inside a box, and <code>localhost:5432</code> points at the box, not your Mac. <b>The boundary moves from the bind address to the port publish</b> &mdash; <code>0.0.0.0</code> plus <code>-p</code>, not a wall removed. <code>.dockerignore</code> as a security step: an image is a file, and <code>docker run api cat /app/.env</code> is all it takes. Layer order, and why there is no build stage. No new dependency, 52 lessons.</td></tr>
+<tr><td>53</td><td><a href="./0053-one-command-two-machines.html">One command, two machines</a></td><td>Postgres moves into a container of its own. <code>compose.yaml</code>: a named volume, a healthcheck, and a service name &mdash; <code>db:5432</code> is real everywhere, <code>host.docker.internal</code> is real on one laptop. The lesson-41 role script <b>aborts the database init</b>, because init runs on an empty volume and the last line names <code>"AuditLog"</code>. <b>A grant is about rows that exist; a default privilege is about rows that do not yet.</b> Split the file by when it can run, <code>migrate deploy</code> (never <code>dev</code>), and the only undo for a bad init is <code>down -v</code>. Zero TypeScript. <b>172</b>. No new dependency, 53 lessons.</td></tr>
+<tr><td>54</td><td><a href="./0054-the-box-that-starts-itself.html">The box that starts itself</a></td><td>The five manual commands of lesson 53 become one. New <code>docker-entrypoint.sh</code>: <code>set -e</code>, <code>migrate deploy</code>, <code>db execute</code> for <code>audit-lockdown.sql</code>, then <code>exec "$@"</code>. <b>An image is a photograph of your source, not a window onto it</b> &mdash; the stale <code>COPY</code> that made the seed crash, and <code>up --build</code>. <code>migrate deploy</code> is idempotent, and two containers racing on an empty database are safe because Prisma takes a Postgres <b>advisory lock</b> (measured). Migrations automate; the seed never does. Zero TypeScript. <b>172</b>. No new dependency, 54 lessons.</td></tr>
+<tr><td>55</td><td><a href="./0055-the-database-that-is-not-on-your-laptop.html">The database that is not on your laptop</a></td><td>Postgres leaves the laptop for <b>Neon</b> (free, permanent, no card) while the container stays. Two lines of <code>tasks_app.sql</code> named laptop-only things &mdash; the database <code>tasks</code> and the role <code>tasks</code> &mdash; and the second would have failed <b>silently</b>. Fixed with psql&rsquo;s <code>:"DBNAME"</code> and <code>:"USER"</code> (measured against the running container). <b>Pooled vs direct:</b> the app takes the <code>-pooler</code> host, migrations must not, because an advisory lock lives on one connection. The <code>tasks_app</code> password is rotated at last &mdash; Neon requires 60 bits &mdash; and then kept <em>out</em> of the SQL file with psql&rsquo;s <code>\getenv</code> + <code>:'literal'</code>, because lesson 56 commits that file and a secret committed once is history forever; <code>.env.docker</code> joins <code>.gitignore</code>. Move the database first: one change, one suspect. Zero TypeScript. <b>172</b>. No new dependency, 55 lessons.</td></tr>
+<tr><td>56</td><td><a href="./0056-the-url-you-can-send-to-someone.html">The URL you can send to someone</a></td><td>The app leaves the laptop too: a <b>Render</b> free web service built from the existing <code>Dockerfile</code>, Root Directory <code>server</code> (same build context compose gives it). <code>.gitignore</code> <em>before</em> <code>git init</code> &mdash; <code>git add -A</code> then read the index, because <code>add</code> is reversible and <code>commit</code> is forever. Env moves to a dashboard; <code>PORT</code> is <b>given, not chosen</b>, and <code>HOST=0.0.0.0</code> or the deploy dies with a <em>port</em> message for a <em>host</em> mistake. Render is never told this app has migrations &mdash; <code>ENTRYPOINT</code> does it, and the Docker Command field overrides only <code>CMD</code>. <code>NODE_ENV=production</code> + <code>TRUST_PROXY=true</code> flip together, and <code>Secure</code> is emitted for the first time since lesson 29. Then the payoff failure: local page, deployed API, logged out &mdash; not CORS, <code>SameSite=Lax</code>, and the fix is one origin. Zero TypeScript. <b>172</b>. No new dependency, 56 lessons.</td></tr>
+</table>
+
+<h2>Reference cards</h2>
+<ul>
+<li><a href="../reference/the-whole-arc.html">The whole arc</a> &mdash; every rule from all 36 lessons, one page.</li>
+<li><a href="../reference/testing.html">Tests in this project</a> &mdash; new in lesson 35. The commands, the four silent passes, the fixture trap.</li>
+<li><a href="../reference/logging.html">Logging and audit</a> &mdash; new in lesson 34, extended in lesson 36 with pointer-vs-snapshot and capture timing.</li>
+<li><a href="../reference/prisma-postgres.html">Prisma + Postgres</a></li>
+<li><a href="../reference/password-hashing.html">Password hashing</a></li>
+<li><a href="../reference/sessions-and-cookies.html">Sessions and cookies</a></li>
+<li><a href="../reference/rbac-permissions.html">RBAC permissions</a></li>
+<li><a href="../reference/api-security-basics.html">API security basics</a></li>
+<li><a href="../reference/sql-injection.html">SQL injection and allowlists</a></li>
+<li><a href="../reference/react-query-rules.html">React Query, the rules so far</a> &mdash; updated with the <code>useInfiniteQuery</code> recipe</li>
+<li><a href="../reference/environment.html">Environment and config</a> &mdash; every variable, and what a wrong value costs.</li>
+<li><a href="../reference/rbac-permissions.html">Roles and permissions</a> &mdash; the <code>VIEWER</code> row gained <code>project:read</code> in lesson 51.</li>
+<li><a href="../reference/pagination-and-indexes.html">Pagination and indexes</a> &mdash; the four checks for any list route, and how to read a query plan.</li>
+</ul>
+
+<footer class="ask">
+<p><b>Next up:</b> lessons 44&ndash;50 were a Postgres storage-internals arc and were cut &mdash; off-mission, and the numbering skips them on purpose (record 0055). Still open: the two front-end holes, third time asked and now unblocked: nothing <em>reads</em> the audit log (lesson 34 gave the reason to care, and lesson 35 made the suite trustworthy enough to prove it), and there is still <b>no way to create a team</b> from the page &mdash; <code>POST /teams</code> has never been called by anything but a test. After that, the rest of week 11&ndash;12: Redis for the two in-process counters, then nginx with its own CSP for the page. The invite mailer opens week 13&ndash;14, and it is where register finally gets its <code>202</code>. Docker and the deploy come last, by Jay&rsquo;s decision. See <a href="../PLAN.md">PLAN.md</a>.</p>
+<p>Any lesson that still does not land &mdash; tell me the number and I will teach it a different way.</p>
+</footer>
+
+</body>
+</html>

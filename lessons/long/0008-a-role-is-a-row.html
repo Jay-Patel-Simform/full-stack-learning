@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 8 — A Role Is A Row</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 08 &middot; Week 5&ndash;6 &middot; RBAC</p>
+<h1>A role is a row</h1>
+<p class="lede">Last lesson you built <code>can()</code>, and nothing called it. Today you give it a role to judge &mdash; a real row in Postgres, one per person per team &mdash; and you make four routes answer <code>403</code>. Your <a href="../../MISSION.md">mission</a> line "Member cannot delete a team" now passes over HTTP, not just in a unit test.</p>
+
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>A role is not a column on <code>User</code>. One person can be OWNER here and VIEWER there.</li>
+<li>The role belongs to the <strong>pair</strong>: this user, in this team. That pair is a row.</li>
+<li>Make <code>role</code> a Postgres <strong>enum</strong>, so <code>"ADMINN"</code> cannot be stored.</li>
+<li>One hook, <code>requirePermission("member:invite")</code>, reads the row and answers 403.</li>
+<li>Routes ask for a <em>job</em>, never for a badge.</li>
+</ul>
+</div>
+
+<h2>Where does the role come from?</h2>
+<p>That was your homework question, and it has a short answer. <code>can(role, action)</code> needs a role. <code>request.userId</code> exists. <code>request.role</code> does not, because nothing in your database has ever stored one.</p>
+<p>So the first job is a place to keep it. And the shape of that place is the whole lesson.</p>
+<p>Here is the wrong shape. Nearly every tutorial ships it:</p>
+<pre><code>model User {
+  role String   // "ADMIN"
+}</code></pre>
+<p>It reads fine. It breaks the moment you have two teams. Jay is OWNER of the design team and VIEWER of the finance team. One column on <code>User</code> cannot hold two answers.</p>
+<blockquote>Oso calls this the jump from <em>organizational roles</em> to <em>cross-organization roles</em> &mdash; stage two of four. "Users have different roles in different organizations." &mdash; <a href="https://www.osohq.com/academy/what-is-rbac">Oso, Authorization Academy</a></blockquote>
+<p>So the role does not belong to the person. <strong>The role belongs to the pair</strong>: this person, in this team.</p>
+
+<h2>A pair is a row</h2>
+<p>A row about two things is a <em>join row</em>. You already have one, and you did not notice: <code>Task.ownerId</code> joins a task to a user (<a href="../0004-rows-that-point-at-rows.html">lesson 4</a>). This one joins a user to a team, and carries the role along with it.</p>
+<div class="scroll">
+<table>
+<tr><th>teamId</th><th>userId</th><th>role</th></tr>
+<tr><td>3</td><td>1</td><td>OWNER</td></tr>
+<tr><td>3</td><td>2</td><td>ADMIN</td></tr>
+<tr><td>3</td><td>7</td><td>VIEWER</td></tr>
+<tr><td>9</td><td>1</td><td>VIEWER</td></tr>
+</table>
+</div>
+<p>Read the last two lines out loud. User 1 is OWNER in team 3 and VIEWER in team 9. The one-column version could not say that. This one says it with no new machinery at all.</p>
+<p>Prisma has two ways to write a many-to-many. Use the explicit one whenever the join carries a field of its own:</p>
+<blockquote>"Use implicit m-n unless you need to store additional metadata in the relation table." &mdash; <a href="https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/many-to-many-relations">Prisma, Many-to-many relations</a></blockquote>
+<p><code>role</code> is exactly that metadata. So: explicit.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+erDiagram
+  USER ||--o{ MEMBERSHIP : "has"
+  TEAM ||--o{ MEMBERSHIP : "has"
+  USER {
+    int id PK
+    string email UK
+  }
+  TEAM {
+    int id PK
+    string name
+  }
+  MEMBERSHIP {
+    int teamId PK,FK
+    int userId PK,FK
+    Role role "enum"
+  }
+</pre>
+<figcaption>The role hangs on the line between the two, not on either end. Both ids together are the key, so the same person cannot hold two roles in one team.</figcaption>
+</figure>
+
+<h2>The role names go in the database too</h2>
+<p><code>role</code> could be a <code>String</code>. Then <code>"ADMINN"</code> is a legal value, and the day a typo lands, <code>can()</code> gets a role it does not know. It answers <em>no</em> &mdash; correctly, per <a href="../0007-one-place-that-says-no.html">lesson 7</a>'s deny-by-default &mdash; and a real admin is locked out, and nothing anywhere says why.</p>
+<p>Postgres has a better answer: a type of your own, with a fixed list of allowed values.</p>
+<pre><code>CREATE TYPE "Role" AS ENUM ('VIEWER', 'MEMBER', 'ADMIN', 'OWNER');</code></pre>
+<p>Now the typo cannot be stored:</p>
+<pre><code>ERROR:  invalid input value for enum Role: "ADMINN"</code></pre>
+<p>That message is from <a href="https://www.postgresql.org/docs/current/datatype-enum.html">the Postgres manual</a>, and it is the same teaching move as <a href="../0003-rows-that-survive-a-restart.html">lesson 3</a>'s <code>NOT NULL</code>: <strong>declare the wall, do not remember it</strong>. Three walls now guard the same four names &mdash; zod at the door, TypeScript at compile time, the enum in the table. Each one catches what the others cannot see.</p>
+
+<h2>The schema you now have</h2>
+<p><code>server/prisma/schema.prisma</code>. Two models and an enum.</p>
+<pre><code>enum Role {
+  VIEWER
+  MEMBER
+  ADMIN
+  OWNER
+}
+
+model Team {
+  id      Int    @id @default(autoincrement())
+  name    String @db.VarChar(100)
+  members Membership[]
+}
+
+model Membership {
+  role Role @default(MEMBER)
+
+  team   Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  teamId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId Int
+
+  // One membership per person per team. Nobody is VIEWER and OWNER at once.
+  @@id([teamId, userId])
+}</code></pre>
+<p>Two details worth your attention.</p>
+<p><code>@@id([teamId, userId])</code> is a <strong>composite primary key</strong> &mdash; the key is the two columns together. It means the duplicate row simply cannot exist. Not "we check first"; cannot exist. The database refuses it, and your invite route turns that refusal into a <code>409</code>.</p>
+<p><code>onDelete: Cascade</code>, twice. Delete the team, the memberships go. Delete the user, their memberships go. No orphan row claiming a role in a team that is gone.</p>
+<div class="aside">
+<p><strong>The role names now live in one place, not two.</strong> <code>src/auth/can.ts</code> no longer types out the four names &mdash; it imports the type Prisma generated from the enum. Add <code>BILLING</code> to <code>schema.prisma</code> and the <code>PERMISSIONS</code> table stops compiling until you say what BILLING may do. Your lesson 7 homework did this by hand; now the database drives it.</p>
+</div>
+
+<h2>Now make a route say no</h2>
+<p>You have a decision function and a role to feed it. One small piece joins them: a hook that looks up the role for <em>this</em> team and enforces the answer.</p>
+<pre><code>export function requirePermission(action: Action) {
+  return async function gate(request, reply) {
+    const { teamId } = request.params as { teamId: number };
+    const role = await getRole(teamId, request.userId!);
+
+    if (!can(role, action)) return reply.code(403).send({ error: "forbidden" });
+
+    request.role = role;
+  };
+}</code></pre>
+<p>It is a <em>factory</em>: you hand it an action, it hands you back a hook. That is why the route can read like this &mdash; <code>server/src/routes/teams.route.ts</code>:</p>
+<pre><code>app.post("/teams/:teamId/members", {
+  schema: { params: TeamParams, body: AddMember, response: { ... } },
+  preHandler: requirePermission("member:invite"),
+}, handler);</code></pre>
+<p>The route asks for a <strong>job</strong>. It never mentions ADMIN or OWNER. Change your mind next year about who may invite, and you edit one line of <code>can.ts</code> &mdash; no route changes at all. That is the promise from lesson 7, now cashed.</p>
+
+<h3>Why <code>preHandler</code> and not <code>onRequest</code>?</h3>
+<p>Your session gate uses <code>onRequest</code>. This one cannot. Fastify runs the lifecycle in a fixed order, and <a href="https://fastify.dev/docs/latest/Reference/Hooks/">validation sits between the two</a>:</p>
+<div class="scroll">
+<table>
+<tr><td><code>onRequest</code></td><td>requireAuth</td><td>params are raw text</td></tr>
+<tr><td><em>validation</em></td><td>zod runs</td><td><code>"3"</code> becomes <code>3</code></td></tr>
+<tr><td><code>preHandler</code></td><td>requirePermission</td><td><code>teamId</code> is a number</td></tr>
+</table>
+</div>
+<p>The gate needs a real <code>teamId</code> to query with. So it runs after the wall that makes one. Pick the hook by what it needs, not by habit.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant C as Client
+  participant O as onRequest<br/>requireAuth
+  participant V as validation<br/>zod
+  participant P as preHandler<br/>requirePermission
+  participant H as handler
+  C->>O: DELETE /teams/3
+  O->>O: cookie -> request.userId
+  O->>V: pass
+  V->>V: params "3" becomes number 3
+  V->>P: pass
+  P->>P: getRole(3, userId) -> "MEMBER"
+  P->>P: can("MEMBER","team:delete") -> false
+  P-->>C: 403 forbidden (handler never runs)
+</pre>
+<figcaption>Order matters. <code>onRequest</code> sees <code>"3"</code> as raw text; only after validation is it a number you can query with. Pick the hook by what it needs.</figcaption>
+</figure>
+
+<h2>One reply for two different noes</h2>
+<p>Look again at the <code>403</code>. A VIEWER trying to delete team 3 gets it. So does a total stranger who is in no team at all. Same code, same body, no hint of which.</p>
+<p>That is deliberate. If the stranger got <code>404 no such team</code>, they could walk the ids and map out every team you host. Same idea as <a href="../0006-a-door-that-stays-open.html">lesson 6</a>'s login: one message for a wrong password and an unknown email, so nobody can farm your user list.</p>
+<blockquote>"Ensure lookup IDs are not accessible even when guessed" &mdash; <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html">OWASP, Authorization Cheat Sheet</a></blockquote>
+<p>And one route has <em>no</em> permission gate: <code>POST /teams</code>. Before the team exists there is no role to hold, so any logged-in person may start one &mdash; and creating it makes them its OWNER, in one transaction. A team with no owner is a team nobody can ever delete.</p>
+
+<h2>It runs</h2>
+<pre><code>cd server &amp;&amp; npm test
+# -&gt; # tests 28
+#    # pass 28</code></pre>
+<p>Ten of those are new, in <code>src/routes/teams.test.ts</code>, and they are a different animal from lesson 7's. Those tested the <em>decision</em>. These test the <strong>enforcing</strong> &mdash; a real request, through a real route, against a real Postgres. A perfect rule that no route calls protects nothing at all.</p>
+<pre><code>test("a member cannot delete the team", async () =&gt; {
+  assert.equal((await removeTeam("member")).statusCode, 403);
+  // and the team is still there
+  assert.ok(await prisma.team.findUnique({ where: { id: teamId } }));
+});</code></pre>
+<p>Note the second line. A <code>403</code> alone would also pass if the route deleted the team and <em>then</em> complained. Check the status <em>and</em> the state.</p>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why can a role not be a column on the <code>User</code> table?</p>
+<button>A user changes role often, and a column would need a history table</button>
+<button>A user has a different role in each team, and a column holds one</button>
+<p class="why" hidden>Right: the role belongs to the pair, not the person. Oso stage two.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">What does <code>@@id([teamId, userId])</code> stop from ever happening?</p>
+<button>The same person holding two roles at once inside one single team</button>
+<button>The same person holding one role at once inside two given teams</button>
+<p class="why" hidden>Right: the pair is the key, so a second row for that pair cannot exist.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why is <code>role</code> a Postgres enum rather than a plain text column?</p>
+<button>An enum column takes four bytes, so the index on it stays much smaller</button>
+<button>A typo cannot be stored, so a real admin cannot be locked out silently</button>
+<p class="why" hidden>Right: declare the wall. A junk role is denied by default, and denied quietly.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why does the permission gate run on <code>preHandler</code>, not <code>onRequest</code>?</p>
+<button>It needs the validated <code>teamId</code>, and validation runs after <code>onRequest</code></button>
+<button>It needs the validated session, and validation runs before <code>onRequest</code></button>
+<p class="why" hidden>Right: onRequest sees raw text. Pick the hook by what it needs.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">A stranger asks to delete team 3. Why <code>403</code> and not <code>404</code>?</p>
+<button>Because 404 would be a lie, since the team does in fact really exist</button>
+<button>Because 404 would confirm the team exists, so ids could be walked</button>
+<p class="why" hidden>Right: one reply for both noes. Same move as the login error message.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why does <code>POST /teams</code> have no <code>requirePermission</code> line on it?</p>
+<button>There is no team yet, so there is no membership row to hold a role</button>
+<button>There is no body yet, so there is no membership row to hold a role</button>
+<p class="why" hidden>Right: and creating the team makes you OWNER, in the same transaction.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why does the test assert the team still exists, not only the <code>403</code>?</p>
+<button>Because Fastify sends the status line first, so the body may still change</button>
+<button>Because a route could delete the row and then answer 403 anyway</button>
+<p class="why" hidden>Right: check the status and the state. A status is a claim, not proof.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Adding <code>BILLING</code> to the Prisma enum breaks the build. Where, and why?</p>
+<button>In <code>PERMISSIONS</code>, because <code>Record&lt;Role, ...&gt;</code> needs one entry per role</button>
+<button>In <code>ROLES</code>, because <code>satisfies</code> needs one entry per role in order</button>
+<p class="why" hidden>Right: a new role cannot ship until you have said what it may do.</p>
+</div>
+
+<h2>Read this</h2>
+<p><strong>Primary source:</strong> <a href="https://www.osohq.com/academy/what-is-rbac">Oso Authorization Academy &mdash; RBAC</a>, stage two, <em>Cross-Organization Roles</em>. It is the exact model you just built, drawn out properly. Ten minutes. If you read it before lesson 7 and it felt abstract, read it again now &mdash; you have the table in front of you.</p>
+<p>Then <a href="https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/many-to-many-relations">Prisma &mdash; Many-to-many relations</a>, the explicit section, so you can write the next join model without me.</p>
+
+<h2>Do this before lesson 9</h2>
+<ol>
+<li>Read <code>server/src/routes/teams.route.ts</code> top to bottom. Four routes. Count the permission gates. Say out loud why one route has none.</li>
+<li>Run <code>cd server &amp;&amp; npm test</code>. 28 pass.</li>
+<li>Break the gate: change <code>requirePermission("team:delete")</code> to <code>requirePermission("task:read")</code> on the delete-team route. Run the tests. Which fail, and does the message tell you the real problem? Put it back.</li>
+<li>Break the wall: add <code>BILLING</code> to the <code>Role</code> enum in <code>schema.prisma</code>, then <code>npx prisma migrate dev --name billing_role</code> and <code>npm run typecheck</code>. Read the error. Then undo it &mdash; and notice you must <em>add a new migration</em> to undo it, because an applied migration is never edited.</li>
+<li>Attack it by hand. Start the server (<code>npm run dev</code>), register two users with <code>curl</code>, make a team as the first, then try to delete that team as the second. You should get <code>403</code>. Save the commands &mdash; week 7&ndash;8 is a whole session of this.</li>
+<li>Write one test yourself: a VIEWER cannot remove a member. Three lines, copy the shape of the invite test.</li>
+</ol>
+<p>Then two questions to bring me:</p>
+<ol>
+<li>Your tasks are still owned by a <em>user</em>, not a team. So <code>can(role, "task:update")</code> is never called anywhere. What has to change about <code>Task</code> before a task can be guarded by a team role &mdash; and what happens to the tasks already in your table when you make that change?</li>
+<li>An ADMIN can currently remove the OWNER through your live API. Nothing stops them. You wrote down last lesson what information <code>can()</code> is missing. Now say where that information has to be <em>fetched</em>, and by whom &mdash; the route, the gate, or the store?</li>
+</ol>
+
+<div class="aside">
+<p>Stuck, or something felt hand-wavy? Ask me. I am your teacher here. Say what confused you and I will re-teach it another way. If a design choice feels arguable rather than unclear &mdash; and this lesson has a few &mdash; that is a good one to take to <a href="https://discord.gg/fastify">the Fastify Discord</a> or <a href="https://www.reddit.com/r/node/">r/node</a>, where people will tell you how they did it.</p>
+</div>
+
+<hr>
+<p class="nav">Back: <a href="../0007-one-place-that-says-no.html">Lesson 7 &mdash; One place that says no</a> &middot; Keep for reference: <a href="../../reference/rbac-permissions.html">Roles &amp; permissions cheat sheet</a> &middot; <a href="../../reference/prisma-postgres.html">Prisma &amp; Postgres</a> &middot; <a href="../../reference/api-security-basics.html">API security basics</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a> &middot; Sources: <a href="../../RESOURCES.md">RESOURCES.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

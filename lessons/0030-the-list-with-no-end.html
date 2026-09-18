@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 30 &mdash; Cursor pagination</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+/* One page of the table, drawn as a strip of rows. */
+  .strip { display: flex; flex-wrap: wrap; gap: 2px; margin: 0.6rem 0 0.3rem;
+    font-family: var(--mono); font-size: 0.6rem; }
+  .strip i { display: block; width: 0.42rem; height: 1.05rem; border-radius: 1px;
+    background: var(--rule); font-style: normal; }
+  .strip i.skipped { background: var(--bad); opacity: 0.55; }
+  .strip i.taken { background: var(--ok); }
+  .strip i.jump { background: transparent; border-left: 1px dashed var(--muted);
+    width: 0.42rem; }
+  .cost { font-family: var(--mono); font-size: 0.72rem; color: var(--muted);
+    margin: 0.15rem 0 1.3rem; }
+  .cost b { color: var(--ink); }
+  .cost .red { color: var(--bad); }
+  .cost .grn { color: var(--ok); }
+
+  /* Query-plan block: the two rows= numbers are the whole story. */
+  .plan { font-family: var(--mono); font-size: 0.72rem; margin: 1.1rem 0;
+    border-left: 3px solid var(--rule); padding-left: 0.9rem; }
+  .plan div { padding: 0.18rem 0; white-space: nowrap; overflow-x: auto; }
+  .plan .in { color: var(--bad); font-weight: 600; }
+  .plan .out { color: var(--ok); font-weight: 600; }
+  .plan .gone { color: var(--muted); text-decoration: line-through; }
+
+  /* The two-query picture. */
+  .pipe { font-family: var(--mono); font-size: 0.72rem; margin: 1.2rem 0;
+    border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  .pipe .row { display: grid; grid-template-columns: 5.4rem 1fr;
+    border-top: 1px solid var(--rule); }
+  .pipe .row:first-child { border-top: 0; }
+  .pipe .row > * { padding: 0.5rem 0.7rem; min-width: 0; overflow-x: auto; }
+  .pipe .who { background: var(--code-bg); color: var(--muted); font-size: 0.66rem;
+    border-right: 1px solid var(--rule); }
+  .pipe .leak { color: var(--bad); font-weight: 600; }
+  .pipe .drop { color: var(--muted); }
+
+  figcaption { font-size: 0.8rem; color: var(--muted); margin-top: 0.6rem;
+    border-left: 3px solid var(--rule); padding-left: 0.8rem; }
+  @media (max-width: 34rem) { .pipe .row { grid-template-columns: 4.2rem 1fr; } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 30 &middot; Week 11 &middot; Real world</p>
+<h1>Cursor pagination</h1>
+<p class="lede">Your <code>GET /teams/:teamId/tasks</code> has no limit. Not a big limit &mdash; <b>no limit</b>. Whatever is in the table comes back, every time. Today that is 5 rows, so nothing hurts. I put 5,000 rows in a scratch team and measured what happens next. Then I found a second query nobody asked for, reading a column nobody is allowed to see.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>No limit means the caller decides how much memory you use.</strong> 5,000 rows: <b>15 ms and every row in Node&rsquo;s memory</b>. Ask for 20 instead: <b>3 ms</b>.</li>
+<li><strong><code>include: { owner: true }</code> in <code>listTasks</code> fires a second query</strong> &mdash; and that query <code>SELECT</code>s <code>"User"."passwordHash"</code>. The response schema throws the owner away before it reaches the wire. So you pay for it, load it into memory, and send none of it.</li>
+<li><strong>A cursor beats an offset.</strong> Prisma turns <code>cursor</code> into a real <code>WHERE id &gt;= ...</code>, so page 250 costs the same as page 2.</li>
+<li><strong>Measured: the index you already have is enough for <code>?sort=id</code> and useless for <code>?sort=createdAt</code>.</strong> Adding <code>@@index([teamId, createdAt])</code> took that query from <b>0.814 ms to 0.025 ms</b> &mdash; and changed the plan from &ldquo;read 5,000 rows, then sort&rdquo; to &ldquo;read 20 rows&rdquo;.</li>
+<li><strong>The reply shape has to change</strong>, from <code>Task[]</code> to <code>{ items, nextCursor }</code>. I applied the whole change: <b>4 tests break</b>, and <b>one line</b> of the front end.</li>
+</ul>
+</div>
+
+<h2>The word pair</h2>
+<div class="word"><b>offset</b> &mdash; &ldquo;skip the first 4,980 rows, then give me 20.&rdquo; The database still has to walk past all 4,980 to know where to stop.</div>
+<div class="word"><b>cursor</b> &mdash; &ldquo;give me 20 rows <em>after</em> the row with id 4980.&rdquo; The database jumps straight there, because the index is sorted.</div>
+<p class="takeaway">An offset asks the database to <b>count</b>. A cursor asks it to <b>look up</b>. Counting gets slower every page. A look-up does not.</p>
+
+<h2>Measured, on your table, just now</h2>
+<p>Real <code>Task</code> table, real Postgres, a throwaway team with 5,000 tasks. I deleted the team afterwards; your table is back to 5 rows.</p>
+<pre><code>all rows + include owner:  <b>20ms</b>  5000 rows   <- what your code does today
+all rows, no include:      15ms  5000 rows
+take 20, no include:        <b>3ms</b>    20 rows
+page 2 by cursor:           2ms    20 rows
+page 250 by cursor/skip:    2ms    20 rows   <- the last page costs the same</code></pre>
+<div class="aside"><b>Be honest about the size of this.</b> 20 ms is not slow, and 5,000 rows is not big. The number that matters is not the milliseconds &mdash; it is that <b>the caller picked it, not you</b>. Every row also becomes a JavaScript object in your one Node process. 5,000 objects is fine. The same code with 500,000 rows is one request that eats the heap, and a second one that arrives while the first is still building the array. A limit is not a speed feature. <b>It is the ceiling on what one request can cost you.</b></div>
+
+<h2>The second query nobody asked for</h2>
+<p>Turn on Prisma&rsquo;s query log and call <code>listTasks</code> once. It is not one query:</p>
+<pre><code>SQL: SELECT "Task"."id", "Task"."title", "Task"."done", "Task"."createdAt", ...
+SQL: SELECT "User"."id", "User"."email", <b>"User"."passwordHash"</b>, "User"."createdAt" ...</code></pre>
+<p>That second line comes from one word in <code>src/store/task.store.ts</code>:</p>
+<div class="vs">
+<div class="no"><h4>today</h4><pre><code>return prisma.task.findMany({
+  where: { teamId },
+  orderBy: { [sort]: dir },
+  <b>include: { owner: true },</b>
+});</code></pre></div>
+<div class="yes"><h4>what the caller receives</h4><pre><code>[
+  { "id": 1, "title": "buy milk", "done": false }
+]
+
+// TaskPublic has three fields.
+// No owner. Never had one.</code></pre></div>
+</div>
+<div class="word"><b>overfetching</b> &mdash; loading data you will not use. It costs a query, memory, and time, and it returns nothing to the person who asked.</div>
+<p>The serializer is doing its job perfectly. <code>TaskPublic</code> lists three fields, so three fields go on the wire &mdash; that is the <a href="./0017-the-key-you-did-not-name.html">lesson 17</a> rule still holding. But the response schema guards the <b>wire</b>, not the <b>query</b>. Every password hash in that team already travelled from Postgres into your Node process before the serializer ever saw it.</p>
+<p class="takeaway">A field the response schema drops is a field you should not have selected. The schema is the last wall, not the first one.</p>
+<div class="aside"><b>The name for the sibling bug, so you recognise it later.</b> <b>N+1</b> is one query for the list, then one more <em>per row</em> &mdash; 1 + 5,000 round trips. That is not what your code does: Prisma batches the owners into a single second query, so this is 1+1, not N+1. Same family, different size. You get the real N+1 the day you write <code>for (const task of tasks) { await getOwner(task.ownerId) }</code>. The way you find both is the same: <b>turn on the query log and count the lines.</b></div>
+
+<h2>The index question, answered by measuring</h2>
+<p>You already have <code>@@index([teamId])</code> on <code>Task</code>. Is that enough? It depends entirely on <code>?sort=</code>, and <code>EXPLAIN ANALYZE</code> will tell you rather than guess. Both runs below are the same 5,000-row team.</p>
+
+<h3><code>?sort=createdAt</code> &mdash; the index does not cover it</h3>
+<pre class="scroll"><code>Limit  (actual time=0.804..0.806 <b>rows=20</b>)
+  -&gt; <b>Sort</b>  (actual time=0.803..0.804 rows=20)
+       Sort Key: "createdAt" DESC
+       Sort Method: top-N heapsort  Memory: 26kB
+       -&gt; Index Scan using "Task_teamId_idx"  (actual time=0.005..0.435 <b>rows=5000</b>)
+            Index Cond: ("teamId" = 573)
+Execution Time: <b>0.814 ms</b></code></pre>
+<p>Read the two <code>rows=</code> numbers. Postgres read <b>5,000</b> rows and returned <b>20</b>. It had to: the index knows the order of <code>teamId</code>, and nothing about <code>createdAt</code>. So it collects every matching row and sorts them, and the <code>LIMIT 20</code> only applies at the very end.</p>
+
+<h3>Same query, after adding <code>@@index([teamId, createdAt])</code></h3>
+<pre class="scroll"><code>Limit  (actual time=0.014..0.016 rows=20)
+  -&gt; <b>Index Scan Backward</b> using Task_teamId_createdAt_idx  (actual time=0.013..0.015 <b>rows=20</b>)
+       Index Cond: ("teamId" = 573)
+Execution Time: <b>0.025 ms</b></code></pre>
+<p>The <code>Sort</code> step is gone. So is <code>rows=5000</code>. The index is already stored in <code>(teamId, createdAt)</code> order, so Postgres walks it backwards, takes 20, and stops. <b>32&times; faster, and it stays 32&times; as the table grows</b> &mdash; the sort version gets worse with every row you add, the index version does not.</p>
+
+<h3>And now the part that says &ldquo;do not add the index&rdquo;</h3>
+<p>Your default sort is <code>id</code>, not <code>createdAt</code>. I measured that one too, with only the index you have today:</p>
+<pre class="scroll"><code>Limit  (actual time=0.007..0.009 rows=21)
+  -&gt; Index Scan using <b>"Task_pkey"</b>  (actual time=0.006..0.008 rows=21)
+       Filter: ("teamId" = 574)
+Execution Time: <b>0.017 ms</b></code></pre>
+<p>No sort, 21 rows read, faster than the compound-index version. The primary key <em>is</em> an index on <code>id</code>, already in order, so Postgres walks it and filters as it goes. A <code>(teamId, id)</code> index measured <b>slower</b> here (0.025 ms).</p>
+<p class="takeaway">Add the index for the query you actually run, after <code>EXPLAIN ANALYZE</code> shows you a <code>Sort</code> you do not want. An index is not free: every <code>INSERT</code> writes to it too.</p>
+<div class="aside"><b>One caveat on that last plan, because a number without its conditions is a lie.</b> The primary-key scan is fast there because that team owns 5,000 of the 5,005 rows &mdash; almost nothing gets filtered out. A team with 30 tasks in a table of 50,000 is a different question, and I measured that too: Postgres switched back to <code>Task_teamId_idx</code> plus a sort of 30 rows, and both versions were under 0.05 ms. <b><code>EXPLAIN</code> tells you about your data, not about databases in general.</b> Re-run it when your data changes shape.</div>
+
+<h2>The change &mdash; type it yourself</h2>
+<p>I applied all of it to your files, ran <code>tsc</code> and the suite, then put your files back byte-for-byte. Numbers below are what I actually saw.</p>
+
+<h3>1. <code>server/src/schemas/task.schema.ts</code> &mdash; the query gets two more keys</h3>
+<pre><code>  export const TaskQuery = z.object({
+    sort: z.enum(["id", "title", "createdAt"]).default("id"),
+    dir: z.enum(["asc", "desc"]).default("asc"),
+<b>+   // ! A limit with no ceiling is not a limit. ?limit=1000000 is a caller
++   // ! asking the server to load the whole table into memory, politely.
++   limit: z.coerce.number().int().min(1).max(100).default(20),
++   // ? Where the last page stopped. Absent means "start at the beginning".
++   cursor: z.coerce.number().int().positive().optional(),</b>
+  });</code></pre>
+<p>Both are caller input, so both go through the wall, same as everything since <a href="./0002-schemas-at-the-door.html">lesson 2</a>. Note <code>.max(100)</code>. Without it, <code>?limit=999999999</code> is a legal request and you are exactly where you started.</p>
+
+<h3>2. Same file &mdash; a page is not an array</h3>
+<pre><code><b>+ // * A page, not a bare array. The array alone cannot say "there is more".
++ export const TaskPage = z.object({
++   items: z.array(TaskPublic),
++   // ? null = this was the last page. Do not ask again.
++   nextCursor: z.number().nullable(),
++ });</b></code></pre>
+<p>This is the part that costs you. A bare array has nowhere to put &ldquo;there is more&rdquo;. Every caller has to change.</p>
+
+<h3>3. <code>server/src/store/task.store.ts</code> &mdash; the real work</h3>
+<pre class="scroll"><code>- export function listTasks(teamId: number, { sort, dir }: TaskQueryInput): Promise&lt;Task[]&gt; {
+-   return prisma.task.findMany({
+-     where: { teamId },
+-     orderBy: { [sort]: dir },
+-     <b>include: { owner: true },</b>
+-   });
+- }
++ export async function listTasks(
++   teamId: number,
++   { sort, dir, limit, cursor }: TaskQueryInput,
++ ): Promise&lt;{ items: Task[]; nextCursor: number | null }&gt; {
++   const rows = await prisma.task.findMany({
++     where: { teamId },
++     // ! Two keys, not one. `title` is not unique, so on its own it leaves ties
++     // ! in an order Postgres never promised -- and a cursor into an unstable
++     // ! order skips rows. `id` is the tiebreak that makes every row unique.
++     <b>orderBy: [{ [sort]: dir }, { id: dir }],</b>
++     // ? One row more than asked. If it comes back, there is a next page.
++     <b>take: limit + 1,</b>
++     // ? skip:1 steps over the cursor row itself, which we already sent.
++     <b>...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),</b>
++   });
++   const items = rows.slice(0, limit);
++   return { items, nextCursor: rows.length &gt; limit ? items.at(-1)!.id : null };
++ }</code></pre>
+<p>Three ideas in there, and the middle one is the one people get wrong.</p>
+<ul>
+<li><strong><code>take: limit + 1</code></strong> is how you answer &ldquo;is there more?&rdquo; without a second <code>COUNT(*)</code> query. Ask for 21, get 21 &rarr; there is a page 2. Get 20 or fewer &rarr; that was the end. You send 20 either way.</li>
+<li><strong>The tiebreak.</strong> <code>orderBy: { title: "asc" }</code> alone is <em>not</em> a total order: two tasks called &ldquo;fix bug&rdquo; can come back in either order, and Postgres is allowed to change its mind between the two requests. A cursor into an order that shifts under you skips rows silently. Adding <code>id</code> as a second key makes the order unique and therefore stable.</li>
+<li><strong>The <code>include</code> is gone.</strong> One query instead of two, no password hashes in memory, and the reply is byte-for-byte identical because <code>TaskPublic</code> never had an owner in it.</li>
+</ul>
+
+<h3>Look at the SQL Prisma writes for the cursor</h3>
+<p>This is worth reading once, because it is the whole idea in one line. With the tiebreak in place:</p>
+<pre class="scroll"><code>SELECT ... FROM "Task"
+WHERE "teamId" = $1
+  AND ( ("title" = (SELECT "title" FROM "Task" WHERE "id" = $2) AND "id" &gt;= (SELECT "id" ...))
+     OR  "title" &gt; (SELECT "title" FROM "Task" WHERE "id" = $4) )
+ORDER BY "title" ASC, "id" ASC LIMIT $5 OFFSET $6</code></pre>
+<p>Read the <code>WHERE</code> out loud: <em>&ldquo;same title as the cursor and a bigger id, or simply a bigger title.&rdquo;</em> That is a position in a sorted list, expressed as a comparison. It is the reason page 250 is not slower than page 2 &mdash; and the reason the tiebreak is not optional, because without it there is nothing to compare.</p>
+
+<h3>4. <code>server/src/routes/tasks.route.ts</code> &mdash; one line, plus the import</h3>
+<pre><code>-         response: { 200: <b>z.array(TaskPublic)</b>, 403: ErrorReply },
++         response: { 200: <b>TaskPage</b>, 403: ErrorReply },</code></pre>
+<p>The handler body does not change at all. It already returns whatever <code>listTasks</code> returns.</p>
+
+<h3>5. <code>web/src/features/tasks/tasks.ts</code> &mdash; one line, and the blast radius is bigger than it looks</h3>
+<pre class="scroll"><code>- await api.get&lt;Task[]&gt;(`/teams/${teamId}/tasks`, { params: ... })
+- ).data,
++ await api.get&lt;<b>{ items: Task[]; nextCursor: number | null }</b>&gt;(`/teams/${teamId}/tasks`, { params: ... })
++ ).data<b>.items</b>,</code></pre>
+<p>Only <code>useTasks</code> changes. The three mutations below it keep working untouched, because the <em>cache</em> still holds a plain <code>Task[]</code> &mdash; you unwrap the page at the edge and the rest of the app never learns about it. That is not luck; it is the <a href="./0025-send-the-value-not-the-verb.html">lesson 25</a> shape paying off.</p>
+<div class="aside"><b>What this change quietly does to your UI, said out loud.</b> The panel now shows the first 20 tasks and <em>silently drops the rest</em>. <code>nextCursor</code> comes back and you throw it away. That is an acceptable place to stop today &mdash; you have 5 tasks &mdash; but it is a real, invisible bug the moment a team has 21. The fix is React Query&rsquo;s <code>useInfiniteQuery</code> and a &ldquo;Load more&rdquo; button, which is a front-end lesson and not this one. <b>Write yourself a TODO in <code>tasks-panel.tsx</code>, not in your head.</b></div>
+
+<h2>What breaks, exactly</h2>
+<p>I ran it. Four tests fail, and all four fail for the same boring reason: <code>res.json()</code> is an object now, so <code>.map</code> and <code>.some</code> are not there.</p>
+<pre><code>not ok 104 - no sort given: the default is id ascending
+not ok 105 - sort=title reorders, so the column really reached the query
+not ok 106 - dir=desc reverses it
+not ok 119 - the list only shows this team's tasks
+# tests 142 · # pass 138 · # fail 4</code></pre>
+<p>The fix in all four is <code>res.json()</code> &rarr; <code>res.json().items</code>. Three of them are in <code>task-sort.test.ts</code>, one in <code>tasks.test.ts</code>.</p>
+<p class="takeaway">Four failing tests is the good outcome. A response shape you changed and <em>nothing</em> went red is a response nobody was checking.</p>
+
+<h2>The new test file</h2>
+<p><code>server/src/routes/task-page.test.ts</code>, its own file with its own fixture, same rule as every other test file here. The interesting one is the second: it walks the whole list by cursor and proves no row is seen twice and none is missed.</p>
+<pre class="scroll"><code>test("the cursor walks the whole list once, with no row seen twice", async () =&gt; {
+  const seen: number[] = [];
+  let cursor: number | null = null;
+  let pages = 0;
+  do {
+    const res = await list(`?limit=10${cursor === null ? "" : `&amp;cursor=${cursor}`}`);
+    assert.equal(res.statusCode, 200);
+    seen.push(...res.json().items.map((t: { id: number }) =&gt; t.id));
+    cursor = res.json().nextCursor;
+    pages += 1;
+    <b>assert.ok(pages &lt; 10, "the cursor is not advancing");</b>
+  } while (cursor !== null);
+
+  assert.equal(pages, 3);            // ? 10 + 10 + 5
+  assert.equal(seen.length, TOTAL);  // ? nothing missed
+  <b>assert.equal(new Set(seen).size, TOTAL);</b> // ? nothing seen twice
+});</code></pre>
+<p>Two lines there are the whole point of writing this test at all. <code>new Set(seen).size</code> catches the <code>skip: 1</code> being missing, which sends the cursor row again on every page. And <code>pages &lt; 10</code> stops a broken cursor from turning your test suite into an infinite loop &mdash; a test that hangs tells you nothing and blocks everything.</p>
+<p>With the four fixes and this file, I measured <b>146 passing, 0 failing</b>.</p>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why ask the database for <code>limit + 1</code> rows?</p>
+<button>To have one spare if a row is deleted</button>
+<button>To learn whether another page exists</button>
+<p class="why" hidden>You need to answer &ldquo;is there more?&rdquo; and there are only two ways: a second <code>SELECT COUNT(*)</code> over the whole table, or one extra row. The extra row is free &mdash; it is in the index you are already walking. If 21 come back you send 20 and a <code>nextCursor</code>; if 20 or fewer come back, that was the last page and <code>nextCursor</code> is <code>null</code>. The count version is a second full scan of the team&rsquo;s rows just to render a page number.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why add <code>id</code> as a second <code>orderBy</code> key?</p>
+<button>Because ties have no promised order</button>
+<button>Because Prisma requires two sort keys</button>
+<p class="why" hidden>Sorting by <code>title</code> alone leaves rows with the same title in whatever order Postgres finds convenient, and it may answer differently on the next request &mdash; there is no promise. A cursor is a <em>position</em> in a sorted list, so a list whose order can shift means a cursor that points somewhere else next time: rows get skipped, or repeated, and no error is raised. <code>id</code> is unique, so <code>(title, id)</code> is a total order: every row has exactly one place. Prisma requires nothing here; it will happily generate the broken version.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q"><code>TaskPublic</code> already hides the owner. Why remove the <code>include</code>?</p>
+<button>Because the serializer might miss a field</button>
+<button>Because the hashes still reach your process</button>
+<p class="why" hidden>The serializer is reliable &mdash; three fields declared, three fields sent, and that is not the problem. The problem is upstream of it. <code>include: { owner: true }</code> makes Postgres run a second query that selects <code>passwordHash</code>, and those hashes are decoded into JavaScript objects inside your one Node process before the serializer runs. You paid for a query, filled memory with secrets, and shipped none of it. Data you do not select cannot be leaked by the next bug, the next log line, or the next <code>console.log</code> a tired person adds at 2am.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q"><code>EXPLAIN</code> shows <code>rows=5000</code> feeding a <code>Sort</code> under a <code>LIMIT 20</code>. What is wrong?</p>
+<button>The sort happens before the limit applies</button>
+<button>The index is missing from the query plan</button>
+<p class="why" hidden>An index <em>was</em> used &mdash; <code>Task_teamId_idx</code> is right there in the plan. It just answers the wrong half of the question. It knows how to find this team&rsquo;s rows, and nothing about their <code>createdAt</code> order, so Postgres must collect all 5,000 before it can know which 20 are newest. The <code>LIMIT</code> cannot help until the sort is finished. A <code>(teamId, createdAt)</code> index stores the answer pre-sorted, so the plan becomes read-20-and-stop. The habit worth keeping: in any plan, compare the <code>rows=</code> going in with the <code>rows=</code> coming out.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>See the extra query first.</strong> Before changing anything, run the app with Prisma logging queries and load the task list once. <code>cd server</code>, then add <code>log: [{ emit: "stdout", level: "query" }]</code> to the <code>new PrismaClient({...})</code> in <code>src/db.ts</code>, <code>npm run dev</code>, and hit the list from the front end. <b>Expect two <code>SELECT</code> lines, and <code>passwordHash</code> in the second.</b> Take the logging back out afterwards.</li>
+<li><strong>Make the five edits above.</strong> Then <code>npm run typecheck</code>. <b>Expect clean.</b> Then <code>npm test</code>. <b>Expect 138 passing and 4 failing</b>, exactly the four listed. If a fifth fails, stop and tell me which.</li>
+<li><strong>Fix the four</strong> with <code>res.json()</code> &rarr; <code>res.json().items</code>. <b>Expect 142 passing.</b></li>
+<li><strong>Write <code>src/routes/task-page.test.ts</code></strong>: 25 tasks in a fresh team, the four tests (default page is 20, the cursor walk, last page is <code>nextCursor: null</code>, <code>?limit=101</code> is a 400). <b>Expect 146 passing.</b> Copy the fixture shape from <code>task-sort.test.ts</code>.</li>
+<li><strong>Break the cursor on purpose, once.</strong> Delete <code>skip: 1</code> from the store and re-run. <b>Expect the duplicate assertion to fail</b>, because every page repeats its first row. Put it back. You have now seen the test do its job.</li>
+<li><strong>Run <code>EXPLAIN</code> yourself, on your own five rows.</strong> <code>npm run log</code> shows you the <code>psql</code> pattern; use the same one to run <code>EXPLAIN ANALYZE SELECT * FROM "Task" WHERE "teamId"=1 ORDER BY "createdAt" DESC LIMIT 20;</code>. <b>Expect a <code>Seq Scan</code>, not an index scan</b> &mdash; with five rows Postgres ignores every index, because reading the whole table is cheaper than opening one. That is the right answer and it is worth seeing, so you do not read a plan from a tiny table and conclude something about a big one.</li>
+<li><strong>Do <em>not</em> add the compound index yet.</strong> Nothing in your app sorts by <code>createdAt</code> today. Write the measurement down instead (it is on the reference card), and add <code>@@index([teamId, createdAt])</code> the day you add a &ldquo;newest first&rdquo; sort. An index you do not need still slows down every <code>INSERT</code>.</li>
+<li><strong>The lesson-26 trim fix, fourth time.</strong> <code>title: z.string().min(1)</code> still accepts <code>"   "</code>. Say the word and I will do this one with you in the next session &mdash; it is two characters and a test, and it has been open too long.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Three pictures. How each one finds page 250, the two <code>rows=</code> numbers in a query plan, and the query you are paying for twice.</p>
+
+<h2>1. Getting to page 250</h2>
+<p>Each tick is one row the database touches. <span style="color:var(--bad)">Red</span> = walked past and thrown away. <span style="color:var(--ok)">Green</span> = actually returned to you.</p>
+
+<figure>
+<p style="font-family:var(--mono);font-size:0.72rem;margin:0 0 0.2rem">OFFSET 4980 LIMIT 20</p>
+<div class="strip">
+<i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="skipped"></i><i class="taken"></i><i class="taken"></i><i class="taken"></i><i class="taken"></i>
+</div>
+<p class="cost">reads <span class="red"><b>5000</b></span> rows &middot; returns <span class="grn"><b>20</b></span> &middot; and page 251 reads 5020</p>
+
+<p style="font-family:var(--mono);font-size:0.72rem;margin:0 0 0.2rem">WHERE id &gt;= 4980 LIMIT 20</p>
+<div class="strip">
+<i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="jump"></i><i class="taken"></i><i class="taken"></i><i class="taken"></i><i class="taken"></i>
+</div>
+<p class="cost">reads <span class="grn"><b>20</b></span> rows &middot; returns <span class="grn"><b>20</b></span> &middot; page 251 also reads 20</p>
+<figcaption>The dashed part is not work. The index is sorted, so the database jumps to the id and starts reading. Measured on your table: page 2 and page 250 both took <b>2 ms</b>.</figcaption>
+</figure>
+
+<p class="takeaway">Offset is a <b>count</b> from the start. A cursor is a <b>look-up</b> by value. That is the whole difference, and it is why offset gets slower the deeper you go.</p>
+
+<h2>2. Read a query plan in two numbers</h2>
+<p>Same query, same 5,000 rows, <code>ORDER BY "createdAt" DESC LIMIT 20</code>. Only the index changed.</p>
+
+<figure>
+<div class="plan">
+<div style="color:var(--muted)">with @@index([teamId]) &mdash; what you have today</div>
+<div>Limit <span class="out">rows=20</span></div>
+<div>&nbsp;&nbsp;&rarr; <b>Sort</b>&nbsp;&nbsp;Sort Key: "createdAt" DESC</div>
+<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&rarr; Index Scan using "Task_teamId_idx" <span class="in">rows=5000</span></div>
+<div>Execution Time: <span class="in">0.814 ms</span></div>
+</div>
+<div class="plan">
+<div style="color:var(--muted)">with @@index([teamId, createdAt])</div>
+<div>Limit <span class="out">rows=20</span></div>
+<div class="gone">&nbsp;&nbsp;&rarr; Sort</div>
+<div>&nbsp;&nbsp;&rarr; Index Scan Backward using "Task_teamId_createdAt_idx" <span class="out">rows=20</span></div>
+<div>Execution Time: <span class="out">0.025 ms</span></div>
+</div>
+<figcaption>Compare the <code>rows=</code> at the bottom with the <code>rows=</code> at the top. 5,000 in, 20 out means the database did work you threw away. 20 in, 20 out means it did not. <b>32&times;</b>, and the gap grows with the table.</figcaption>
+</figure>
+
+<div class="vs">
+<div class="no">
+<h4>why the sort has to happen</h4>
+<pre><code>index (teamId)
+  team 7 -> ids in id order
+  the index knows nothing
+  about createdAt
+
+so: collect all 5000,
+    sort them,
+    THEN take 20</code></pre>
+</div>
+<div class="yes">
+<h4>why it does not</h4>
+<pre><code>index (teamId, createdAt)
+  team 7 -> already in
+  createdAt order
+
+so: walk backwards,
+    take 20,
+    stop</code></pre>
+</div>
+</div>
+
+<p class="takeaway">An index is not &ldquo;make this table fast&rdquo;. It is <b>one stored order</b>. It helps the query that asks for that order, and does nothing for the others.</p>
+
+<h2>3. The query nobody reads</h2>
+<p>One call to <code>listTasks</code>, with <code>include: { owner: true }</code> still in it:</p>
+
+<figure>
+<div class="pipe">
+<div class="row"><div class="who">query 1</div><div>SELECT "Task"."id", "title", "done", "createdAt", "ownerId", "teamId"</div></div>
+<div class="row"><div class="who">query 2</div><div>SELECT "User"."id", "email", <span class="leak">"passwordHash"</span>, "createdAt"</div></div>
+<div class="row"><div class="who">in Node</div><div>5000 Task objects <span class="leak">+ every owner's password hash</span></div></div>
+<div class="row"><div class="who">serializer</div><div><span class="drop">owner dropped &mdash; TaskPublic has 3 fields</span></div></div>
+<div class="row"><div class="who">on the wire</div><div>[ { "id": 1, "title": "buy milk", "done": false }, &hellip; ]</div></div>
+</div>
+<figcaption>The reply is correct. Nothing leaks. But rows 2 and 3 happened anyway &mdash; you paid for a query, and put secrets in memory, to send nothing. Delete one word and rows 2 and 3 disappear with no change to the reply.</figcaption>
+</figure>
+
+<div class="vs">
+<div class="no">
+<h4>guards the wire</h4>
+<pre><code>response: { 200: TaskPage }
+
+// runs LAST
+// the hashes are already
+// in your process</code></pre>
+</div>
+<div class="yes">
+<h4>guards the query</h4>
+<pre><code>// no include
+
+// runs FIRST
+// the hashes never
+// left Postgres</code></pre>
+</div>
+</div>
+
+<p class="takeaway">A field the response schema drops is a field you should not have selected. <b>The schema is the last wall, not the first one.</b></p>
+
+<p class="nav"><a href="./0030-the-list-with-no-end.html">&larr; Lesson 30</a> &middot; <a href="../reference/pagination-and-indexes.html">Pagination reference</a> &middot; <a href="./index.html">All lessons</a></p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://use-the-index-luke.com/no-offset">Use The Index, Luke &mdash; &ldquo;We need tool support for keyset pagination&rdquo; (no-offset)</a>. Markus Winand&rsquo;s site is the best free writing on SQL indexing there is. Short page. The picture of offset re-reading the same rows on every page is the one that makes it stick.</p>
+<p><b>Then this:</b> <a href="https://use-the-index-luke.com/sql/partial-results/fetch-next-page">Same site &mdash; fetching the next page</a>. This is the chapter that shows the <code>(sort_key, id)</code> comparison you saw in Prisma&rsquo;s SQL above, written by hand.</p>
+<p><b>Also:</b> <a href="https://www.prisma.io/docs/orm/prisma-client/queries/pagination">Prisma docs &mdash; pagination</a>. Read their own comparison table: they recommend cursor pagination for large tables and say plainly that offset does not scale.</p>
+<p><b>And:</b> <a href="https://www.postgresql.org/docs/current/using-explain.html">Postgres docs &mdash; Using EXPLAIN</a>. Read only the first two sections. You want to be able to read <code>rows=</code>, <code>Sort</code>, and <code>Index Scan</code>; the rest can wait.</p>
+<p><b>Reference card:</b> <a href="../reference/pagination-and-indexes.html">Pagination and indexes</a> &mdash; new today. The store recipe, the tiebreak rule, and how to read a query plan in four lines.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/PostgreSQL/">r/PostgreSQL</a> &mdash; search for &ldquo;keyset pagination&rdquo;. You will find people arguing that offset is fine for admin screens and people who have been burned by it. Both are right about different apps. Read one thread and decide which one yours is.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0029-the-logout-that-keeps-the-session.html">&larr; Back</a>
+<a href="../reference/pagination-and-indexes.html">Pagination reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

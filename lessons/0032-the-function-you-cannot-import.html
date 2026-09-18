@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 32 &mdash; Testing a module you cannot import</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.tree { font-family: var(--mono); font-size: 0.72rem; margin: 0.8rem 0;
+    border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  .tree > .cap { background: var(--code-bg); color: var(--muted); font-size: 0.66rem;
+    padding: 0.35rem 0.7rem; border-bottom: 1px solid var(--rule); }
+  .tree .body { padding: 0.6rem 0.7rem; overflow-x: auto; }
+  .tree .body > div { padding: 0.12rem 0; white-space: nowrap; }
+  .bad { color: var(--bad); font-weight: 600; }
+  .ok { color: var(--ok); font-weight: 600; }
+  .dim { color: var(--muted); }
+  .acc { color: var(--accent); font-weight: 600; }
+  .gone { color: var(--muted); text-decoration: line-through; }
+
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; margin: 1.1rem 0; }
+  .two h4 { font-family: var(--mono); font-size: 0.66rem; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--muted); margin: 0 0 0.2rem; font-weight: 600; }
+  @media (max-width: 34rem) { .two { grid-template-columns: 1fr; } }
+
+  .share { font-family: var(--mono); font-size: 0.7rem; margin: 1.1rem 0;
+    border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  .share .row { display: grid; grid-template-columns: 1fr 7rem;
+    border-top: 1px solid var(--rule); }
+  .share .row:first-child { border-top: 0; background: var(--code-bg); color: var(--muted);
+    font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.08em; }
+  .share .row > div { padding: 0.4rem 0.7rem; }
+  .share .row > div + div { border-left: 1px solid var(--rule); text-align: right; }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 32 &middot; Week 11 &middot; Real world</p>
+<h1>Testing a module you cannot import</h1>
+<p class="lede">Your server has <b>146 tests</b>. Your front end has <b>zero</b>. That gap has been open for six lessons. Today you close it &mdash; and the closing is not about picking a test tool. It is about a smaller, sharper fact: <code>editPages</code>, the helper you wrote last lesson, <b>cannot be imported on its own</b>. Not by a test, not by anything. Fixing that is the lesson. Then the very first test you run will tell you something about React Query that you did not know.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>A test has to <em>import</em> the thing it tests.</strong> That is the whole requirement, and it is where this stops being easy.</li>
+<li><strong>Measured: importing <code>tasks.ts</code> from a test fails.</strong> <code>Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@/lib'</code>. The <code>@/</code> alias is a <b>Vite</b> feature. Node has never heard of it.</li>
+<li><strong>Two ways out: buy a runner that is Vite, or move the function.</strong> Vitest is <b>34 MB</b> installed. Moving <code>editPages</code> into its own file is 0 MB. You already know which one this workspace picks.</li>
+<li><strong>Measured: a real <code>QueryClient</code> runs in plain Node.</strong> No browser, no jsdom (<i>a fake browser written in JavaScript</i>). React Query&rsquo;s cache is just an object.</li>
+<li><strong>And then the test finds a bug in your mental model.</strong> Measured: after an edit that changes nothing, <code>setQueryData</code> hands back <b>the exact same object you started with</b>. Your three spreads were thrown away. This is deliberate, it has a name, and lesson 31 did not tell you about it.</li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<p>I checked before writing, as always. Two things were open from lesson 31 and both are now closed:</p>
+<pre><code>server: npm test          <b>146 passing, 0 failing</b>   (was 143)
+web:    npx tsc -b        <b>clean</b>
+web:    npm run build     <b>clean</b>
+web:    test files        <b>0</b>   &lt;- the whole subject of this lesson</code></pre>
+<p>The three page tests are written. And I fixed one thing in <code>useCreateTask</code> that had drifted: it was appending the new task to the <em>last page you were holding</em>. That is the exact bug lesson 31 warned about &mdash; hold one page of 20, add a task, and it lands at position 21 in your cache while the real position 21 is still on the server. It is an <code>invalidateQueries</code> now.</p>
+
+<h2>Start from the requirement, not from the tool</h2>
+<p>Every conversation about front-end testing starts with tool names. Ignore all of them for two minutes. A test is a file that does this:</p>
+<pre><code><b>import { theThing } from "somewhere";</b>
+// call it, check what came back</code></pre>
+<p>That first line is the entire problem. So pick your target and try the import. The target is easy to pick &mdash; you want the <b>smallest piece of real logic with no screen in it</b>. That is <code>editPages</code>: it takes a cache and a function, and it walks pages. Nothing to click, nothing to render.</p>
+
+<h2>Measured: the import fails</h2>
+<p>I wrote the smallest possible test file in <code>web/</code> and ran it with Node&rsquo;s own test runner, no install:</p>
+<div class="vs">
+<div class="no"><h4>what I ran</h4><pre><code>// probe.test.ts
+import { tasksKey } from
+  "./src/features/tasks/tasks.ts";
+
+$ node --test probe.test.ts</code></pre></div>
+<div class="no"><h4>what happened</h4><pre><code>Error [ERR_MODULE_NOT_FOUND]:
+Cannot find package <b>'@/lib'</b>
+imported from
+  .../features/tasks/<b>tasks.ts</b></code></pre></div>
+</div>
+<p>Read the error carefully. It is not complaining about your test. It is not complaining about TypeScript &mdash; Node stripped the types without a word. It walked <em>into</em> <code>tasks.ts</code>, hit line 6, <code>import { api } from "@/lib/api"</code>, and looked for a package on npm called <code>@/lib</code>.</p>
+<p class="takeaway">The <code>@/</code> alias is a rule you wrote in <code>vite.config.ts</code>. Vite obeys it. <code>tsc</code> obeys it, because you repeated it in <code>tsconfig</code>. <b>Node was never told.</b> Three tools, three separate copies of the same rule, and the test runner has none.</p>
+
+<div class="aside"><b>New term: import graph.</b> When you import a file, you also get everything <em>it</em> imports, and everything those import, all the way down. That whole tree is the <b>import graph</b>. You did not ask for <code>axios</code>. You asked for <code>tasksKey</code>, a three-line function that builds an array &mdash; and the graph under it reaches <code>@/lib/api</code>, which reaches <code>axios</code> and the session key. You cannot take one leaf without the branch it hangs on.</div>
+
+<h2>The choice, and it is only two</h2>
+<div class="vs">
+<div class="no"><h4>Buy a runner that <em>is</em> Vite</h4><p><b>Vitest.</b> It reads your <code>vite.config.ts</code>, so <code>@/</code> just works, and nothing in your source moves. Measured install: <b>34 MB</b>. Real cost here is lower &mdash; you already have Vite &mdash; but it is a new dependency, a new config surface, and a second test command in a project that already has one.</p></div>
+<div class="yes"><h4>Move the function</h4><p><b>Give <code>editPages</code> its own file</b> whose import graph contains no <code>@/</code>. Then <code>node --test</code> runs it. Measured install: <b>0 MB</b>. Cost: one new file, and you have to notice which imports are real.</p></div>
+</div>
+<p>Take the second one. Not only to keep the no-new-dependency streak &mdash; <b>32 lessons</b> now &mdash; but because the first option pays money to avoid noticing something true. The function was hard to import because it was welded to a file full of network code. That is worth knowing about your own code. Vitest would have hidden it.</p>
+<div class="aside"><b>When to change your mind.</b> This trade flips the day you want to test a <em>component</em> &mdash; clicking the &ldquo;Load more&rdquo; button, checking the row disappears. That needs a fake browser and React Testing Library, and hand-rolling it is not lazy, it is silly. That day, install Vitest. Today you are testing a function that walks an array, and it needs none of it.</div>
+
+<h2>The word pair</h2>
+<div class="word"><b>runtime import</b> &mdash; the file is really loaded when your program runs. <code>import { api } from "@/lib/api"</code>. Node must find it or crash.</div>
+<div class="word"><b>type-only import</b> &mdash; you only wanted the <em>shape</em>, for the compiler. <code>import type { Task } from "./tasks.ts"</code>. TypeScript deletes the line before Node ever sees it. <b>It is not in the import graph.</b></div>
+<p class="takeaway">Thirteenth pair, and this one is the mechanism that makes today work. <code>edit-pages.ts</code> mentions <code>Task</code>, <code>TaskPage</code>, <code>InfiniteData</code> and <code>QueryClient</code> &mdash; four names from two files, one of which reaches <code>axios</code>. Every one of them is <code>import type</code>. At runtime the new file imports <b>nothing at all</b>. That is why Node can load it.</p>
+<p>Your <code>tsconfig.app.json</code> already has <code>verbatimModuleSyntax: true</code>, which is what forces you to write the word <code>type</code> instead of letting the compiler guess. Until today that flag looked like tidiness. It is the flag that made this possible.</p>
+
+<h2>What changed in your files</h2>
+<p>Three edits. I applied them, ran <code>npx tsc -b</code> and <code>npm run build</code> &mdash; both clean &mdash; and <b>left them in place</b>, because this part is plumbing and the tests are the part worth typing yourself.</p>
+<pre><code><b>1. New file: web/src/features/tasks/edit-pages.ts</b>
+   The whole editPages helper, moved out of tasks.ts.
+   Every import in it is <b>import type</b>.
+   It takes the <b>key</b> now, not the teamId - one less thing it needs to know.
+
+<b>2. web/src/features/tasks/tasks.ts</b>
+-  function editPages(client, teamId, edit) { ...12 lines... }
++  import { editPages } from "./edit-pages.ts";
+   ...and the three call sites pass <b>tasksKey(teamId)</b> instead of teamId.
+
+<b>3. web/package.json</b>
++  "test": "node --test \"src/**/*.test.ts\""</code></pre>
+<p>Notice what is <em>not</em> in that list: no <code>npm install</code>, no config file, no <code>vitest.config.ts</code>, no <code>setupTests</code>. The test command is one line and it uses a runner that shipped with Node.</p>
+
+<h2>Measured: React Query runs in a terminal</h2>
+<p>The thing people assume is that front-end code needs a browser to test. Here is the measurement that says otherwise &mdash; a real <code>QueryClient</code>, the same class your app builds in <code>lib/query-client.ts</code>, under plain <code>node --test</code>:</p>
+<pre><code>const c = new QueryClient();
+c.setQueryData(["a"], 1);
+c.getQueryData(["a"])          <b>=&gt; 1</b>
+
+$ node --test    <b>pass 1, fail 0</b></code></pre>
+<p>No browser. No jsdom. A cache is a <code>Map</code> with rules around it, and none of those rules need a <code>document</code>. The parts of a front end that need a browser are the parts that touch the screen. That is a much smaller share of your code than it feels like &mdash; and it is the share you should test last, not first.</p>
+
+<h2>And now the thing the test told me</h2>
+<p>I ran four candidate tests against the moved function before writing this. Three passed. The fourth failed, and it failed for a reason that is more interesting than the test:</p>
+<pre><code>edit that changes nothing   -&gt; same box back?   <b>true</b>
+edit that removes one row   -&gt; same box back?   <b>false</b>
+                            -&gt; page 0 replaced? <b>true</b>
+                            -&gt; page 1 <b>reused</b>?     <b>true</b>   &lt;- the same object</code></pre>
+<p>Lesson 31 told you to build a new box at all three levels, because React compares by reference. That is still true &mdash; you must build it. What lesson 31 did not say is what happens next. <b>React Query looks at the box you built, compares it to the old one field by field, and quietly gives the old objects back wherever nothing actually changed.</b></p>
+<div class="word"><b>structural sharing</b> &mdash; the new value is compared to the old one deeply. Any part that is unchanged keeps its <em>original</em> object. You get a new reference exactly where there is new data, and nowhere else.</div>
+<p>So your three spreads are not wasted, and they are not the last word either. They are a <em>proposal</em>. React Query accepts the parts that differ and rejects the parts that do not. Delete a row from page 0 and page 1 comes back as the identical object &mdash; so any component reading page 1 sees no change and does not re-render. <b>That is the point.</b> It is a performance feature you have been getting for free since lesson 22.</p>
+<p class="takeaway">The first test you ran on your front end corrected something you believed. Six lessons of &ldquo;we should have tests&rdquo; produced a real finding in under a minute. That is the argument for tests, and it is better than any argument I could write.</p>
+<div class="aside"><b>The trap this sets for your test file.</b> If you write a test whose edit is <code>(items) =&gt; items</code> and then assert &ldquo;the box is a new object&rdquo;, it will fail &mdash; and the code is correct. Assert on <b>contents</b>, not on identity, unless identity is the actual thing you mean to check. This is the number one way a first test suite ends up lying to you.</div>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why did <code>node --test</code> fail to import <code>tasks.ts</code>?</p>
+<button>Node does not know your path alias</button>
+<button>Node cannot read a TypeScript file</button>
+<p class="why" hidden>Node stripped the TypeScript without complaining &mdash; that has been built in since Node 22, and your machine runs 22.23.1. The error named <code>'@/lib'</code>, and it named it as a <em>package</em>: Node looked in <code>node_modules</code> for something called <code>@/lib</code> and did not find it. The <code>@/</code> rule lives in <code>vite.config.ts</code> and is repeated in <code>tsconfig.app.json</code>. Two copies, and the test runner reads neither. An alias is a bundler convenience, not a language feature.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why can <code>edit-pages.ts</code> be imported when <code>tasks.ts</code> cannot?</p>
+<button>Because it does not call the network</button>
+<button>Because all of its imports are erased</button>
+<p class="why" hidden>Not calling the network is true but is not the reason &mdash; <code>tasksKey</code> does not call the network either, and importing it still failed. The reason is that every import in <code>edit-pages.ts</code> is <code>import type</code>. TypeScript deletes those lines entirely, so at runtime the file imports nothing and nothing has to be resolved. It mentions <code>Task</code>, which lives in <code>tasks.ts</code>, which imports <code>@/lib/api</code> &mdash; and that is fine, because that mention never survives to runtime. Testability here is a property of the import graph, not of what the function does.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Your edit changes nothing. What does <code>setQueryData</code> store?</p>
+<button>The new box that your updater built</button>
+<button>The old box, exactly as it was</button>
+<p class="why" hidden>Measured: <code>true</code> for &ldquo;same box back&rdquo;. React Query walks the value you returned against the value it held, and keeps the original object for every part that is deeply equal. This is called structural sharing. Your spreads still have to happen &mdash; you must never mutate the cached object &mdash; but what you build is a proposal, not the final answer. The payoff is real: delete a row from page 0 and page 1 keeps its identity, so components reading page 1 skip the re-render.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why test <code>editPages</code> before testing the task list on screen?</p>
+<button>It is the logic with no browser in it</button>
+<button>It is the code most likely to be wrong</button>
+<p class="why" hidden>You cannot know in advance which code is most likely to be wrong &mdash; if you knew, you would fix it instead of testing it. You pick <code>editPages</code> because of what it costs: it is a function in, a function out, no clicking and no rendering, so it runs in Node with zero setup. Testing the panel means a fake browser, React Testing Library and Vitest &mdash; three new things at once, before you have written a single passing front-end test. Start where the setup is nothing, get one green line, then buy the heavier tools when the cheap ones genuinely run out.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>Look at the two files first.</strong> <code>web/src/features/tasks/edit-pages.ts</code> and the top of <code>tasks.ts</code>. Count the <code>import type</code> lines in the new file. There are two, and they cover four names. Confirm there is not one plain <code>import</code> in it.</li>
+
+<li><strong>Prove the problem is real, once.</strong> In <code>edit-pages.ts</code>, delete the word <code>type</code> from the line that imports <code>Task</code>, so it reads <code>import { ... } from "./tasks.ts"</code>. Run <code>npm test</code> in <code>web</code>. <b>Expect <code>ERR_MODULE_NOT_FOUND: Cannot find package '@/lib'</code></b> &mdash; the same error, now caused by one word. Put <code>type</code> back. This is the whole lesson in one keystroke, and it takes ten seconds.</li>
+
+<li><strong>Write <code>web/src/features/tasks/edit-pages.test.ts</code>.</strong> This is the work. Start it exactly like a server test &mdash; <code>node:test</code> and <code>node:assert/strict</code>, the shape you already know from <code>task-page.test.ts</code>. Import <code>QueryClient</code> from <code>@tanstack/react-query</code> for real; it works. Build one fixture: two pages, ids 1 and 2 on page one, id 3 on page two. Then four tests:
+<pre><code>1. an empty cache is left alone
+   editPages on a client that never held this key,
+   then getQueryData -&gt; <b>undefined</b>. It must not create the entry.
+
+2. the edit runs on <b>every</b> page
+   mark all done, flatten, expect [true, true, true].
+
+3. a delete only removes from the page the row is on
+   filter out id 2, expect page one is [1] and page two is still [3],
+   and page one's <b>nextCursor is untouched</b>.
+
+4. removing a row replaces that page and <b>keeps the other one</b>
+   after.pages[0] !== before.pages[0]   <b>and</b>
+   after.pages[1] === before.pages[1]</code></pre>
+Test 4 is the one worth the effort &mdash; it is the structural-sharing finding, written down so it cannot quietly change under you. <b>Expect 4 passing.</b></li>
+
+<li><strong>Break the helper on purpose and watch a test catch it.</strong> In <code>edit-pages.ts</code>, change <code>data.pages.map</code> so it only edits the first page: <code>data.pages.map((page, i) =&gt; i === 0 ? {...} : page)</code>. Run <code>npm test</code>. <b>Expect test 2 to fail.</b> Put it back. A test you have never seen fail is a test you have no reason to believe.</li>
+
+<li><strong>Run both suites in one go</strong>, from the repo root: <code>(cd server &amp;&amp; npm test) &amp;&amp; (cd web &amp;&amp; npm test)</code>. <b>Expect 146 and 4.</b> Write that pair down &mdash; from now on, a session starts by checking those two numbers.</li>
+
+<li><strong>Say the word on the trim fix.</strong> <code>title: z.string().min(1)</code> still accepts <code>"   "</code>. I said I would stop asking, so this is not a question: next session I do it with you, unless you tell me no.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Two pictures. First: why one word decides whether a test can load your file. Second: what React Query keeps when you write to the cache.</p>
+
+<h2>1. What a test actually pulls in</h2>
+
+<div class="two">
+<div>
+<h4>importing tasks.ts</h4>
+<div class="tree"><div class="cap">node --test &nbsp;&rarr;&nbsp; <span class="bad">crash</span></div><div class="body">
+<div>test.ts</div>
+<div>&nbsp;&nbsp;&#9492;&#9472; tasks.ts</div>
+<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&#9500;&#9472; <span class="bad">@/lib/api</span> &nbsp;<span class="dim">&larr; not a package</span></div>
+<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&#9474;&nbsp;&nbsp;&nbsp;&#9492;&#9472; <span class="dim">axios</span></div>
+<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&#9492;&#9472; <span class="dim">@tanstack/react-query</span></div>
+</div></div>
+<p class="dim" style="font-size:0.72rem">You asked for one helper. Node went looking for <code>axios</code>.</p>
+</div>
+
+<div>
+<h4>importing edit-pages.ts</h4>
+<div class="tree"><div class="cap">node --test &nbsp;&rarr;&nbsp; <span class="ok">runs</span></div><div class="body">
+<div>test.ts</div>
+<div>&nbsp;&nbsp;&#9492;&#9472; edit-pages.ts</div>
+<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&#9500;&#9472; <span class="gone">type Task</span> <span class="dim">erased</span></div>
+<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&#9492;&#9472; <span class="gone">type QueryClient</span> <span class="dim">erased</span></div>
+<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="ok">(nothing left)</span></div>
+</div></div>
+<p class="dim" style="font-size:0.72rem">Same names mentioned. None of them loaded.</p>
+</div>
+</div>
+
+<p class="takeaway">The two files mention the <em>same</em> types. Only one of them <b>runs</b> an import. The word <code>type</code> is the whole difference &mdash; delete it and the left-hand picture comes back.</p>
+
+<h2>2. Who knows about <code>@/</code></h2>
+
+<div class="share">
+<div class="row"><div>tool</div><div>knows @/ ?</div></div>
+<div class="row"><div>vite &nbsp;<span class="dim">&mdash; vite.config.ts</span></div><div class="ok">yes</div></div>
+<div class="row"><div>tsc &nbsp;<span class="dim">&mdash; tsconfig.app.json</span></div><div class="ok">yes</div></div>
+<div class="row"><div>node &nbsp;<span class="dim">&mdash; nobody told it</span></div><div class="bad">no</div></div>
+</div>
+<p class="dim" style="font-size:0.75rem">Two copies of one rule, and the newest tool in the project has neither. An alias is not a language feature.</p>
+
+<h2>3. What the cache keeps after a write</h2>
+<p>You delete task 2 from page one. Your updater spreads all three levels and hands back a brand new box. Here is what is actually stored:</p>
+
+<div class="tree"><div class="cap">measured &mdash; @tanstack/react-query 5.102.8</div><div class="body">
+<div><span class="acc">box</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="ok">new object</span> &nbsp;<span class="dim">&larr; something changed inside</span></div>
+<div>&nbsp;&#9492;&#9472; <span class="acc">pages</span> &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="ok">new array</span></div>
+<div>&nbsp;&nbsp;&nbsp;&nbsp;&#9500;&#9472; page 0 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="ok">new object</span> &nbsp;<span class="dim">&larr; the row left from here</span></div>
+<div>&nbsp;&nbsp;&nbsp;&nbsp;&#9492;&#9472; page 1 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="bad">SAME object</span> &nbsp;<span class="dim">&larr; your spread was discarded</span></div>
+</div></div>
+
+<div class="share">
+<div class="row"><div>edit</div><div>box identity</div></div>
+<div class="row"><div><code>items =&gt; items</code> &nbsp;<span class="dim">changes nothing</span></div><div class="bad">unchanged</div></div>
+<div class="row"><div><code>items.filter(...)</code> &nbsp;<span class="dim">removes a row</span></div><div class="ok">new</div></div>
+</div>
+
+<p class="takeaway"><b>Structural sharing.</b> What you build is a proposal. React Query compares it to what it held and keeps the old object everywhere nothing really changed. New reference where there is new data, and nowhere else &mdash; so a component reading page 1 never re-renders.</p>
+<p style="font-size:0.78rem">Both rules from lesson 31 survive, with a footnote: <b>never mutate</b> (mutating skips the comparison entirely and nothing re-renders), and <b>always spread</b> (the spread is what lets the comparison happen). You just do not get to decide the outcome.</p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://nodejs.org/api/test.html">Node &mdash; the built-in test runner</a>. You already use it on the server, but read the top section and the <a href="https://nodejs.org/api/test.html#running-tests-from-the-command-line">running tests from the command line</a> part, so the glob in your new <code>test</code> script is not magic.</p>
+<p><b>Then this:</b> <a href="https://tkdodo.eu/blog/react-query-render-optimizations">TkDodo &mdash; React Query render optimizations</a>. Written by the library&rsquo;s maintainer. The <em>structural sharing</em> section is exactly the behaviour your fourth test pins down, explained by the person who implemented it.</p>
+<p><b>Also:</b> <a href="https://www.typescriptlang.org/docs/handbook/modules/reference.html#type-only-imports-and-exports">TypeScript &mdash; type-only imports and exports</a>. Short. It explains why <code>verbatimModuleSyntax</code> makes you write the word, and what would happen if you did not.</p>
+<p><b>Reference card:</b> <a href="../reference/react-query-rules.html">React Query, the rules so far</a> &mdash; updated today with structural sharing and the test recipe.</p>
+<p><b>Ask the community:</b> <a href="https://github.com/TanStack/query/discussions">TanStack Query Discussions</a> &mdash; search &ldquo;structural sharing&rdquo;. Worth reading the threads where someone&rsquo;s <code>useEffect</code> stopped firing because the reference did not change. That is the same behaviour from the other side.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0031-the-pages-you-threw-away.html">&larr; Back</a>
+<a href="../reference/react-query-rules.html">React Query reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

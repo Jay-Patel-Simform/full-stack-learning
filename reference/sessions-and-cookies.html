@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference — Sessions &amp; Cookies</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<p class="kicker">Reference &middot; weeks 3&ndash;4</p>
+<h1>Sessions &amp; cookies</h1>
+<p class="lede">Quick-reference sheet. Print it. Rules come from <a href="https://thecopenhagenbook.com/sessions">The Copenhagen Book</a>, checked 2026-09-02.</p>
+
+<h2>The one rule</h2>
+<p class="takeaway">The browser holds a long random id. The database holds only its SHA-256. Every request looks the id up. Delete the row and the login is over, instantly.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  L["login ok"] --> G["randomBytes(15)<br/>120 bits"]
+  G --> C["cookie: the raw id<br/>HttpOnly SameSite=Lax"]
+  G --> D[("row: sha256(id)<br/>+ expiresAt + userId")]
+  C -- "every request" --> LK["look up sha256(cookie)"]
+  D --> LK
+  LK -- "found + alive" --> U["request.userId"]
+  LK -- "missing or expired" --> E["401"]
+  X["logout / ban"] -- "delete the row" --> D
+</pre>
+<figcaption>The two halves never meet. A stolen database dump holds fingerprints, not keys &mdash; and deleting the row ends the login the same second.</figcaption>
+</figure>
+
+<h2>Session vs JWT</h2>
+<div class="scroll">
+<table>
+<tr><th></th><th>Server-side session</th><th>JWT</th></tr>
+<tr><td>Browser holds</td><td>Random id, means nothing alone</td><td>Signed user data</td></tr>
+<tr><td>Cost per request</td><td>One indexed row read</td><td>Signature check, no I/O</td></tr>
+<tr><td>Instant logout</td><td>Yes &mdash; delete the row</td><td>No &mdash; valid until it expires</td></tr>
+<tr><td>Ban a user now</td><td>Yes</td><td>No</td></tr>
+<tr><td>Change a role now</td><td>Yes</td><td>No, stale until refresh</td></tr>
+<tr><td>Pick it when</td><td>One app, one database. <em>Default.</em></td><td>Many services that must not share a database</td></tr>
+</table>
+</div>
+<p class="aside">A "refresh token stored in a database table" is a session with extra steps. If you need revocation, you need a lookup. Decide that once, up front.</p>
+
+<h2>Generating the id</h2>
+<div class="scroll">
+<table>
+<tr><th>Rule</th><th>Value</th><th>Why</th></tr>
+<tr><td>Entropy</td><td>&ge; 112 bits (120&ndash;256 is the good range)</td><td>Guessing one must be impossible</td></tr>
+<tr><td>Source</td><td><code>randomBytes()</code> &mdash; never <code>Math.random()</code></td><td>Must be cryptographically secure</td></tr>
+<tr><td>Encoding</td><td><code>base64url</code> or base32; case sensitive</td><td>Safe in a cookie with no escaping</td></tr>
+<tr><td>Stored as</td><td><code>sha256(id)</code></td><td>A stolen dump holds no live logins</td></tr>
+</table>
+</div>
+<pre><code>const id = randomBytes(15).toString("base64url");        // 120 bits
+const idHash = createHash("sha256").update(id).digest("base64url");</code></pre>
+
+<h2>Which hash, where</h2>
+<div class="scroll">
+<table>
+<tr><th>Secret</th><th>Hash with</th><th>Because</th></tr>
+<tr><td>Password (human, short)</td><td>scrypt / argon2id</td><td>Low entropy. Slowness is the only defence.</td></tr>
+<tr><td>Session id (random, 120 bits)</td><td>sha256</td><td>Nothing to guess. Speed costs you nothing.</td></tr>
+<tr><td>Password reset token</td><td>sha256</td><td>Same &mdash; it is a random token, not a password.</td></tr>
+</table>
+</div>
+<p class="aside"><strong>The rule to remember:</strong> slow hashing protects <em>guessable</em> secrets. Not "always slow".</p>
+
+<h2>Cookie flags</h2>
+<pre><code>Set-Cookie: session=&lt;id&gt;; HttpOnly; SameSite=Lax; Path=/; Secure; Expires=&lt;utc&gt;</code></pre>
+<div class="scroll">
+<table>
+<tr><th>Flag</th><th>Stops</th><th>Note</th></tr>
+<tr><td><code>HttpOnly</code></td><td>XSS reading the cookie</td><td>Always. No exceptions.</td></tr>
+<tr><td><code>SameSite=Lax</code></td><td>Basic CSRF from another site</td><td>Not <code>Strict</code>: Strict logs users out when they arrive from an external link.</td></tr>
+<tr><td><code>Secure</code></td><td>The cookie crossing plain http</td><td>Required in production. Omit on localhost or it is never stored.</td></tr>
+<tr><td><code>Path=/</code></td><td>&mdash;</td><td>So every route receives it.</td></tr>
+<tr><td><code>Expires</code> / <code>Max-Age</code></td><td>Cookies outliving the row</td><td>Match the session's <code>expiresAt</code>.</td></tr>
+</table>
+</div>
+<p class="aside"><code>SameSite</code> is <strong>not</strong> full CSRF protection. Add a real check for state-changing routes. <a href="https://thecopenhagenbook.com/csrf">Copenhagen &mdash; CSRF</a>.</p>
+
+<h2>Expiry</h2>
+<ul>
+<li><strong>Sliding window</strong> (normal apps): 30 days, pushed back to 30 on each use. Rewrite the row only past the halfway point, so you are not writing on every request.</li>
+<li><strong>Absolute cap</strong> (banking, admin): also expire N hours after creation, no matter how active the user is.</li>
+<li>Check expiry <em>in code</em> on every read. The row may still be in the table.</li>
+<li>Expired rows only die when someone touches them. A periodic sweep is still needed.</li>
+</ul>
+
+<h2>Status codes</h2>
+<div class="scroll">
+<table>
+<tr><th>Code</th><th>Means</th><th>Use for</th></tr>
+<tr><td><strong>401</strong></td><td>I do not know who you are</td><td>No cookie, bad cookie, expired session</td></tr>
+<tr><td><strong>403</strong></td><td>I know you, and no</td><td>Real user, wrong role (RBAC, weeks 5&ndash;6)</td></tr>
+<tr><td><strong>404</strong></td><td>No such thing</td><td>Someone else's row. Never 403 &mdash; that confirms it exists.</td></tr>
+</table>
+</div>
+
+<h2>Login route checklist</h2>
+<ol>
+<li>One error message for every failure: <code>"invalid email or password"</code>.</li>
+<li>Hash even when the user does not exist (a dummy hash), so both paths take the same time.</li>
+<li>No <code>.min(8)</code> on the login schema. That is a register rule, and here it is a free hint.</li>
+<li>New session id on every login. Never reuse one.</li>
+<li>Reply carries no hash, no session id in the body &mdash; only the cookie.</li>
+<li><em>Missing today:</em> rate limit. Weeks 7&ndash;8.</li>
+</ol>
+
+<h2>Ownership: the <code>where</code> clause rule</h2>
+<pre><code>// wrong -- any logged-in user can hit any row (IDOR)
+prisma.task.updateMany({ where: { id }, data });
+
+// right -- the owner is part of the lookup
+prisma.task.updateMany({ where: { id, ownerId }, data });</code></pre>
+<div class="aside"><strong>Updated in lesson 10.</strong> Once tasks belong to a team, the <code>where</code> carries <code>teamId</code>, not <code>ownerId</code> &mdash; and the permission itself moves out of the query into <code>requirePermission</code>. See <a href="../lessons/0010-a-task-belongs-to-a-team.html">lesson 10</a> for the difference between a fence and a hidden permission.</div>
+<p>Authentication answers <em>who</em>. Authorization answers <em>allowed</em>. Passing the first never grants the second. <a href="https://owasp.org/www-project-api-security/">OWASP API Top 10 #1</a>.</p>
+
+<hr>
+<p class="nav">From: <a href="../lessons/0006-a-door-that-stays-open.html">Lesson 6 &mdash; A door that stays open</a> &middot; See also: <a href="./password-hashing.html">Password hashing</a> &middot; <a href="./api-security-basics.html">API Security Basics</a> &middot; <a href="./prisma-postgres.html">Prisma + Postgres</a></p>
+
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

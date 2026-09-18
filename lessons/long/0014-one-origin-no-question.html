@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 14 &mdash; One Origin, No Question</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 14 &middot; Week 7&ndash;8 &middot; API security &mdash; fourth one</p>
+<h1>One origin, no question</h1>
+<p class="lede">You got half of the homework right. The half you missed is the half that decides your deploy in week 11&ndash;12 &mdash; so this whole lesson is that half.</p>
+
+<div class="aside">
+<p><strong>Debt paid.</strong> I checked <code>server/src/app.ts</code>. The body-size limit is in: <code>bodyLimit: 64 * 1024</code>. Asked three times, done. Nothing owed from lesson 12 now except the Redis answer.</p>
+</div>
+
+<h2>Your answer, marked</h2>
+<p>The question was: front end at <code>https://app.example</code>, API at <code>https://api.app.example</code>. Which of your two settings changes?</p>
+<p>You said: <em>&ldquo;You add site URL in the allowlist.&rdquo;</em></p>
+<div class="scroll">
+<table>
+<tr><th>Part</th><th>Verdict</th><th>Why</th></tr>
+<tr><td>The CORS allowlist changes</td><td><strong>Right</strong></td><td><code>ALLOWED_ORIGINS=https://app.example</code>. Different host = different <em>origin</em>, so CORS applies.</td></tr>
+<tr><td><code>SameSite=Lax</code> does not change</td><td>Not said</td><td>Both are <code>app.example</code>, so they are the same <em>site</em>. The cookie rides along untouched.</td></tr>
+<tr><td>The third option</td><td>Not found</td><td>That is the rest of this page.</td></tr>
+</table>
+</div>
+<p class="takeaway">Score: one of three. The allowlist half is the half that everybody gets. The other two are the ones worth owning.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>Subdomain split: CORS is on, and <code>SameSite=Lax</code> still works because the site is the same.</li>
+<li>Third option: put the API on the <strong>same origin</strong>, behind a path like <code>/api</code>.</li>
+<li>Same origin means no <code>Origin</code> header, no preflight, no allowlist, no cookie question.</li>
+<li>You delete configuration instead of writing it. That is why most teams ship it.</li>
+<li>The cost: one nginx file, and <code>request.ip</code> becomes the proxy unless you fix it.</li>
+</ul>
+</div>
+
+<h2>The third option</h2>
+<p>Stop putting the API on its own hostname. Put it behind a path on the hostname you already have.</p>
+<div class="scroll">
+<table>
+<tr><th></th><th>Subdomain</th><th>Same origin</th></tr>
+<tr><th>Front end</th><td><code>https://app.example</code></td><td><code>https://app.example</code></td></tr>
+<tr><th>API</th><td><code>https://api.app.example</code></td><td><code>https://app.example/api</code></td></tr>
+<tr><th>Same origin?</th><td>No</td><td><strong>Yes</strong></td></tr>
+<tr><th>CORS</th><td>Needed. Allowlist, preflights, <code>credentials: true</code>.</td><td><strong>None.</strong> There is no cross-origin request to police.</td></tr>
+<tr><th>Cookie</th><td><code>SameSite=Lax</code>, first-party, fine</td><td><code>SameSite=Lax</code>, first-party, fine</td></tr>
+<tr><th>Fetch call</th><td><code>fetch("https://api.app.example/auth/me")</code></td><td><code>fetch("/api/auth/me")</code></td></tr>
+<tr><th>What can break it</th><td>An allowlist string typo, in production, at 6pm</td><td>An nginx <code>location</code> typo, once</td></tr>
+</table>
+</div>
+<p>Look at the fetch row. On the same origin the URL is <em>relative</em>. No hostname in your front-end code at all &mdash; so no environment variable for the API URL, no build-time base URL, no staging-vs-production mixup. That saving is bigger than the CORS one.</p>
+<p class="takeaway">The best answer to &ldquo;which cross-origin setting do I change?&rdquo; is to stop being cross-origin.</p>
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  subgraph B["The browser<br/>sees one origin: https://app.example"]
+    P["Your React page"]
+  end
+  P -- "GET /api/auth/me<br/>no Origin header" --> N["nginx :443<br/>https://app.example"]
+  N -- "/api/*  ->  strip /api" --> F["Fastify<br/>127.0.0.1:3000"]
+  N -- "everything else" --> S["Static files<br/>/var/www/app"]
+  F -. "not reachable from the internet" .-> X(("&nbsp;"))
+  style X fill:none,stroke:none
+</pre>
+<figcaption>One public door. nginx decides which thing behind it answers. The browser never learns there are two programs.</figcaption>
+</figure>
+
+<h2>Why no CORS at all</h2>
+<p>Say the rule out loud: the browser attaches an <code>Origin</code> header, and applies CORS rules, only when the request goes to a <em>different</em> origin than the page. <code>/api/auth/me</code> from <code>https://app.example</code> goes to <code>https://app.example</code>. Same scheme, same host, same port. There is nothing to check.</p>
+<p>So in production you can set <code>ALLOWED_ORIGINS=</code> to nothing and the app still works. Your <code>@fastify/cors</code> registration stays in the code for local development, where the Vite dev server really is on <code>:5173</code>. Two environments, one behaviour difference, and the risky one is the one you can see on your own laptop.</p>
+
+<div class="quiz" data-answer="1">
+<p class="q">Your page at <code>https://app.example</code> calls <code>fetch("/api/tasks")</code>. What does the browser put in the <code>Origin</code> header?</p>
+<button>The value <code>https://app.example</code> exactly</button>
+<button>Nothing &mdash; it sends no such header</button>
+<button>The value <code>null</code>, as a string</button>
+<p class="why" hidden>Same-origin requests are not cross-origin, so no <code>Origin</code> header is attached and no CORS check runs. Your allowlist is never consulted. (There is one wrinkle: same-origin <code>POST</code> requests do send <code>Origin</code>, which is useful for CSRF checks &mdash; but no CORS rule applies to it.)</p>
+</div>
+
+<h2>The nginx file, line by line</h2>
+<p>I wrote it for you at <code>deploy/nginx.conf</code>. The two parts that matter:</p>
+<pre><code>location /api/ {
+  proxy_pass http://127.0.0.1:3000/;
+}
+
+root /var/www/app;
+location / {
+  try_files $uri $uri/ /index.html;
+}</code></pre>
+<p>The trailing slash on <code>proxy_pass http://127.0.0.1:3000/</code> is the whole trick. It strips the <code>/api</code> prefix, so the browser asks for <code>/api/auth/me</code> and Fastify sees <code>/auth/me</code>. Your routes do not change. Drop that slash and Fastify gets <code>/api/auth/me</code> and answers 404, and you will lose twenty minutes.</p>
+<p>Fastify listens on <code>127.0.0.1:3000</code>, not <code>0.0.0.0</code>. Only nginx can reach it. The API has no public port at all.</p>
+
+<h2>The cost, said plainly</h2>
+<p>Every request now arrives from <code>127.0.0.1</code>. That means <code>request.ip</code> is nginx, not the user &mdash; and your 100-per-minute IP limit from <a href="../0012-the-floor-under-everything.html">lesson 12</a> becomes <strong>one shared bucket for the entire internet</strong>. The hundred-and-first person to load the page gets a 429.</p>
+<p>The fix is one option, in week 11&ndash;12, not today:</p>
+<pre><code>const app = Fastify({ logger: true, bodyLimit: 64 * 1024, trustProxy: true });</code></pre>
+<p><code>trustProxy: true</code> makes <code>request.ip</code> read the <code>X-Forwarded-For</code> header that nginx sets. Only ever turn it on when a proxy you control is in front. Turn it on with the API directly exposed and anyone can forge that header and walk past your rate limit.</p>
+<p class="takeaway">Same family as lesson 11: the rate limit is only as good as the key. A proxy changes the key underneath you.</p>
+
+<div class="quiz" data-answer="2">
+<p class="q">You move to the same-origin setup and forget <code>trustProxy</code>. What breaks first?</p>
+<button>Login stops setting the session cookie for everyone</button>
+<button>CORS preflights start failing on every write route</button>
+<button>The IP rate limit throttles all users as one</button>
+<p class="why" hidden>Cookies and CORS are fine &mdash; that is the point of same-origin. What breaks is the limiter: every request looks like it came from <code>127.0.0.1</code>, so all users share one 100-per-minute bucket. Silent, and it only shows up under load.</p>
+</div>
+
+<h2>Make development match production</h2>
+<p>In week 9&ndash;10 you build the React app. Give Vite the same shape, so the code you write locally is the code that ships:</p>
+<pre><code>// vite.config.ts
+export default defineConfig({
+  server: {
+    proxy: { "/api": { target: "http://localhost:3000", rewrite: p =&gt; p.replace(/^\/api/, "") } },
+  },
+});</code></pre>
+<p>Now <code>fetch("/api/auth/me")</code> works on your laptop and in production, with no <code>if (import.meta.env.PROD)</code> anywhere. Keep <code>@fastify/cors</code> registered anyway &mdash; it costs nothing and it saves you the day you run the front end from a different machine.</p>
+
+<h2>So when is a subdomain right?</h2>
+<p>Two honest cases. First, the API has other clients &mdash; a mobile app, a partner, a webhook consumer &mdash; and needs a stable public hostname of its own. Second, front end and API scale or deploy separately enough that one nginx in front of both is a bottleneck you can measure. Neither is true for the Team Task Tracker. Take the same origin.</p>
+<p>If you do take a subdomain later: your cookie still needs <code>Domain=app.example</code> to be sent to <code>api.app.example</code>, and that is a widening of where the cookie travels. Worth a lesson of its own if you go there.</p>
+
+<h2>What this does NOT fix</h2>
+<div class="scroll">
+<table>
+<tr><th>Worry</th><th>Does same-origin help?</th><th>What actually handles it</th></tr>
+<tr><td>Someone calling your API with curl</td><td>No. It is one nginx hop away.</td><td><code>requireAuth</code> + <code>can()</code>, lessons 7&ndash;9</td></tr>
+<tr><td>CSRF</td><td><strong>No &mdash; it removes a defence.</strong> The preflight that stood in front of your writes is gone.</td><td><code>SameSite=Lax</code>, plus an <code>Origin</code> check on writes</td></tr>
+<tr><td>XSS on your own page</td><td>No. Arguably worse: your API is same-origin now.</td><td><code>HttpOnly</code> cookies, and CSP &mdash; lesson 15</td></tr>
+<tr><td>Rate limiting</td><td>No. It breaks it until <code>trustProxy</code>.</td><td>Lessons 11 and 12, plus the proxy fix</td></tr>
+</table>
+</div>
+<p>Read row two twice. Going same-origin is a real trade, not a free win. Cross-origin writes needed a preflight, and a hostile page could not get one. Same-origin writes need none, so <code>SameSite=Lax</code> is now doing that job alone. It is enough &mdash; <code>Lax</code> withholds the cookie from a cross-site <code>POST</code> &mdash; but it is now the <em>only</em> thing doing it.</p>
+
+<h2>Read this</h2>
+<p>Primary source: <a href="https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_pass">nginx &mdash; <code>proxy_pass</code></a>. Read only the paragraph about the URI on the end of the directive. It is the trailing-slash rule, from the people who wrote it.</p>
+<p>Then <a href="https://fastify.dev/docs/latest/Reference/Server/#trustproxy">Fastify &mdash; <code>trustProxy</code></a>, and <a href="https://vitejs.dev/config/server-options.html#server-proxy">Vite &mdash; <code>server.proxy</code></a>. All three are short.</p>
+
+<h2>Do this before lesson 15</h2>
+<ol>
+<li>Read <code>deploy/nginx.conf</code>. Every line has a reason; find the one line that would cause a 404 on every API call if you deleted one character.</li>
+<li>Prove the trailing-slash rule without nginx. With the app running:
+<pre><code>curl -si localhost:3000/health | head -3
+curl -si localhost:3000/api/health | head -3</code></pre>
+The second is a 404. That 404 is exactly what a missing slash gives you in production.</li>
+<li>Prove same-origin needs no CORS. Send a request with no <code>Origin</code> header at all:
+<pre><code>curl -si localhost:3000/health | grep -i access-control</code></pre>
+Nothing comes back, and the request still worked. No <code>Origin</code>, no CORS.</li>
+<li>Run <code>cd server &amp;&amp; npm test</code> and confirm 75 still pass. No code changed today &mdash; today was a decision.</li>
+<li>Write me one sentence: <strong>subdomain or same origin</strong> for your deploy. Your answer sets the week 11&ndash;12 plan, so I will hold you to it.</li>
+</ol>
+<p>Then the questions:</p>
+<ol>
+<li>The Redis one, now four lessons old, and it is due. Your login throttle and your IP limiter both live in memory in one process. What happens to both the moment you run two instances behind that nginx? Short answer is fine.</li>
+<li>New one, and it is a trap you can now see: you go same-origin, so there are no preflights on your writes. A hostile page at <code>evil.example</code> does <code>fetch("https://app.example/api/teams/1", { method: "DELETE", credentials: "include" })</code>. Walk me through what the browser sends and what your server does. Does anything stop it? Name the exact thing.</li>
+</ol>
+<p>Community: ask <a href="https://www.reddit.com/r/node/">r/node</a> or the <a href="https://discord.gg/fastify">Fastify Discord</a> whether they still add a CSRF token when the cookie is <code>SameSite=Lax</code> and the API is same-origin. Opinions split hard on this one, and the reasons people give are the useful part.</p>
+
+<div class="aside">
+<p>Something unclear? Ask me &mdash; I am your teacher here, and I will re-teach it another way. The sentence to be able to say out loud: <em>same-origin does not solve the CORS question, it deletes it &mdash; and it deletes the preflight that was helping me too.</em></p>
+</div>
+
+<hr>
+<p class="nav">Back: <a href="../0013-same-site-is-not-same-origin.html">Lesson 13 &mdash; Same-site is not same-origin</a> &middot; Keep for reference: <a href="../../reference/api-security-basics.html">API security basics</a> &middot; <a href="../../reference/sessions-and-cookies.html">Sessions &amp; cookies</a> &middot; The config: <a href="../../deploy/nginx.conf">deploy/nginx.conf</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

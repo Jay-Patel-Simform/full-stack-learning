@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 41 &mdash; The role that can erase the evidence</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.box { font-family: var(--mono); font-size: 0.72rem; margin: 0.9rem 0;
+    border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  .box > .cap { background: var(--code-bg); color: var(--muted); font-size: 0.66rem;
+    padding: 0.35rem 0.7rem; border-bottom: 1px solid var(--rule); }
+  .box .body { padding: 0.6rem 0.7rem; overflow-x: auto; }
+  .box .body > div { padding: 0.12rem 0; white-space: nowrap; }
+  .bad { color: var(--bad); font-weight: 600; }
+  .ok { color: var(--ok); font-weight: 600; }
+  .dim { color: var(--muted); }
+  .acc { color: var(--accent); font-weight: 600; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; margin: 1.1rem 0; }
+  .two h4 { font-family: var(--mono); font-size: 0.66rem; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--muted); margin: 0 0 0.2rem; font-weight: 600; }
+  @media (max-width: 34rem) { .two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 41 &middot; Week 13 &middot; Polish and prove it</p>
+<h1>The role that can erase the evidence</h1>
+<p class="lede">Your audit log has been running since <a href="./0036-the-row-that-outlives-the-row.html">lesson 36</a>. It now holds <b>6,664 rows</b> in your dev database. Every one of them can be deleted by the same database login your API uses to serve requests. Today you look at the one permission system in this app you have never touched: the <b>database role</b>. I ran the whole experiment on a throwaway copy of your database, so every number below is measured, and your data was never in it.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>A <b>role</b> is a database login, and it holds <b>privileges</b></strong> &mdash; the database's own list of who may SELECT, INSERT, UPDATE, DELETE which table. Your app uses one role, <code>tasks</code>, and it holds all of them.</li>
+<li><strong>Measured: <code>REVOKE UPDATE, DELETE</code> works even against the table's owner.</strong> I expected the owner to be immune. It is not &mdash; I checked instead of guessing.</li>
+<li><strong>Measured trap: <code>TRUNCATE</code> is a separate privilege.</strong> After revoking DELETE, one word still emptied the whole table.</li>
+<li><strong>Measured trap: the owner can <code>GRANT</code> it back in one line.</strong> So this guard stops a bug, not an attacker holding your database password.</li>
+<li><strong>Measured cost: <code>npm test</code> went 162 &rarr; 161 pass, 3 fail &mdash; and all 3 failures are test cleanup. Zero route handlers.</strong> Nothing your API does needs to delete an audit row.</li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<pre><code>server: npm test          <b>162 passing</b>
+web:    npm test          <b>7 passing</b>   (lesson 40 said 9 &mdash; see step 0)
+web:    npx tsc -b        clean</code></pre>
+<p>You shipped lesson 40's guard: <code>isAuditRow</code> and <code>assertAuditPage</code> are in <code>audit-row.ts</code>, and <code>audit.ts</code> calls <code>api.get&lt;unknown&gt;</code> and passes the reply through the guard. Correct, exactly as written. The two tests from step 4 are not there yet. They are step 0 today.</p>
+
+<h2>The question this lesson asks</h2>
+<p><a href="./0036-the-row-that-outlives-the-row.html">Lesson 36</a> gave you a rule: <em>an audit row that vanishes with the person it accuses is not evidence.</em> That is why <code>AuditLog.userId</code> has no <code>@relation</code>, so deleting a user cannot cascade the row away. Good. But now ask the next question:</p>
+<pre><code>DELETE FROM "AuditLog" WHERE "userId" = 7;</code></pre>
+<p>Who can run that line today? Your API can. It connects with <code>DATABASE_URL</code>, as the role <code>tasks</code>, and that role may do anything to any table. So the account that <em>writes</em> the evidence can also <em>erase</em> it. One SQL-injection hole, or one bad <code>deleteMany</code> in a future handler, and the log quietly loses the rows that mattered most.</p>
+<div class="word"><b>role</b> &mdash; a database login. Postgres calls it a role, not a user. Yours is <code>tasks</code>, created once by hand (the comment at the top of your <code>.env</code>).</div>
+<div class="word"><b>privilege</b> &mdash; one permission the database itself enforces: SELECT, INSERT, UPDATE, DELETE, TRUNCATE, on one table, for one role.</div>
+<div class="word"><b>owner</b> &mdash; the role that created the table. <code>tasks</code> owns every table in your database, because Prisma's migrations run as <code>tasks</code>.</div>
+<p class="takeaway">This is the third costume of <a href="./0029-the-logout-that-keeps-the-session.html">lesson 29</a>'s rule: <b>a written rule is not enforcement.</b> Your <code>server/CLAUDE.md</code> can say &ldquo;never delete audit rows&rdquo; forever. The database decides what is actually possible.</p>
+
+<h2>What I measured</h2>
+<p>I made a copy of your database (<code>tasks_probe</code>), ran your 14 migrations into it, and tried to lock the log down. Your real <code>tasks</code> database was read, never written, and the copy is deleted.</p>
+<pre><code>REVOKE UPDATE, DELETE, TRUNCATE ON "AuditLog" FROM tasks;
+DELETE FROM "AuditLog" WHERE id = 1;
+<b>ERROR:  permission denied for table AuditLog</b></code></pre>
+<p>That surprised me. I assumed a table's owner could not be locked out of its own table. Wrong &mdash; owner privileges are <em>granted by default</em>, and anything granted can be revoked. Postgres stores the result in one column you can read:</p>
+<div class="scroll"><table>
+<tr><th>When</th><th><code>relacl</code> in <code>pg_class</code></th><th>Means</th></tr>
+<tr><td>before</td><td><code>NULL</code></td><td>nothing written down &mdash; the owner has everything</td></tr>
+<tr><td>after</td><td><code>{tasks=arxtm/tasks}</code></td><td><code>a</code>=INSERT, <code>r</code>=SELECT. No <code>w</code> (UPDATE), no <code>d</code> (DELETE), no <code>D</code> (TRUNCATE)</td></tr>
+</table></div>
+<p>Then two things went wrong, and both are worth more than the success:</p>
+<div class="scroll"><table>
+<tr><th>I tried</th><th>What actually happened</th></tr>
+<tr><td><code>REVOKE UPDATE, DELETE</code>, then <code>TRUNCATE probe;</code></td><td class="no"><b>Table emptied.</b> TRUNCATE is its own privilege. Revoking DELETE does not touch it.</td></tr>
+<tr><td><code>GRANT DELETE ON probe TO tasks;</code> as <code>tasks</code> itself</td><td class="no"><b>Allowed.</b> The owner can hand the power back in one line, then delete.</td></tr>
+</table></div>
+<p class="takeaway">So <code>REVOKE</code> against your own role is a <b>guard against mistakes, not against an attacker</b>. It stops a careless <code>deleteMany</code>, a copy-pasted cleanup script, and an injected single statement. It does not stop anyone who already holds your database password &mdash; they just grant it back. Say that limit out loud when you write it in the README; a guard you describe as stronger than it is, is worse than no guard.</p>
+
+<h2>The number that decides the design</h2>
+<p>I put the <code>REVOKE</code> in place and ran your whole server suite against the copy:</p>
+<pre><code>before REVOKE   <b>162 pass, 0 fail</b>
+after REVOKE    <b>161 pass, 3 fail</b>   Database error. Code: `42501`.
+                                  Message: `permission denied for table AuditLog`</code></pre>
+<p>Three failures. I grepped for every line in your code that deletes or updates an audit row:</p>
+<pre><code>src/routes/audit.test.ts:56       prisma.auditLog.deleteMany(...)
+src/routes/audit.test.ts:57       prisma.auditLog.deleteMany(...)
+src/routes/audit.test.ts:58       prisma.auditLog.deleteMany(...)
+src/routes/audit.test.ts:172      prisma.auditLog.deleteMany(...)
+src/routes/audit-list.test.ts:90  prisma.auditLog.deleteMany(...)
+<b>routes and handlers: none. Not one.</b></code></pre>
+<p>Read that again, because it is the whole lesson. Your API <em>never</em> deletes an audit row. Only your tests do, to tidy up after themselves. The power that the <code>tasks</code> role holds over your log is used by exactly nobody in production code &mdash; and a power nobody uses is the cheapest one to take away.</p>
+
+<h2>One role is doing three jobs</h2>
+<p>The failing tests are not an argument against the lock. They are the lock telling you something true: <b>the same login is doing three different jobs</b>, and only one of them should be able to touch the log.</p>
+<div class="scroll"><table>
+<tr><th>Job</th><th>Needs</th><th>Runs when</th></tr>
+<tr><td>serve requests</td><td>SELECT, INSERT, UPDATE, DELETE on normal tables. On <code>AuditLog</code>: <b>SELECT and INSERT only</b></td><td>always, exposed to the internet</td></tr>
+<tr><td>run migrations</td><td>CREATE, ALTER, DROP &mdash; the owner</td><td>at deploy, by you</td></tr>
+<tr><td>clean up / keep the table small</td><td>DELETE on <code>AuditLog</code></td><td>tests, and one scheduled job later</td></tr>
+</table></div>
+<p>The fix is not to give job 1 less code. It is to give job 1 <b>its own role</b>. This is <b>least privilege</b>: the login exposed to the internet holds only what serving a request actually needs. The other two jobs keep the owner role, and they run from your terminal, not from a web request.</p>
+<div class="word"><b>least privilege</b> &mdash; give each identity the smallest set of powers its job needs. You already apply this to people, in <code>can()</code>, since <a href="./0007-one-place-that-says-no.html">lesson 7</a>. Today it applies to your app.</div>
+<p>And a second role cannot grant itself anything back, because it owns nothing. That closes the hole the <code>GRANT</code> measurement opened.</p>
+
+<h2>Your 6,664 rows</h2>
+<p>Homework 9, from lesson 38, asked: a MEMBER can pump 144,000 refusal rows a day &mdash; bug, feature, or retention problem? Here is your real database today:</p>
+<div class="scroll"><table>
+<tr><th>rows</th><th>on disk</th><th>days</th><th>users</th><th>top status</th></tr>
+<tr><td>6,664</td><td>2,864&nbsp;kB</td><td>4</td><td>13</td><td><code>403</code> &mdash; 1,639 of them</td></tr>
+</table></div>
+<p>That is about 700&nbsp;kB a day from 13 test users and no real traffic. It is a <b>retention problem</b>: the rows are correct, worth keeping, and cannot be kept forever. Retention means something must delete old rows &mdash; which is exactly the power you are taking away from the app today. That is not a contradiction, it is the point: <b>deletion moves to a different role, on a schedule, away from the request path.</b> You will build that job in week 13&ndash;14. Homework 9 is answered.</p>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why is <code>REVOKE DELETE</code> from your own role only a partial guard?</p>
+<button>Postgres ignores a revoke on the owner</button>
+<button>The owner can grant the power back</button>
+<p class="why" hidden>Measured both ways. The revoke really works &mdash; the <code>DELETE</code> was refused with error 42501. But the owner still holds the right to change privileges on its own table, so one <code>GRANT DELETE ON ... TO tasks;</code> undoes it. It stops a mistake; it does not stop someone with the password.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">What did the 3 failing tests actually prove?</p>
+<button>Only test code ever deletes audit rows</button>
+<button>Only real code ever deletes audit rows</button>
+<p class="why" hidden>Every failure came from a <code>deleteMany</code> in a test's cleanup. No route, no hook, no handler deletes an audit row. The privilege the app holds over its own log is used by nothing in production &mdash; which is why removing it costs nothing in production.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>Step 0 &mdash; the two tests you owed from lesson 40.</strong> You asked me to write them, so they are in <code>web/src/features/audit/audit-row.test.ts</code> now, and <code>npm test</code> in <code>web/</code> reports <b>9</b>. Do the part I cannot do for you: open <code>audit-row.ts</code>, replace <code>typeof r.status === "number"</code> with <code>true</code>, run the tests, watch <b>8 pass, 1 fail</b>, put it back. I ran that check before writing this line. A test you have never seen fail is a hope, not a test.</li>
+
+<li><strong>See the privileges you have never looked at.</strong> In <code>server/</code>:
+<pre><code>psql "$(grep -m1 DATABASE_URL .env | cut -d'"' -f2)" \
+  -c 'select relacl from pg_class where relname = '"'"'AuditLog'"'"';'</code></pre>
+<b>Expect an empty result</b> &mdash; <code>NULL</code>, meaning nothing is written down and the owner holds everything.</li>
+
+<li><strong>Repeat my experiment on a copy, never on <code>tasks</code>.</strong> Three commands, and you throw the copy away at the end:
+<pre><code>createdb -U tasks -h localhost tasks_probe
+DATABASE_URL="postgres://tasks:tasks@localhost:5432/tasks_probe" npx prisma migrate deploy
+psql -U tasks -h localhost -d tasks_probe -c 'REVOKE UPDATE, DELETE, TRUNCATE ON "AuditLog" FROM tasks;'
+DATABASE_URL="postgres://tasks:tasks@localhost:5432/tasks_probe" npm test</code></pre>
+<b>Expect 161 pass, 3 fail</b>, all with <code>permission denied for table AuditLog</code>. Read the three failures and confirm for yourself that every one is cleanup code.</li>
+
+<li><strong>Prove the grant-back hole yourself.</strong> Still in the copy:
+<pre><code>psql -U tasks -h localhost -d tasks_probe \
+  -c 'GRANT DELETE ON "AuditLog" TO tasks;' \
+  -c 'DELETE FROM "AuditLog" WHERE id IS NOT NULL;'</code></pre>
+<b>Expect it to work.</b> This is the measurement that tells you a second role is needed, not a second <code>REVOKE</code>. Then <code>dropdb -U tasks -h localhost tasks_probe</code>.</li>
+
+<li><strong>Make the second role.</strong> The SQL is written for you, with a comment on every line explaining why it is there: <code>server/prisma/sql/tasks_app.sql</code>. It needs the <code>postgres</code> superuser password, which is not on this machine, so this is the one block I could <em>not</em> run end to end. What I could check, I did: I ran every statement except <code>CREATE ROLE</code> against a scratch copy of your database, and all seven came back clean.
+<pre><code>psql -U postgres -h localhost -d tasks -f prisma/sql/tasks_app.sql</code></pre>
+<b>Expect <code>\dp "AuditLog"</code> to end with <code>tasks_app=ar/tasks</code></b> &mdash; read and insert, nothing else. Bring me the output.
+<p>Two lines in that file are not in the block I first wrote, and they are the interesting ones. <code>GRANT ... ON ALL TABLES</code> covers the tables that exist <em>today</em>; a table added by tomorrow's migration would have no grants at all, and a route that works in dev would answer 500 in production. <code>ALTER DEFAULT PRIVILEGES FOR ROLE tasks</code> is the fix, and <code>FOR ROLE tasks</code> is there because <code>tasks</code> is the role that creates them.</p>
+Do <b>not</b> change <code>.env</code> yet. Migrations, tests and the dev server still run as <code>tasks</code>. Lesson 42 wires the new login in as its own config value, and adds the test that proves a delete is refused &mdash; because <a href="./0029-the-logout-that-keeps-the-session.html">lesson 29</a>'s rule applies here too: a privilege with no test is a rule nobody enforces.</li>
+
+<li><strong>Words, not code.</strong> Two sentences. First: name one other table in your schema where the app role holds a privilege it never uses. Second, and this one is overdue since lesson 35 &mdash; explain <b>&ldquo;hint vs gate&rdquo;</b> in your own words. I have asked twice.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Your API, your migrations and your test cleanup all connect to Postgres as the same role. Only one of them faces the internet, and it is the one that needs least.</p>
+
+<h2>Today, and what it should be</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+    A["API<br/>serves requests"] --> T["role: tasks<br/>owner, all privileges"]
+    M["prisma migrate<br/>CREATE / ALTER"] --> T
+    C["test cleanup<br/>deleteMany"] --> T
+    T --> L[("AuditLog<br/>can INSERT and DELETE")]
+    style T fill:#3a1b1b,stroke:#9a4c4c,color:#f0d7d7
+    style L fill:#332f22,stroke:#8a7b4c,color:#f0e7d7
+</pre>
+<figcaption>One role, three jobs. The login that writes the evidence can also erase it.</figcaption>
+</figure>
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+    A["API<br/>serves requests"] --> P["role: tasks_app<br/>owns nothing"]
+    M["prisma migrate"] --> O["role: tasks<br/>owner"]
+    C["cleanup / retention job"] --> O
+    P --> L[("AuditLog<br/>SELECT + INSERT only")]
+    O --> L
+    style P fill:#1b3a1b,stroke:#4c9a4c,color:#d7f0d7
+    style O fill:#332f22,stroke:#8a7b4c,color:#f0e7d7
+</pre>
+<figcaption>Two roles. The one exposed to the internet cannot delete a row, and cannot grant itself the right to.</figcaption>
+</figure>
+
+<h2>The three probes</h2>
+<div class="box">
+<div class="cap">tasks_probe &mdash; a throwaway copy of your database, deleted after</div>
+<div class="body">
+<div><span class="dim">1.</span> REVOKE UPDATE, DELETE, TRUNCATE ON "AuditLog" FROM tasks;</div>
+<div>   DELETE FROM "AuditLog" WHERE id = 1;   <span class="ok">ERROR: permission denied (42501)</span></div>
+<div>&nbsp;</div>
+<div><span class="dim">2.</span> <span class="dim">(after revoking DELETE only)</span>  TRUNCATE probe;</div>
+<div>   SELECT count(*) FROM probe;            <span class="bad">0  &mdash; the whole table, gone</span></div>
+<div>&nbsp;</div>
+<div><span class="dim">3.</span> GRANT DELETE ON probe TO tasks;        <span class="bad">GRANT</span></div>
+<div>   DELETE FROM probe WHERE id = 1;        <span class="bad">DELETE 1  &mdash; the lock undone</span></div>
+</div>
+</div>
+<p>Probe 1 was the surprise: a table's owner <em>can</em> be revoked from its own table. Probes 2 and 3 are why that is not enough on its own.</p>
+
+<h2>Reading the privileges</h2>
+<div class="two">
+<div>
+<h4>Before</h4>
+<div class="box"><div class="body">
+<div><span class="dim">select relacl from pg_class</span></div>
+<div><span class="dim">where relname = 'AuditLog';</span></div>
+<div>&nbsp;</div>
+<div class="bad">NULL</div>
+<div class="dim">nothing written down =</div>
+<div class="dim">the owner holds everything</div>
+</div></div>
+</div>
+<div>
+<h4>After</h4>
+<div class="box"><div class="body">
+<div><span class="dim">same query</span></div>
+<div>&nbsp;</div>
+<div>&nbsp;</div>
+<div class="ok">{tasks=arxtm/tasks}</div>
+<div class="dim">r = SELECT   a = INSERT</div>
+<div class="dim">no w (UPDATE), no d (DELETE),</div>
+<div class="dim">no D (TRUNCATE)</div>
+</div></div>
+</div>
+</div>
+
+<h2>What the lock actually broke</h2>
+<div class="box">
+<div class="cap">your 162 tests, run against the copy, before and after</div>
+<div class="body">
+<div>before   <span class="ok">162 pass   0 fail</span></div>
+<div>after    <span class="bad">161 pass   3 fail</span>   permission denied for table AuditLog</div>
+<div>&nbsp;</div>
+<div><span class="dim">every line in your code that deletes an audit row:</span></div>
+<div>  audit.test.ts:56, 57, 58, 172   <span class="dim">cleanup</span></div>
+<div>  audit-list.test.ts:90           <span class="dim">cleanup</span></div>
+<div>  routes and handlers             <span class="ok">none</span></div>
+</div>
+</div>
+<p>Nothing your API does needs to delete an audit row. The only code that lost a power was the code that tidies up after a test &mdash; and tidying up is job three, which keeps the owner role.</p>
+
+<h2>Why this table fills up</h2>
+<div class="box">
+<div class="cap">your dev log right now &mdash; homework 9, with your own numbers</div>
+<div class="body">
+<div>rows      <span class="acc">6,664</span>      <span class="dim">over 4 days, 13 users, no real traffic</span></div>
+<div>on disk   <span class="acc">2,864 kB</span>   <span class="dim">about 700 kB a day</span></div>
+<div>top       <span class="bad">403 &times; 1,639</span>  <span class="dim">refusals, the rows you most want to keep</span></div>
+</div>
+</div>
+<p>So deletion cannot be banned outright &mdash; the table would grow forever. It moves: out of the request path, into a scheduled job, under the role the internet cannot reach.</p>
+
+<p class="takeaway">A rule in a document asks. A privilege refuses.</p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://www.postgresql.org/docs/current/ddl-priv.html">PostgreSQL manual &mdash; Privileges</a>. The table of one-letter privilege codes is the one that decodes <code>{tasks=arxtm/tasks}</code>. Read to the end of the &ldquo;owner&rdquo; paragraphs and stop; the row-level security part is a later lesson.</p>
+<p><b>Then this:</b> <a href="https://www.postgresql.org/docs/current/sql-grant.html">PostgreSQL manual &mdash; GRANT</a>, the <code>ALL TABLES IN SCHEMA</code> section. It explains the trap in step 5: that grant covers the tables that exist <em>now</em>, so a table added by a future migration has no grants at all. <code>ALTER DEFAULT PRIVILEGES</code> is the fix, and it is the last pair of GRANTs in <code>tasks_app.sql</code>.</p>
+<p><b>Reference card:</b> <a href="../reference/prisma-postgres.html">Prisma + Postgres</a>, with a new section today: database roles and privileges.</p>
+<p><b>Ask the community:</b> <a href="https://dba.stackexchange.com/questions/tagged/postgresql+permissions">dba.stackexchange.com, postgresql + permissions</a>. Worth asking there: <em>do small teams really run the app as a non-owner role, or is it only done at bigger companies?</em> That is a judgement question, and the answers will be from people who run it in production.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0040-a-believed-type-can-check-itself.html">&larr; Back</a>
+<a href="../reference/prisma-postgres.html">Prisma + Postgres reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

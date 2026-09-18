@@ -1,0 +1,446 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 31 &mdash; React Query cache and pages</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+/* The cache entry, drawn as a box. Before: one flat array. After: a box of boxes. */
+  .box { font-family: var(--mono); font-size: 0.72rem; margin: 0.7rem 0 0.3rem;
+    border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  .box > .cap { background: var(--code-bg); color: var(--muted); font-size: 0.66rem;
+    padding: 0.35rem 0.7rem; border-bottom: 1px solid var(--rule); }
+  .box .body { padding: 0.6rem 0.7rem; }
+  .box .body > div { padding: 0.1rem 0; }
+  .flat { color: var(--ok); }
+  .page { border: 1px dashed var(--rule); border-radius: 3px; padding: 0.35rem 0.5rem;
+    margin: 0.3rem 0; }
+  .page .t { color: var(--muted); font-size: 0.64rem; }
+  .cur { color: var(--accent); font-weight: 600; }
+  .throws { color: var(--bad); font-weight: 600; }
+
+  /* Two-column before/after that stacks on a phone. */
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; margin: 1.1rem 0; }
+  .two h4 { font-family: var(--mono); font-size: 0.66rem; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--muted); margin: 0 0 0.2rem; font-weight: 600; }
+  @media (max-width: 34rem) { .two { grid-template-columns: 1fr; } }
+
+  /* The chain: one link per row, so it reads down the page on any width. */
+  .chain { font-family: var(--mono); font-size: 0.72rem; margin: 1.2rem 0;
+    border-left: 3px solid var(--rule); padding-left: 0.9rem; }
+  .chain .link { display: grid; grid-template-columns: 4.6rem 1fr; gap: 0.6rem;
+    padding: 0.32rem 0; }
+  .chain .who { color: var(--muted); font-size: 0.64rem; text-align: right;
+    padding-top: 0.1rem; }
+  .chain .what { min-width: 0; overflow-x: auto; white-space: nowrap; }
+  .chain .arrow { color: var(--rule); padding-left: 5.2rem; font-size: 0.7rem; }
+  .chain b { color: var(--accent); }
+
+  /* tsc verdict table. */
+  .verdict { font-family: var(--mono); font-size: 0.7rem; margin: 1.1rem 0;
+    border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  .verdict .row { display: grid; grid-template-columns: 1fr 5.6rem;
+    border-top: 1px solid var(--rule); }
+  .verdict .row:first-child { border-top: 0; }
+  .verdict .row > * { padding: 0.5rem 0.7rem; min-width: 0; overflow-x: auto; }
+  .verdict .head { background: var(--code-bg); color: var(--muted); font-size: 0.64rem; }
+  .verdict .loud { color: var(--bad); font-weight: 600; border-left: 1px solid var(--rule); }
+  .verdict .quiet { color: var(--muted); border-left: 1px solid var(--rule); }
+  .verdict .src { color: var(--ink); }
+
+  figcaption { font-size: 0.8rem; color: var(--muted); margin-top: 0.6rem;
+    border-left: 3px solid var(--rule); padding-left: 0.8rem; }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 31 &middot; Week 11 &middot; Real world</p>
+<h1>React Query cache and pages</h1>
+<p class="lede">Last lesson you taught the server to hand out one page at a time. The page asks for a page, reads <code>.items</code>, and drops <code>nextCursor</code> on the floor. So the app now shows the first twenty tasks and <b>quietly pretends the rest do not exist</b>. No error, no empty state, no clue. Today you fix that with one hook &mdash; and the fix changes the shape of the cache, which breaks three lines the type checker will not warn you about.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>The bug is silent, which is what makes it bad.</strong> Task 21 exists, is returned by no request, and nothing on screen says so. Compare it to the crash in <a href="./0021-what-a-crash-is-allowed-to-say.html">lesson 21</a>: a crash tells you it happened.</li>
+<li><strong><code>useInfiniteQuery</code> keeps many replies under one key.</strong> <code>getNextPageParam</code> turns your <code>nextCursor</code> into the next request&rsquo;s <code>cursor</code>. That is the whole wiring.</li>
+<li><strong>The cache entry stops being an array.</strong> Measured: it holds exactly two keys, <code>pages</code> and <code>pageParams</code>. <code>typeof data.map</code> is <b><code>undefined</code></b>.</li>
+<li><strong>So your three <code>setQueryData&lt;Task[]&gt;</code> lines are now wrong &mdash; and <code>tsc</code> stays silent.</strong> Measured: the component broke with <b>3 type errors</b>, the three cache writes broke with <b>0</b>. At runtime: <code>TypeError: tasks?.map is not a function</code>.</li>
+<li><strong>Create can no longer append.</strong> A new task belongs after the last row of the <em>last</em> page, and you may not be holding the last page. It becomes an <code>invalidateQueries</code> &mdash; measured cost: <b>one request per page you are holding</b>.</li>
+</ul>
+</div>
+
+<h2>First, where you actually are</h2>
+<p>I checked before writing this. Lesson 30 is applied and green: <code>npm test</code> is <b>143 passing, 0 failing</b>, and <code>web</code> type-checks clean. You wrote the hard test &mdash; the cursor walk with the duplicate guard. Three of the four are still missing (default page is 20, last page is <code>nextCursor: null</code>, <code>?limit=101</code> is a 400); that is ten minutes and it is in <b>Do this</b> at the bottom, not a blocker.</p>
+
+<h2>See the bug before you fix it</h2>
+<p>Your server is correct. Your page is the part that stopped being correct the moment the reply shape changed:</p>
+<div class="vs">
+<div class="no"><h4>what the server sends</h4><pre><code>{
+  "items": [ /* 20 tasks */ ],
+  <b>"nextCursor": 4321</b>
+}</code></pre><p>&ldquo;Here are twenty, and there is more &mdash; start from 4321.&rdquo;</p></div>
+<div class="yes"><h4>what your hook keeps</h4><pre><code>await api.get(...)
+  .data<b>.items</b>
+
+// nextCursor: never read.
+// Nobody ever asks again.</code></pre><p>&ldquo;Twenty tasks. That&rsquo;s all of them.&rdquo; It is not.</p></div>
+</div>
+<p class="takeaway">A field in a reply that no caller reads is not a spare. It is a promise the server kept and the client broke.</p>
+<div class="aside"><b>Why this class of bug deserves its own name in your head.</b> You have now met three silent failures in a row: dead <code>??</code> defaults (<a href="./0029-the-logout-that-keeps-the-session.html">lesson 29</a>), a missing <code>querystring</code> schema (<a href="./0020-the-column-that-cannot-be-a-parameter.html">lesson 20</a>), and this. All three pass every test and every type check. The pattern is the same every time: <b>the code that would have complained is the code nobody wrote.</b> A test that loads 25 tasks and expects to see 25 would have caught this the day lesson 30 shipped. You have no front-end test at all &mdash; that is now the loudest gap in the project, and it is lesson 32.</div>
+
+<h2>The word pair</h2>
+<div class="word"><b>query</b> &mdash; one key, one answer. <code>useQuery</code> replaces the answer each time it refetches. <code>data</code> <em>is</em> the reply.</div>
+<div class="word"><b>infinite query</b> &mdash; one key, an <em>ordered list</em> of answers. <code>useInfiniteQuery</code> appends. <code>data</code> is a box holding every reply you have collected, plus the parameter each one was fetched with.</div>
+<p class="takeaway">Twelfth pair. The test it gives: <b>does this key hold one reply, or a growing pile of replies?</b> Everything that reads or writes that key has to know the answer, and the type checker will only tell you about some of them.</p>
+
+<h2>Measured: the cache shape, and what it costs</h2>
+<p>I built a real <code>QueryClient</code>, walked it to three pages of two rows, and looked inside. Your version, <code>@tanstack/react-query 5.102.8</code>.</p>
+<pre><code>pages held: <b>3</b>   queryFn calls: 4
+cache shape keys: <b>[ 'pages', 'pageParams' ]</b>
+typeof data.map: <b>undefined</b>
+OLD setQueryData&lt;Task[]&gt; line throws: <b>TypeError: tasks?.map is not a function</b>
+refetch (what an active invalidate does) queryFn calls: <b>3</b></code></pre>
+<p>Read those five lines slowly, they are the whole lesson:</p>
+<ol>
+<li><b>Three pages, four calls.</b> Fetching a page never refetches the ones before it. Each &ldquo;Load more&rdquo; is exactly one request.</li>
+<li><b>Two keys, and neither is a task.</b> The tasks are at <code>data.pages[n].items</code>. Nothing at the top level is an array of anything you care about.</li>
+<li><b><code>data.map</code> does not exist.</b> So every line you wrote in lessons 25, 26 and 28 that says <code>tasks?.map</code> or <code>tasks?.filter</code> is calling a method on an object that does not have it.</li>
+<li><b>It throws, at runtime, inside <code>onSuccess</code>.</b> The write is lost. The server already changed the row, so the screen and the database now disagree until something refetches.</li>
+<li><b>An invalidate on a 3-page query is 3 requests</b>, run one after another to rebuild the pages in order. Not free, and the more the user scrolls, the less free it gets.</li>
+</ol>
+
+<h2>The part that should scare you</h2>
+<p>I made <code>useTasks</code> infinite and changed <b>nothing else</b>, then ran the type checker. Here is every word it said:</p>
+<pre><code>src/features/tasks/tasks-panel.tsx(32,13): error TS2339: Property 'length' does not exist on type <b>'InfiniteData&lt;TaskPage, unknown&gt;'</b>.
+src/features/tasks/tasks-panel.tsx(38,16): error TS2339: Property 'map' does not exist on type 'InfiniteData&lt;TaskPage, unknown&gt;'.
+src/features/tasks/tasks-panel.tsx(38,21): error TS7006: Parameter 'task' implicitly has an 'any' type.</code></pre>
+<p>Three errors, all in the component, none in <code>tasks.ts</code>. The three <code>setQueryData</code> calls &mdash; the ones that are now guaranteed to throw &mdash; passed clean. Why?</p>
+<div class="vs">
+<div class="yes"><h4>the component: TypeScript knows</h4><pre><code>const { data } = useTasks(teamId);
+data.map(...)
+
+// data's type came FROM the hook.
+// TypeScript worked it out.</code></pre></div>
+<div class="no"><h4>the cache write: you told it</h4><pre><code>client.setQueryData<b>&lt;Task[]&gt;</b>(key, (tasks) =&gt;
+  tasks?.map(...)
+);
+
+// You wrote Task[] in the angle
+// brackets. It believed you.</code></pre></div>
+</div>
+<p class="takeaway">Third time this rule has come up, so it is a rule: <b>a type parameter is a claim you made, not a fact TypeScript checked.</b> Lesson 28 was <code>api.delete&lt;Task&gt;()</code> on a 204. Lesson 17 was <code>as CreateTaskInput</code>. This is the same move in a third costume. <code>&lt;&gt;</code> and <code>as</code> are both you promising, and a promise is only as good as the file that keeps it.</p>
+<div class="aside"><b>The fix is to stop repeating the claim.</b> Three call sites each writing <code>setQueryData&lt;...&gt;</code> is three chances to write a different wrong shape. Below, the shape is written <b>once</b>, in a small helper, and the three mutations pass it a plain <code>Task[] =&gt; Task[]</code> function. Same instinct as <a href="./0017-the-key-you-did-not-name.html">lesson 17</a>&rsquo;s one validator compiler instead of seven <code>.strict()</code> calls: <b>one place beats N places</b>, and the fourth mutation next month gets it for free.</div>
+
+<h2>The change &mdash; type it yourself</h2>
+<p>I applied all of it to your files, ran <code>npx tsc -b</code>, then restored your files byte-for-byte. It type-checks clean. Two files, four edits.</p>
+
+<h3>1. <code>web/src/features/tasks/tasks.ts</code> &mdash; the hook</h3>
+<pre><code>- import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+<b>+ import type { InfiniteData } from "@tanstack/react-query";
++ import {
++   useInfiniteQuery,
++   useMutation,
++   useQueryClient,
++ } from "@tanstack/react-query";</b>
+
+  export const tasksKey = (teamId: number) => ["teams", teamId, "tasks"] as const;
+
+<b>+ // * The server's reply shape, named once. A page, not an array.
++ export type TaskPage = { items: Task[]; nextCursor: number | null };</b>
+
+  export function useTasks(teamId: number) {
+-   return useQuery({
+<b>+   return useInfiniteQuery({</b>
+      queryKey: tasksKey(teamId),
+      // sort names a COLUMN, so the server only accepts three strings (lesson 20).
+-     queryFn: async () =&gt; (await api.get(...)).data.items,
+<b>+     queryFn: async ({ pageParam }) =&gt;
++       (
++         await api.get&lt;TaskPage&gt;(`/teams/${teamId}/tasks`, {
++           params: { sort: "id", dir: "asc", cursor: pageParam },
++         })
++       ).data,
++     // ? No cursor on the first request. Absent means "start at the beginning",
++     // ? which is exactly what the server's optional cursor already meant.
++     initialPageParam: undefined as number | undefined,
++     // * The server decides whether there is more. nextCursor null -&gt; undefined,
++     // * and undefined is how React Query says "no next page".
++     getNextPageParam: (last) =&gt; last.nextCursor ?? undefined,</b>
+    });
+  }</code></pre>
+<p>Three new lines carry the whole idea. <code>queryFn</code> now receives <code>{ pageParam }</code> and returns the <b>whole page</b>, not <code>.items</code> &mdash; because the page is the thing worth keeping. <code>getNextPageParam</code> is the only place that reads <code>nextCursor</code>, and its return value becomes the next call&rsquo;s <code>pageParam</code>. Return <code>undefined</code> and <code>hasNextPage</code> goes false. That is the entire protocol.</p>
+<div class="aside"><b>Why <code>?? undefined</code> and not just <code>last.nextCursor</code>.</b> Your server sends <code>null</code> for &ldquo;no more&rdquo; (<code>nextCursor: z.number().nullable()</code>, from lesson 30 &mdash; a nullable field is honest JSON, an absent one is ambiguous). React Query&rsquo;s signal for &ldquo;no more&rdquo; is <code>undefined</code> or <code>null</code>. They agree here, but writing the conversion makes the boundary visible, and it is where you would put a decoder the day the server says <code>"end": true</code> instead.</div>
+
+<h3>2. Same file &mdash; the shape, written once</h3>
+<pre><code><b>+ // * The cache entry is no longer an array. It is { pages, pageParams }, and
++ // * every write has to walk the pages. One helper, so the three mutations
++ // * below cannot each get the shape wrong in its own way.
++ function editPages(
++   client: ReturnType&lt;typeof useQueryClient&gt;,
++   teamId: number,
++   edit: (items: Task[]) =&gt; Task[],
++ ) {
++   client.setQueryData&lt;InfiniteData&lt;TaskPage&gt;&gt;(tasksKey(teamId), (data) =&gt;
++     data === undefined
++       ? data
++       : {
++           ...data,
++           pages: data.pages.map((page) =&gt; ({
++             ...page,
++             items: edit(page.items),
++           })),
++         },
++   );
++ }</b></code></pre>
+<p>Read the middle of it: a new box, with a new array of new pages, each with a new <code>items</code>. Nothing is mutated in place. React Query hands you the cached value and expects a <em>new</em> value back &mdash; the same rule as any React state. Edit <code>data.pages[0].items</code> directly and React sees the same object reference, so nothing re-renders and you spend an hour wondering why.</p>
+<p>The <code>data === undefined</code> branch is not politeness. The updater runs even when there is nothing cached &mdash; a mutation can finish after the user navigated away and the entry was collected. Return <code>undefined</code> and the entry stays empty, which is correct: you have no pages to edit.</p>
+
+<h3>3. Same file &mdash; the three mutations</h3>
+<pre><code>  // useSetTaskDone
+    onSuccess: (task) =&gt;
+-     client.setQueryData&lt;Task[]&gt;(tasksKey(teamId), (tasks) =&gt;
+-       tasks?.map((t) =&gt; (t.id === task.id ? task : t)),
+-     ),
+<b>+     editPages(client, teamId, (items) =&gt;
++       items.map((t) =&gt; (t.id === task.id ? task : t)),
++     ),</b>
+
+  // useDeleteTask
+    onSuccess: (_nothing, id) =&gt;
+-     client.setQueryData&lt;Task[]&gt;(tasksKey(teamId), (tasks) =&gt;
+-       tasks?.filter((t) =&gt; t.id !== id),
+-     ),
+<b>+     editPages(client, teamId, (items) =&gt; items.filter((t) =&gt; t.id !== id)),</b>
+
+  // useCreateTask
+- // Append, and only because useTasks asks for sort=id&amp;dir=asc: a new id is
+- // the biggest id, so "last" is arithmetic, not a hope.
+- onSuccess: (task) =&gt;
+-   client.setQueryData&lt;Task[]&gt;(tasksKey(teamId), (tasks) =&gt; [...(tasks ?? []), task]),
+<b>+ // ! Appending is now a guess. A new id is the biggest id, so the row
++ // ! belongs after the last row of the LAST page - and we may not be
++ // ! holding the last page. Ask again instead of placing it wrongly.
++ onSuccess: () =&gt; client.invalidateQueries({ queryKey: tasksKey(teamId) }),</b></code></pre>
+<p><b>Toggle and delete keep their <code>setQueryData</code>.</b> They act on a row that is already on screen, so you know which page it is on &mdash; you do not even have to work it out, the <code>map</code> over pages finds it. The reply is still the authoritative new row, so there is still nothing to ask about.</p>
+<p><b>Create loses its <code>setQueryData</code>, and this is the honest half of the lesson.</b> Lesson 26 appended, and said in a comment that it worked <em>only</em> because <code>sort=id&amp;dir=asc</code> makes the newest row the last row. That reasoning still holds &mdash; and it is no longer enough. &ldquo;Last&rdquo; now means last row of the last page, and if you are holding page 1 of 5, the new task belongs to a page you have never fetched. Append it to page 1 and you have invented a row order the server would never send; the next refetch silently moves it.</p>
+<p class="takeaway">The lesson-26 rule, now with its edge named: <b>put the reply in the cache when you know where it goes.</b> Paging is exactly the case where you stop knowing. So you ask again &mdash; and you pay one request per page held, measured above.</p>
+<div class="aside"><b>The cheaper version you should not build yet.</b> You could refetch only the last page, or append only when <code>hasNextPage</code> is false. Both are real optimisations and both are extra state to get wrong, for a list of five tasks. Write the invalidate, keep the measurement (1 request per page), and revisit it when a real user holds ten pages. <a href="./0030-the-list-with-no-end.html">Lesson 30</a> ended by <em>not</em> adding an index for the same reason: measure, then decide, and &ldquo;not yet&rdquo; is a decision.</div>
+
+<h3>4. <code>web/src/features/tasks/tasks-panel.tsx</code> &mdash; flatten, and one button</h3>
+<pre><code>- const { data: tasks, isPending, error } = useTasks(teamId);
+<b>+ const {
++   data,
++   isPending,
++   error,
++   hasNextPage,
++   fetchNextPage,
++   isFetchingNextPage,
++ } = useTasks(teamId);</b>
+
+  if (isPending) return &lt;p&gt;Asking…&lt;/p&gt;;
+  if (error !== null) return /* the server's sentence, unchanged */;
+
+<b>+ // Every page, flattened into the one list the UI wanted all along.
++ const tasks = data.pages.flatMap((page) =&gt; page.items);</b>
+
+  if (tasks.length === 0) return &lt;p&gt;No tasks yet.&lt;/p&gt;;</code></pre>
+<p>One line of <code>flatMap</code>, placed <b>after</b> the two early returns. That order is not style: before them, <code>data</code> may be <code>undefined</code>, and after them TypeScript knows it is not. Every line of JSX below is untouched &mdash; <code>tasks</code> is the same flat array of the same <code>Task</code> objects it has always been.</p>
+<pre><code><b>+ {/* No button when the server said there is nothing after this row.
++     hasNextPage is that answer, not a guess about the count. */}
++ {hasNextPage &amp;&amp; (
++   &lt;Button
++     variant="outline"
++     size="sm"
++     className="justify-self-start"
++     disabled={isFetchingNextPage}
++     onClick={() =&gt; fetchNextPage()}
++   &gt;
++     {isFetchingNextPage ? "Loading…" : "Load more"}
++   &lt;/Button&gt;
++ )}</b>
+
+  &lt;NewTaskForm teamId={teamId} /&gt;</code></pre>
+<p><code>hasNextPage</code> is not a count and not a guess. It is <code>getNextPageParam</code>&rsquo;s answer about the page you are actually holding, which came from the <code>take: limit + 1</code> row the server fetched in lesson 30. The chain runs unbroken from one extra row in Postgres to whether a button exists.</p>
+<p>And <code>disabled={isFetchingNextPage}</code> is the same guard as the Add button in <a href="./0026-the-request-you-cannot-repeat.html">lesson 26</a>, for a different reason: two clicks would fire the same <code>cursor</code> twice and append the same twenty rows twice. Duplicate keys, duplicate rows on screen, no error.</p>
+<div class="aside"><b>Why a button and not scroll-to-load.</b> Infinite scroll needs an <code>IntersectionObserver</code>, and it takes the end of the list away from the user &mdash; no footer, no &ldquo;I have seen everything&rdquo;. A button is one line, keyboard-reachable, announced by a screen reader, and tells you plainly that there is more. <code>fetchNextPage</code> is the same call either way; the observer is a trigger you can add later without touching the hook.</div>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why did <code>tsc</code> catch the component but not the cache writes?</p>
+<button>Because the component runs in the browser</button>
+<button>Because you declared the type yourself there</button>
+<p class="why" hidden>Both files were checked by the same compiler in the same run. The difference is where the type came from. In the component, <code>data</code>&rsquo;s type was <em>inferred</em> from the hook&rsquo;s return, so changing the hook changed the type and the errors appeared. In <code>setQueryData&lt;Task[]&gt;</code>, you wrote the type in the angle brackets &mdash; the compiler has no independent knowledge of what that cache key holds, so it took your word. Same as <code>api.delete&lt;Task&gt;()</code> on a 204 in lesson 28. Inferred types are checked; declared ones are believed.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why does creating a task now invalidate instead of appending?</p>
+<button>The new row may belong to an unfetched page</button>
+<button>The reply no longer contains the new row</button>
+<p class="why" hidden>The reply is unchanged &mdash; the server still answers 201 with the full new task, so the data is right there. What changed is that you no longer know where to put it. Sorted by <code>id</code> ascending, the newest row belongs after the very last row of the very last page, and if <code>hasNextPage</code> is true you are not holding that page. Appending to the page you happen to have puts the row in a position the server would never send, and the next refetch moves it with no explanation. Invalidating costs one request per page held (measured: 3 pages, 3 calls) and is always right.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">What does <code>getNextPageParam</code> returning <code>undefined</code> mean?</p>
+<button>Fetch the next page with no cursor</button>
+<button>There is no next page to fetch</button>
+<p class="why" hidden><code>undefined</code> is the terminator, not a default. Return it and <code>hasNextPage</code> becomes false, the button disappears, and <code>fetchNextPage</code> does nothing. Note the asymmetry that catches people: <code>initialPageParam: undefined</code> means &ldquo;first request, no cursor&rdquo; &mdash; the same value with the opposite meaning, because it is read at the start rather than returned at the end. Your server maps onto this cleanly: <code>nextCursor: null</code> is the last page, and <code>?? undefined</code> is the one line that translates its word into React Query&rsquo;s.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why build a new box in <code>editPages</code> instead of editing the pages?</p>
+<button>React compares references, not contents</button>
+<button>React Query freezes the cached object</button>
+<p class="why" hidden>Nothing is frozen &mdash; mutating it works, silently, which is the trap. React decides whether to re-render by comparing the old value to the new one by reference. Push into <code>data.pages[0].items</code> and the reference is identical, so React sees no change and the screen keeps the old list even though the cache holds the new one. That is why the helper spreads at all three levels: the box, the pages array, and each page. This is the same rule as never doing <code>state.push()</code> in React &mdash; a cache is just state that outlives the component.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>See the bug with your own eyes first, in the browser.</strong> <code>cd server &amp;&amp; npm run dev</code>, then <code>cd web &amp;&amp; npm run dev</code>. Add tasks until you have more than twenty &mdash; or paste this into the browser console on the signed-in page to make 25 quickly:
+<pre><code>for (let i = 1; i &lt;= 25; i++)
+  await fetch("http://localhost:3000/teams/1/tasks", {
+    method: "POST", credentials: "include",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title: `probe ${i}` }),
+  });</code></pre>
+<b>Expect the panel to show 20 and nothing to say the other 5 exist.</b> Sit with that for a second: this is what a silent bug looks like from the outside.</li>
+<li><strong>Make edit 1 only</strong> (the hook), then <code>npx tsc -b</code> in <code>web</code>. <b>Expect exactly 3 errors, all in <code>tasks-panel.tsx</code>.</b> Not four, not six. The three <code>setQueryData</code> calls staying quiet is the thing to notice, and you will only notice it if you look before fixing.</li>
+<li><strong>Now make edits 2, 3 and 4.</strong> <code>npx tsc -b</code>. <b>Expect clean.</b> Reload the page: <b>20 tasks and a &ldquo;Load more&rdquo; button</b>. Click it: 25 tasks and <b>the button is gone</b>.</li>
+<li><strong>Break it on purpose, once.</strong> Put the old <code>useDeleteTask</code> body back &mdash; <code>setQueryData&lt;Task[]&gt;</code> with <code>tasks?.filter</code> &mdash; and confirm <code>tsc</code> is <em>still clean</em>. Then delete a task in the browser with the console open. <b>Expect <code>TypeError: tasks?.map is not a function</code></b> (or <code>filter</code>), the row still on screen, and the task actually gone from the database on reload. Then put the fix back. That is the whole argument against trusting a type parameter, in one click.</li>
+<li><strong>Watch the invalidate cost.</strong> With the network tab open and 25 tasks loaded (two pages), add a task. <b>Expect two <code>GET /teams/1/tasks</code> requests</b> after the <code>POST</code> &mdash; one per page held. Then delete a task and see <b>zero</b> extra requests, because <code>editPages</code> already knows the answer.</li>
+<li><strong>Clean up the probes.</strong> The 25 <code>probe N</code> tasks are real rows in your real database. Delete them from the UI, or <code>npm run log</code> shows you the <code>psql</code> pattern:
+<code>DELETE FROM "Task" WHERE title LIKE 'probe %';</code></li>
+<li><strong>Finish lesson 30&rsquo;s test file.</strong> Three tests left in <code>server/src/routes/task-page.test.ts</code>: the default page is 20, the last page has <code>nextCursor: null</code>, and <code>?limit=101</code> answers 400. You have the fixture already. <b>Expect 146 passing.</b></li>
+<li><strong>Say the word on the trim fix.</strong> <code>title: z.string().min(1)</code> still accepts <code>"   "</code>. I have asked four times, so I am not asking again &mdash; next session I will do it with you unless you say no.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Three pictures. What one cache key holds before and after, the chain that runs from one extra database row to one button, and which of your broken lines the type checker actually mentions.</p>
+
+<h2>1. The same key, two shapes</h2>
+<p>Key is unchanged: <code>["teams", 1, "tasks"]</code>. What sits under it is not.</p>
+
+<div class="two">
+<div>
+<h4>useQuery</h4>
+<div class="box">
+<div class="cap">cache["teams",1,"tasks"]</div>
+<div class="body">
+<div class="flat">[</div>
+<div class="flat">&nbsp;&nbsp;{ id: 1, … },</div>
+<div class="flat">&nbsp;&nbsp;{ id: 2, … },</div>
+<div class="flat">&nbsp;&nbsp;… 18 more</div>
+<div class="flat">]</div>
+<div>&nbsp;</div>
+<div><span class="page t">.map&nbsp;&nbsp;&#10003;</span></div>
+<div><span class="page t">.filter&nbsp;&#10003;</span></div>
+<div><span class="page t">.length&nbsp;&#10003;</span></div>
+</div>
+</div>
+</div>
+<div>
+<h4>useInfiniteQuery</h4>
+<div class="box">
+<div class="cap">cache["teams",1,"tasks"]</div>
+<div class="body">
+<div>{</div>
+<div>&nbsp;&nbsp;pages: [</div>
+<div class="page"><span class="t">page 0</span><br>items: [ 1 … 20 ]<br>nextCursor: <span class="cur">20</span></div>
+<div class="page"><span class="t">page 1</span><br>items: [ 21 … 25 ]<br>nextCursor: <span class="cur">null</span></div>
+<div>&nbsp;&nbsp;],</div>
+<div>&nbsp;&nbsp;pageParams: [undefined, <span class="cur">20</span>]</div>
+<div>}</div>
+<div>&nbsp;</div>
+<div><span class="throws">.map&nbsp;&nbsp;&#10007; not a function</span></div>
+</div>
+</div>
+</div>
+</div>
+
+<figure>
+<pre><code>cache shape keys: <b>[ 'pages', 'pageParams' ]</b>
+typeof data.map: <b>undefined</b>
+
+// the lesson-25 line, unchanged, run against the new shape:
+client.setQueryData&lt;Task[]&gt;(key, (tasks) =&gt; tasks?.map(…))
+<span class="throws">TypeError: tasks?.map is not a function</span></code></pre>
+<figcaption>Measured on <code>@tanstack/react-query 5.102.8</code>. The tasks did not move &mdash; they went one level deeper, into <code>pages[n].items</code>. Every line that reached for them at the top level now reaches for a method that is not there.</figcaption>
+</figure>
+
+<h2>2. The chain, from one extra row to one button</h2>
+<p>Nothing here is a guess about how many tasks exist. Each link only repeats what the link above it said.</p>
+
+<div class="chain">
+<div class="link"><div class="who">postgres</div><div class="what">LIMIT <b>21</b> &nbsp;&larr; <code>take: limit + 1</code>, lesson 30</div></div>
+<div class="arrow">&darr; 21 came back, so there is more</div>
+<div class="link"><div class="who">store</div><div class="what">slice off row 21, remember its id</div></div>
+<div class="arrow">&darr;</div>
+<div class="link"><div class="who">route</div><div class="what">{ items: [20], <b>nextCursor: 20</b> }</div></div>
+<div class="arrow">&darr; over the wire</div>
+<div class="link"><div class="who">queryFn</div><div class="what">returns the <b>whole page</b>, not .items</div></div>
+<div class="arrow">&darr;</div>
+<div class="link"><div class="who">getNextPageParam</div><div class="what">(last) =&gt; last.nextCursor ?? undefined &nbsp;&rarr; <b>20</b></div></div>
+<div class="arrow">&darr; stored in pageParams</div>
+<div class="link"><div class="who">hasNextPage</div><div class="what"><b>true</b> &nbsp;(it is not undefined)</div></div>
+<div class="arrow">&darr;</div>
+<div class="link"><div class="who">the page</div><div class="what">{hasNextPage &amp;&amp; &lt;Button&gt;Load more&lt;/Button&gt;}</div></div>
+<div class="arrow">&darr; click &rarr; fetchNextPage()</div>
+<div class="link"><div class="who">queryFn</div><div class="what">?cursor=<b>20</b> &nbsp;&larr; the pageParam, back to the top</div></div>
+</div>
+
+<figure>
+<pre><code>page 1 arrives: { items: [21…25], nextCursor: <b>null</b> }
+getNextPageParam &rarr; <b>undefined</b>
+hasNextPage      &rarr; <b>false</b>
+the button       &rarr; <b>gone</b></code></pre>
+<figcaption><code>undefined</code> is the terminator. Note the trap: <code>initialPageParam: undefined</code> is the same value meaning the opposite &mdash; &ldquo;first request, no cursor&rdquo;. Read at the start, returned at the end.</figcaption>
+</figure>
+
+<h2>3. Which broken lines <code>tsc</code> mentions</h2>
+<p>One compiler, one run, after changing only the hook. Four lines are now wrong. It named three of them, and all three are in the same file.</p>
+
+<div class="verdict">
+<div class="row"><div class="head">the line that is now wrong</div><div class="head">tsc says</div></div>
+<div class="row"><div class="src">panel: <code>tasks.length</code> &nbsp;<span style="color:var(--muted)">(type inferred from the hook)</span></div><div class="loud">TS2339</div></div>
+<div class="row"><div class="src">panel: <code>tasks.map(…)</code> &nbsp;<span style="color:var(--muted)">(inferred)</span></div><div class="loud">TS2339</div></div>
+<div class="row"><div class="src">panel: <code>(task) =&gt; …</code> &nbsp;<span style="color:var(--muted)">(inferred)</span></div><div class="loud">TS7006</div></div>
+<div class="row"><div class="src">toggle: <code>setQueryData<b>&lt;Task[]&gt;</b></code> &nbsp;<span style="color:var(--muted)">(you declared it)</span></div><div class="quiet">nothing</div></div>
+<div class="row"><div class="src">create: <code>setQueryData<b>&lt;Task[]&gt;</b></code> &nbsp;<span style="color:var(--muted)">(you declared it)</span></div><div class="quiet">nothing</div></div>
+<div class="row"><div class="src">delete: <code>setQueryData<b>&lt;Task[]&gt;</b></code> &nbsp;<span style="color:var(--muted)">(you declared it)</span></div><div class="quiet">nothing</div></div>
+</div>
+
+<figure>
+<pre><code>tasks-panel.tsx(32,13): error TS2339: Property 'length' does not exist on type
+  <b>'InfiniteData&lt;TaskPage, unknown&gt;'</b>.
+tasks-panel.tsx(38,16): error TS2339: Property 'map' does not exist on type …
+tasks-panel.tsx(38,21): error TS7006: Parameter 'task' implicitly has an 'any' type.
+
+<span style="color:var(--muted)">3 errors. tasks.ts: 0.</span></code></pre>
+<figcaption>Three quiet lines, and each one throws the first time a user ticks, adds, or deletes a task. The write is lost; the row already changed in Postgres. Screen and database disagree until something refetches.</figcaption>
+</figure>
+
+<p class="takeaway">Inferred types are <b>checked</b>. Declared ones are <b>believed</b>. <code>&lt;Task[]&gt;</code> and <code>as CreateTaskInput</code> are the same move: a promise you made, kept by some other file.</p>
+
+<p class="nav"><a href="./0031-the-pages-you-threw-away.html">&larr; Lesson 31</a> &middot; <a href="../reference/react-query-rules.html">React Query reference</a> &middot; <a href="./index.html">All lessons</a></p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://tanstack.com/query/latest/docs/framework/react/guides/infinite-queries">TanStack Query &mdash; Infinite Queries</a>. The official guide, and short. Read as far as &ldquo;What if I need to pass custom information to my query function?&rdquo; and stop; the rest is for later.</p>
+<p><b>Then this:</b> <a href="https://tanstack.com/query/latest/docs/framework/react/reference/useInfiniteQuery">The <code>useInfiniteQuery</code> reference</a> &mdash; specifically <code>getNextPageParam</code>, <code>hasNextPage</code>, <code>isFetchingNextPage</code>, and <code>maxPages</code>. Skim the list once so you know what exists.</p>
+<p><b>Also:</b> <a href="https://tkdodo.eu/blog/react-query-and-type-script">TkDodo &mdash; React Query and TypeScript</a>. Dominik maintains the library. The section on generics is the same warning this lesson measured, written by the person who wrote the types.</p>
+<p><b>Reference card:</b> <a href="../reference/react-query-rules.html">React Query, the rules so far</a> &mdash; updated today with the infinite-query recipe and the cache-shape table.</p>
+<p><b>Ask the community:</b> <a href="https://github.com/TanStack/query/discussions">TanStack Query Discussions</a> &mdash; search &ldquo;setQueryData infinite&rdquo;. You will find plenty of people who hit exactly the <code>pages</code>-shaped surprise you just read about. Seeing that it is common is worth as much as the fix.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0030-the-list-with-no-end.html">&larr; Back</a>
+<a href="../reference/react-query-rules.html">React Query reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

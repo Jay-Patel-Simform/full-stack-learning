@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 52 &mdash; The machine you can throw away</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 52 &middot; Week 15&ndash;16 &middot; Docker and deploy</p>
+<h1>The machine you can throw away</h1>
+<p class="lede">You parked Docker on 10 September and said you wanted it at the end. This is the end. Today your API runs inside a <b>container</b> &mdash; and the first two times it will not work, for two reasons that are both interesting. One is a single line in <code>server.ts</code> that has been correct for fifty lessons and is wrong the moment you put it in a box.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>An image is a file. A container is that file running.</strong> You build the image once, then start, stop and throw away containers all day.</li>
+<li><strong><code>HOST=127.0.0.1</code> inside a container means &ldquo;only this container&rdquo;.</strong> Your API will start, log &ldquo;listening&rdquo;, and refuse every request from outside. Nothing is broken. The word <em>localhost</em> just changed meaning.</li>
+<li><strong><code>localhost</code> in <code>DATABASE_URL</code> has the same problem.</strong> Postgres is on your Mac, not in the box.</li>
+<li><strong><code>.dockerignore</code> is the security step, not the speed step.</strong> Without it your <code>.env</code> &mdash; both database passwords &mdash; is copied into a file you can email to someone.</li>
+<li><strong>You already handle <code>SIGTERM</code>.</strong> Lesson-for-free: that is exactly the signal <code>docker stop</code> sends, and the shutdown you wrote in <code>server.ts</code> is why your pool closes cleanly.</li>
+<li><strong>Still no new dependency in the app.</strong> Docker is a tool, not an <code>npm install</code>.</li>
+</ul>
+</div>
+
+<h2>Why a container at all</h2>
+<p>You have one honest answer and you should not accept a bigger one. Your API needs Node 22, a set of npm packages, a generated Prisma client and six environment variables. Today all of that lives on <b>your Mac</b>, arranged by hand over sixteen weeks. Fly.io and Render do not have your Mac.</p>
+<p>A container is that arrangement written down as a recipe, so the same arrangement can be built anywhere. That is the whole idea. It is not about isolation, security or microservices &mdash; those are other people&rsquo;s reasons.</p>
+
+<h2>Step 0: install it</h2>
+<p>No Homebrew needed &mdash; Docker Desktop is an ordinary <code>.dmg</code>. Download <a href="https://desktop.docker.com/mac/main/arm64/Docker.dmg">Docker.dmg (Apple Silicon)</a>, drag <b>Docker</b> into Applications, open it once and wait for the whale icon to stop animating. <span class="dim">(If you do have Homebrew: <code>brew install --cask docker</code> fetches the same file.)</span></p>
+<pre><code>docker --version
+docker run --rm hello-world</code></pre>
+<p>If <code>hello-world</code> prints a paragraph, you are done with setup. That command pulled an image from the internet, ran it as a container, and deleted the container when it exited (<code>--rm</code>). You have now done the whole lifecycle once.</p>
+
+<h2>The recipe</h2>
+<p>New file, <code>server/Dockerfile</code>. No extension. Read every line &mdash; there are only nine that do anything:</p>
+<pre><code>FROM node:22-slim
+<span class="dim"># Pinned, and "slim" not "latest". `latest` means "whatever they built this
+# morning" -- your build would change without you changing anything.
+# Your Mac runs 22.23.1, so the container runs 22 too.</span>
+
+WORKDIR /app
+
+<b>COPY package*.json ./
+RUN npm ci</b>
+<span class="dim"># These two lines come BEFORE copying your code, on purpose. See below.</span>
+
+COPY . .
+
+<b>RUN npx prisma generate</b>
+<span class="dim"># src/generated/prisma is not in git and not in the image. db.ts imports it,
+# so without this line the container starts and crashes on the first import.</span>
+
+<span class="dim"># Documentation only. It publishes nothing -- `-p` does that.</span>
+EXPOSE 3000
+
+CMD ["npm", "start"]</code></pre>
+
+<h3>The two lines before <code>COPY . .</code></h3>
+<p>Docker builds an image as a stack of <b>layers</b>, one per instruction, and it reuses a layer when nothing that feeds it has changed. <code>npm ci</code> takes about a minute. If you copy your source code first, then <em>every</em> edit to a <code>.ts</code> file invalidates the install layer and you wait a minute for every rebuild.</p>
+<p>Copying <code>package*.json</code> alone means the install layer is reused until you actually add a package. This is the one Docker idiom worth memorising, and it is the reason nearly every Node <code>Dockerfile</code> you will ever read has that odd double copy.</p>
+<p class="takeaway"><b>Order the recipe from the thing that changes least to the thing that changes most.</b> Dependencies change monthly, your code changes hourly.</p>
+
+<h3>No build step, and that is honest</h3>
+<p>Your <code>npm start</code> is <code>tsx src/server.ts</code>. <code>tsx</code> runs TypeScript directly, so there is nothing to compile and no second stage. Most Node <code>Dockerfile</code>s you will find online have a builder stage and a runtime stage; yours does not need one because you never produce a <code>dist/</code>. Do not add a stage to look professional.</p>
+
+<h2>The file that keeps your passwords out</h2>
+<p><code>COPY . .</code> means <em>everything</em>. That includes <code>.env</code>, which holds both Postgres passwords, and <code>node_modules</code>, which was built for macOS and is useless in Linux. New file, <code>server/.dockerignore</code>:</p>
+<pre><code>node_modules
+<b>.env</b>
+.env.*
+!.env.example
+src/generated
+*.log
+.git</code></pre>
+<p>Say this part out loud, because it is the one thing in today&rsquo;s lesson that can actually hurt you: <b>an image is a file you hand to other people</b>. You push it to a registry, a CI server pulls it, a colleague runs it. Anyone holding it can read every file inside it &mdash; there is no such thing as a private file in an image.</p>
+<pre><code><span class="dim"># this is all it takes to read a secret out of somebody's image</span>
+docker run --rm my-api cat /app/.env</code></pre>
+<p class="takeaway"><b>A secret never goes in the image. It is handed to the container at start time.</b> That is what <code>--env-file</code> below is doing, and it is why <code>config.ts</code> from lesson 27 already reads the environment rather than a file it insists on.</p>
+
+<h2>Now build it and watch it fail twice</h2>
+<pre><code>cd server
+docker build -t tasks-api .
+docker run --rm -p 3000:3000 --env-file .env tasks-api</code></pre>
+<p><code>-p 3000:3000</code> reads <b>host port : container port</b>. Without it the container&rsquo;s 3000 is not reachable from your Mac at all.</p>
+
+<h3>Failure one: it says it is listening, and it is not there</h3>
+<pre><code>{"level":30,"msg":"Server listening at http://127.0.0.1:3000"}
+
+<span class="dim"># other terminal</span>
+curl http://localhost:3000/health
+<b>curl: (52) Empty reply from server</b></code></pre>
+<p>Nothing crashed. Open <code>src/server.ts</code> and read the comment you wrote:</p>
+<pre><code>// ! Default host is loopback on purpose. In deploy/nginx.conf nginx is the
+// ! only thing that may reach this port; binding 0.0.0.0 puts the API on the
+// ! public internet with no TLS in front of it.
+await app.listen({ port: Number(config.PORT), host: config.HOST });</code></pre>
+<p>That reasoning was right and is still right &mdash; <b>on a machine</b>. A <span class="dim">bind address</span> of <code>127.0.0.1</code> means &ldquo;accept connections that came from this machine only&rdquo;. Inside a container, &ldquo;this machine&rdquo; is the container. Your Mac is now the outside world, and so is nginx if it is in a second container.</p>
+<p>The fix is one line in the <code>.env</code> you pass in, not in your code:</p>
+<pre><code>HOST=0.0.0.0</code></pre>
+<p>And the security argument survives intact, which is the part worth understanding. <code>0.0.0.0</code> inside a container does not mean &ldquo;on the internet&rdquo;. It means &ldquo;anything that can reach this container&rsquo;s network&rdquo; &mdash; and the only thing that can is what <em>you</em> publish with <code>-p</code>. <b>The boundary moved from the bind address to the port publish.</b> Change where the wall is, not whether there is one.</p>
+
+<h3>Failure two: it cannot find Postgres</h3>
+<pre><code>Error: connect ECONNREFUSED 127.0.0.1:5432</code></pre>
+<p>Exactly the same mistake in a different costume. Your <code>DATABASE_URL</code> says <code>@localhost:5432</code>, and there is no Postgres inside the box. For today, point it at the Mac:</p>
+<pre><code><span class="dim"># server/.env.docker -- a second env file, for container runs only</span>
+DATABASE_URL=postgres://tasks:...@<b>host.docker.internal</b>:5432/tasks
+APP_DATABASE_URL=postgres://tasks_app:...@<b>host.docker.internal</b>:5432/tasks
+NODE_ENV=development
+ALLOWED_ORIGINS=http://localhost:5173
+TRUST_PROXY=false
+<b>HOST=0.0.0.0</b></code></pre>
+<p>Add <code>.env.docker</code> to <code>.dockerignore</code>&rsquo;s <code>.env.*</code> line &mdash; it is already covered. Then:</p>
+<pre><code>docker run --rm -p 3000:3000 --env-file .env.docker tasks-api
+curl http://localhost:3000/health   <b># {"status":"ok"}</b></code></pre>
+<p>Your API is running on a Linux machine that did not exist five minutes ago, talking to the Postgres on your Mac. <code>host.docker.internal</code> is a Docker Desktop convenience and will not exist on Fly.io &mdash; there, Postgres gets its own name. That is next lesson.</p>
+
+<h3>The part you already built</h3>
+<p>Press <kbd>Ctrl-C</kbd>. Watch the log. <code>docker stop</code> sends <code>SIGTERM</code>, and your <code>server.ts</code> has caught <code>SIGTERM</code> since the day you wrote it &mdash; so the app stops accepting, finishes what is in flight, and hands the Postgres pool back. Most first Dockerfiles get killed after ten seconds instead. Yours does not, and you did not do anything today to earn it.</p>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why does <code>HOST=127.0.0.1</code> break inside a container?</p>
+<button>The container has no network stack yet</button>
+<button>This machine now means the container</button>
+<p class="why" hidden>A bind address of <code>127.0.0.1</code> accepts connections originating on the same machine. The container is its own machine, so your Mac &mdash; and any other container &mdash; is outside it. Nothing is broken; the word <em>local</em> points somewhere new.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why must <code>.env</code> be listed in <code>.dockerignore</code>?</p>
+<button>Anyone holding the image reads it</button>
+<button>Docker refuses to start with it</button>
+<p class="why" hidden>An image is a file that gets pushed, pulled and shared. Every file copied into it is readable by anyone who can run it: <code>docker run my-api cat /app/.env</code>. Secrets are handed to the container at start time with <code>--env-file</code>, so they live on the host that starts it and nowhere else.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why is <code>npm ci</code> above <code>COPY . .</code> and not below it?</p>
+<button>The client needs its schema first</button>
+<button>A layer is reused until it changes</button>
+<p class="why" hidden>Each instruction is a cached layer, and editing any copied file invalidates that layer and everything after it. Copying only <code>package*.json</code> before installing means the slow install is reused on every rebuild until you actually change a dependency. Least-changing first.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>The same word, <code>localhost</code>, pointing at two different machines. That is both of today&rsquo;s failures.</p>
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+    subgraph MAC["your Mac"]
+      CURL["curl :3000"]
+      PG[("Postgres :5432")]
+      subgraph BOX["container"]
+        API["Fastify"]
+      end
+    end
+    CURL -->|"-p 3000:3000"| API
+    API -->|"host.docker.internal:5432"| PG
+    API -.->|"localhost:5432<br/>nothing is here"| API
+</pre>
+<figcaption>Inside the box, <code>localhost</code> is the box. Reaching in needs <code>-p</code> and <code>0.0.0.0</code>; reaching out needs a name that is not <code>localhost</code>.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div>Postgres in Docker  <span class="dim">next lesson, with compose. One command to start both, and a real network name instead of <code>host.docker.internal</code>.</span></div>
+<div>a non-root user     <span class="dim">a real hardening step, and it belongs with deploy, not with your first build.</span></div>
+<div>the front end       <span class="dim">a static build behind the nginx config already sitting in <code>deploy/</code>. Its own lesson.</span></div>
+<div>multi-stage build   <span class="dim">you have no compile step. Adding a stage that copies nothing is cargo cult.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://docs.docker.com/guides/nodejs/containerize/">Docker &mdash; Containerize a Node.js application</a>. The official guide, and short. It generates a fancier Dockerfile than yours; read it to see which parts you genuinely do not need.</p>
+<p><b>Then this:</b> run <code>docker image ls</code> and look at the size of <code>tasks-api</code>. Then ask me why it is that big &mdash; the answer is a good week-16 conversation.</p>
+<p><b>Reference card:</b> <a href="../reference/environment.html">Environment</a> &mdash; the <code>HOST</code> row now has a second correct value, and which one is right depends on where the process is running.</p>
+<p><b>Ask the community:</b> <a href="https://stackoverflow.com/questions/tagged/docker+node.js">Stack Overflow, <code>docker</code> + <code>node.js</code></a>. Good question for them: <em>is there any reason to keep a multi-stage build when the app is run by <code>tsx</code> and never compiled?</em></p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0051-the-resource-nobody-can-see.html">&larr; Back</a>
+<a href="../reference/environment.html">Environment reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

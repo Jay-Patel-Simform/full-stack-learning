@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 9 — Scoped permission checks</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 09 &middot; Week 5&ndash;6 &middot; RBAC</p>
+<h1>Scoped permission checks</h1>
+<p class="lede">An <code>ADMIN</code> can remove the <code>OWNER</code>. The bug is not a missing <code>if</code> &mdash; it is a missing argument.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>"An admin may remove a member, but not the owner" has <em>three</em> parts. Your function had room for two.</li>
+<li>Add the third: the thing being acted on. <code>can(role, action, resource)</code>.</li>
+<li>The rule is one comparison: you may act only on somebody <strong>strictly below</strong> you.</li>
+<li>The <em>gate</em> fetches the target, never the handler.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  S["SUBJECT<br/>the admin"] --> OP["OPERATION<br/>member:remove"] --> O["OBJECT<br/>the owner"]
+  S -.-> Y["yesterday<br/>can(role, action)<br/>sees 2 of 3"]
+  O -.-> T["today<br/>can(role, action, resource)<br/>sees 3 of 3"]
+</pre>
+<figcaption>Subject, operation, object &mdash; NIST's three nouns. Count the nouns in the rule you want, then count the parameters you have. The gap is the bug.</figcaption>
+</figure>
+
+<h2>The idea</h2>
+<p>Say the rule out loud: <strong>"an admin may remove a member, but not the owner."</strong> Count the things in it. Three: the admin, the removing, the owner.</p>
+<p>Your function had two slots. No amount of cleverness inside a two-slot function can express a three-part rule.</p>
+<p>Now, <em>who fetches</em> the third fact? The target's role is in the database. Somebody has to go and get it. Not the handler:</p>
+
+<blockquote>A handler only runs <em>after</em> the gate said yes. So a check inside a handler is a gate you can forget to write.</blockquote>
+
+<p>That is lesson 7's argument again, one level up. A route with no gate looks obviously naked. A route with a gate <em>and</em> a hidden second rule in the body is the dangerous one, because it looks guarded.</p>
+
+<h2>The code</h2>
+<pre><code>// rank: position in the ROLES array
+const rank = (r: Role) =&gt; ROLES.indexOf(r);
+
+export function can(role: Role, action: Action, resource?: { role: Role }) {
+  if (!PERMS[role]?.includes(action)) return false;
+  if (!resource) return true;
+  return rank(role) &gt; rank(resource.role);   // strictly below you
+}</code></pre>
+
+<pre><code>// the gate is now told HOW to find the target
+requirePermission("member:remove", loadTargetMember)
+//                                 ^ a Load function; the gate awaits it
+</code></pre>
+
+<p>The same one comparison closed a second hole for free: an ADMIN can no longer <em>invite</em> a new OWNER. You did not write that case. The rule found it.</p>
+
+<p class="takeaway">Count the nouns in the rule you want. Then count the parameters you have.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">Why not put the rank check in the route handler?</p>
+<button>Because handlers cannot await a query</button>
+<button>Because a handler check can be forgotten</button>
+<p class="why" hidden>Handlers await queries all day. The problem is that a gate you must remember to write inside each handler is a gate that will be missing from one of them.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><code>npm test</code> &mdash; 40 tests.</li>
+<li>As ADMIN, try to remove the OWNER over HTTP. 403.</li>
+<li>Write a test that <code>ROLES</code> is in ascending order. <code>rank</code> silently depends on it now.</li>
+</ol>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://csrc.nist.gov/glossary/term/access_control_policy">NIST: subject, operation, object</a>.</p>
+<p><b>The long version:</b> <a href="./long/0009-the-third-argument.html">the Load function in full</a>.</p>
+<p>Half your permission table still has no route behind it. Lesson 10.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0008-a-role-is-a-row.html">&larr; Back</a>
+<a href="./0010-a-task-belongs-to-a-team.html">Next: a task belongs to a team &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

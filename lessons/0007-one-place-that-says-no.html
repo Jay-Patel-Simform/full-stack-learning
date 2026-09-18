@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 7 — Deny-by-default permissions</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 07 &middot; Week 5&ndash;6 &middot; RBAC</p>
+<h1>Deny-by-default permissions</h1>
+<p class="lede">Your API knows <em>who</em> is asking. It does not know <em>what they may do</em>. Today you build the one function that decides.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>Gate 1 asks <em>who are you</em> (401). Gate 2 asks <em>may you</em> (403). You only have gate 1.</li>
+<li>Do not scatter <code>if (role === "ADMIN")</code> through forty routes.</li>
+<li>Put the decision in one plain function: <code>can(role, action)</code>.</li>
+<li>Roles are <strong>data</strong> (rows). Permissions are <strong>code</strong> (a file in git).</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  R["request"] --> G1{"requireAuth<br/>who are you?"}
+  G1 -- "no cookie" --> E1["401"]
+  G1 -- "user 1" --> G2{"can(role, action)<br/>may you?"}
+  G2 -- "no" --> E2["403"]
+  G2 -- "yes" --> H["handler<br/>no checks inside"]
+</pre>
+<figcaption>Two gates, two different questions, two different numbers. 401 means <em>I do not know you</em>. 403 means <em>I know you and the answer is still no</em>.</figcaption>
+</figure>
+
+<h2>The idea</h2>
+<p>The obvious version puts the check where the work happens:</p>
+
+<div class="vs">
+<div class="no">
+<h4>Scattered</h4>
+<pre><code>// in every handler, forever
+if (user.role !== "ADMIN") {
+  return reply.code(403).send(...);
+}
+// ...forty routes later, one of
+// them does not have this line</code></pre>
+</div>
+<div class="yes">
+<h4>One place</h4>
+<pre><code>// src/auth/can.ts — the whole policy
+export function can(role, action) {
+  return PERMS[role]?.includes(action) ?? false;
+}</code></pre>
+</div>
+</div>
+
+<p>The scattered version is not wrong on any single line. It is wrong because it is <em>forty chances</em> to forget. One table in one file can be read top to bottom and reviewed by a person.</p>
+
+<div class="word"><b>roles are data</b> &mdash; who is an admin changes at runtime, by users clicking. That belongs in Postgres.</div>
+<div class="word"><b>permissions are code</b> &mdash; what an admin may do changes when you ship. That belongs in git, with a diff and a review.</div>
+
+<h2>The code</h2>
+<pre><code>// src/auth/can.ts
+export const ROLES = ["VIEWER", "MEMBER", "ADMIN", "OWNER"] as const;
+
+const PERMS: Record&lt;Role, readonly Action[]&gt; = {
+  VIEWER: ["task:read"],
+  MEMBER: ["task:read", "task:create", "task:update"],
+  ADMIN:  [...MEMBER, "task:delete", "member:invite", "member:remove"],
+  OWNER:  [...ADMIN, "team:delete"],
+};
+
+export function can(role: string, action: Action): boolean {
+  return PERMS[role as Role]?.includes(action) ?? false;  // unknown role -> no
+}</code></pre>
+
+<p><code>?? false</code> is the important character. A role you have never heard of gets <em>no</em>, not a crash.</p>
+
+<p class="takeaway">Deny by default. Then a bug is a missing permission, never an accidental one.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">Why do permissions live in code, not in a database table?</p>
+<button>Because a table lookup is far too slow</button>
+<button>Because changing them should need a review</button>
+<p class="why" hidden>Speed is irrelevant here. The point is process: adding <code>team:delete</code> to MEMBER should show up in a pull request, not in somebody's afternoon of clicking in an admin panel.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><code>npm test</code>. Ten tests, no database &mdash; <code>can()</code> is a pure function, so it needs none.</li>
+<li>Write the test from <a href="../MISSION.md">MISSION.md</a>: <code>can("VIEWER", "task:update")</code> is <code>false</code>.</li>
+<li>Call <code>can("ADMINN", "task:read")</code>. It must be <code>false</code>, not an exception.</li>
+</ol>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://csrc.nist.gov/projects/role-based-access-control">NIST, Role Based Access Control</a> &mdash; the FAQ, not the standard.</p>
+<p><b>Reference card:</b> <a href="../reference/rbac-permissions.html">RBAC cheat sheet</a>.</p>
+<p><b>The long version:</b> <a href="./long/0007-one-place-that-says-no.html">the bad version killed in detail</a>.</p>
+<p>Nothing calls <code>can()</code> yet. That is lesson 8, on purpose.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0006-a-door-that-stays-open.html">&larr; Back</a>
+<a href="./0008-a-role-is-a-row.html">Next: a role is a row &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

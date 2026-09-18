@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 56 &mdash; The URL you can send to someone</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 56 &middot; Week 15&ndash;16 &middot; Docker + deploy</p>
+<h1>The URL you can send to someone</h1>
+<p class="lede">Last lesson your rows left the laptop. Today the process does too. At the end of this you have an <code>https://</code> address that works when your Mac is shut, and three env values finally flip to the values they were always meant to have. <b>Zero TypeScript changes. Suite stays at 172.</b></p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>Render deploys from a git repository, and you do not have one.</strong> That is the first step, and it is the step where a secret gets committed if you are careless. Two <code>.gitignore</code> lines before <code>git init</code>, not after.</li>
+<li><strong>Your <code>Dockerfile</code> is the deploy.</strong> No build packs, no start command, no new file. Render runs <code>docker build</code> on the same file compose has been building since lesson 52, and your <code>ENTRYPOINT</code> migrates on the way up exactly as it does locally.</li>
+<li><strong><code>.env.docker</code> does not come with you.</strong> It is <code>.gitignore</code>d, so the env has to be retyped in a dashboard. <code>config.ts</code> already handles a world with no env file &mdash; the <code>try/catch</code> around <code>loadEnvFile()</code> was written for today.</li>
+<li><strong>You do not choose the port any more.</strong> Render hands you <code>PORT</code> and requires <code>0.0.0.0</code>. Your <code>HOST</code> default is <code>127.0.0.1</code>, which on Render means <em>the deploy fails</em> with a message about port scanning.</li>
+<li><strong>Then the three that have been wrong on purpose since lesson 29:</strong> <code>NODE_ENV=production</code>, <code>TRUST_PROXY=true</code>, and <code>ALLOWED_ORIGINS</code>. All three are only correct because there is now real HTTPS and a real proxy.</li>
+<li><strong>And then your login breaks &mdash; on the local front end, not on Render.</strong> It is not CORS. Finding out why is the last section, and it is the most valuable thing in this lesson.</li>
+<li><strong>Streak intact: no new dependency, 56 lessons.</strong></li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<pre><code>server: npm test          <b>172 passing</b>
+server: Dockerfile + docker-entrypoint.sh    lesson 52 + 54
+Postgres: <b>Neon, ap-southeast-1</b>    lesson 55
+server: .env.docker    owner &rarr; direct, tasks_app &rarr; -pooler
+git: <b>nothing. no repository anywhere in this workspace.</b></code></pre>
+<p>Nothing in <code>src/</code> is touched today. You create a repository, click through a form, and type eight values into a web page.</p>
+
+<h2>Step 1 &mdash; the repository, and the two lines that come first</h2>
+<p>Order matters here in a way it does almost nowhere else. <code>git init</code> then <code>git add .</code> is one command away from a commit that contains your Neon password, and a commit is not undone by deleting the file &mdash; only by rewriting history or rotating the secret. You rotated that password yesterday. Do not do it twice.</p>
+<p>Your root <code>.gitignore</code> already gained <code>.env.docker</code> last lesson. Two things are still missing, and both of them will be swept up by <code>git add .</code>:</p>
+<pre><code>.neon
+.env.local
+node_modules/
+.env.docker
+<b>.env</b>
+<b>.DS_Store</b></code></pre>
+<p><code>server/.env</code> is the file <code>npm test</code> and <code>npm run dev</code> read on your Mac. It holds the owner URL for your <em>local</em> Postgres, which is a real credential for a database on a machine you care about. <code>server/.gitignore</code> lists <code>.env</code> already &mdash; but a nested <code>.gitignore</code> only helps if you trust it to exist for every directory you ever add. One line at the root covers the whole tree.</p>
+<p class="dim">A <code>.gitignore</code> pattern with no slash in it matches at any depth, so <code>.env</code> covers <code>server/.env</code> and <code>web/.env</code> alike, and <code>node_modules/</code> covers all three of them.</p>
+<p>Now check your work <em>before</em> committing, with the one command that answers the only question that matters:</p>
+<pre><code>cd ~/learning/full-stack-learning
+git init
+git add -A
+<b>git status --short | grep -i env</b></code></pre>
+<p>What you want back is <code>A  server/.env.example</code> and nothing else. If <code>.env.docker</code> or <code>.env</code> appears, you have not committed yet and the fix is free. That is the whole reason for the <code>git add</code> / <code>grep</code> pair &mdash; the index is a rehearsal, and this is the moment to read it.</p>
+<p class="takeaway"><b><code>git add</code> is reversible. <code>git commit</code> is forever.</b> Between those two commands there is a free, complete list of exactly what you are about to make permanent. Almost nobody reads it. Read it whenever the thing you are adding is a whole project.</p>
+<p>Then commit and push. <code>gh</code> is already installed and does the create, the remote and the push in one line:</p>
+<pre><code>git commit -m "Team task tracker: API, front end, docker, lessons"
+gh repo create full-stack-learning <b>--private</b> --source=. --push</code></pre>
+<p class="dim"><code>--private</code>, not because the code is secret, but because a public repo is a thing you have to keep being careful about forever. Make it public the day you want someone to read it.</p>
+
+<h3>One repository, two apps</h3>
+<p>You are committing the whole workspace: <code>server/</code>, <code>web/</code>, <code>deploy/</code>, and every lesson and record. That is deliberate. Render is happy to build a subdirectory of a bigger repo &mdash; there is a field for it, which you meet in the next step &mdash; and one repository means the front end (lesson 57) needs no second one.</p>
+
+<h2>Step 2 &mdash; the form, field by field</h2>
+<p>On <a href="https://dashboard.render.com">dashboard.render.com</a>: <b>New &rarr; Web Service</b>, connect GitHub, pick the repo. Then four fields decide everything:</p>
+<div class="scroll"><table>
+<tr><th>Field</th><th>Value, and why</th></tr>
+<tr><td><b>Language</b></td><td><code>Docker</code>. This is the whole point. Render <a href="https://render.com/docs/docker">builds your <code>Dockerfile</code> with BuildKit</a> and runs the image &mdash; so the thing that runs in Singapore is the thing you have been running on your Mac since lesson 52. Every other option here would ask you to re-describe your app in Render&rsquo;s vocabulary.</td></tr>
+<tr><td><b>Root Directory</b></td><td><code>server</code>. Render &ldquo;runs commands and interacts with files relative to your service&rsquo;s root directory&rdquo;, so the <code>Dockerfile</code> is found, and &mdash; the part that matters &mdash; the <b>build context</b> becomes <code>server/</code>. That is the same context compose gives it (<code>build: .</code> inside <code>server/</code>), which is why <code>COPY package*.json ./</code> still resolves and why <code>server/.dockerignore</code> is still the one that is read.</td></tr>
+<tr><td><b>Instance Type</b></td><td><code>Free</code>. 750 instance-hours a month, and the service <b>spins down after 15 minutes without inbound traffic</b>; the next request wakes it and &ldquo;takes about one minute&rdquo;. Know that number before you think your app is broken.</td></tr>
+<tr><td><b>Branch</b></td><td><code>main</code>. Every push to it rebuilds and redeploys. Nothing else to configure.</td></tr>
+</table></div>
+<p>Leave <b>Docker Command</b> empty. That field overrides your <code>CMD</code>, and your <code>CMD</code> is already right. Note what it does <em>not</em> override: <code>ENTRYPOINT</code>. That split you learned in lesson 54 is what lets Render start your app without being told about migrations at all.</p>
+
+<h2>Step 3 &mdash; the env, retyped</h2>
+<p>Under <b>Environment Variables</b>, eight entries. This is <code>.env.docker</code> with three values changed and one deleted:</p>
+<pre><code>DATABASE_URL       postgresql://neondb_owner:...@ep-rough-lake-b3eflvt5.c-4...neon.tech/neondb?sslmode=require
+APP_DATABASE_URL   postgresql://tasks_app:...@ep-rough-lake-b3eflvt5<b>-pooler</b>.c-4...neon.tech/neondb?sslmode=require
+NODE_ENV           <b>production</b>
+TRUST_PROXY        <b>true</b>
+ALLOWED_ORIGINS    <b>https://&lt;your-service&gt;.onrender.com</b>
+HOST               <b>0.0.0.0</b>
+LOG_LEVEL          info
+<span class="dim">PORT               &mdash; do not set it. Render does.</span>
+<span class="dim">APP_PASSWORD       &mdash; gone. It existed for psql at container init. Neon has no init.</span></code></pre>
+<p>Two of those lines deserve a paragraph each.</p>
+
+<h3><code>HOST=0.0.0.0</code>, or the deploy fails</h3>
+<p>Read your own <code>config.ts</code>:</p>
+<pre><code>HOST: z.string().min(1).default(<b>"127.0.0.1"</b>),</code></pre>
+<p>And your own <code>server.ts</code> comment: <em>&ldquo;Default host is loopback on purpose &mdash; binding 0.0.0.0 puts the API on the public internet with no TLS in front of it.&rdquo;</em> That was correct then and is correct now; what changed is that Render&rsquo;s router <em>is</em> the TLS, and it reaches your container over the network, not over loopback. Render states the requirement flatly: <a href="https://render.com/docs/web-services#port-binding">&ldquo;Every Render web service must bind to a port on host <code>0.0.0.0</code> to serve HTTP requests.&rdquo;</a></p>
+<p>Miss it and you get a deploy that <em>builds fine</em> and then dies with:</p>
+<pre><code>==&gt; Port scan timeout reached, no open ports detected. Bind your service to at
+    least one port.</code></pre>
+<p>That message names a port problem. The cause is a <em>host</em> problem: the port was open, on an address nothing outside the container can reach.</p>
+<p class="dim">Your <code>.env.docker</code> has had <code>HOST=0.0.0.0</code> since lesson 52, for the same reason &mdash; compose reaches the container over a bridge network, not over its loopback. So this value is not new to you. It is new to <em>Render</em>, because dashboard env vars start from nothing.</p>
+
+<h3><code>PORT</code>: given, not chosen</h3>
+<p>Render <a href="https://render.com/docs/web-services#port-binding">sets <code>PORT</code> for every web service, defaulting to <code>10000</code></a>. Your config reads <code>PORT</code> and defaults to 3000; the platform&rsquo;s value wins because it is really in the environment. Nothing to do &mdash; but <b>do not set <code>PORT</code> yourself</b>, because then you are asserting a number the router may not be scanning for.</p>
+<p>Your <code>EXPOSE 3000</code> line becomes a lie in production. Leave it: the Dockerfile itself says that line is documentation and publishes nothing. A stale comment in a file is cheap; a wrong <code>PORT</code> in an environment is a failed deploy.</p>
+<p class="takeaway"><b>On your laptop you pick the address. On a platform you are told the address.</b> That is the actual difference between the two environments, and every &ldquo;works locally, not deployed&rdquo; port bug is this sentence. The reason it costs you nothing today is your own <code>config.ts</code> rule: read every value from the environment, and default only what is visibly wrong in one second.</p>
+
+<h3>The three that were wrong on purpose</h3>
+<div class="scroll"><table>
+<tr><th>Value</th><th>What it turns on, and what would have broken had you set it earlier</th></tr>
+<tr><td><code>NODE_ENV=production</code></td><td>Adds <code>Secure</code> to the session cookie (<code>session.ts</code>) and turns on HSTS. A <code>Secure</code> cookie is <em>dropped by the browser</em> over plain <code>http://localhost</code> &mdash; so on your Mac this value logs you out and tells you nothing. Here there is real TLS, so it is simply correct.</td></tr>
+<tr><td><code>TRUST_PROXY=true</code></td><td>Fastify reads <code>X-Forwarded-For</code> instead of the socket address. Render&rsquo;s router is a proxy you do not control but do sit behind: without this, every request in your audit log comes from Render&rsquo;s internal address and your lesson-12 per-IP rate limit is <b>one bucket for the entire internet</b>. With it set while nothing is in front of you, anyone picks their own bucket by sending a header. The value is not &ldquo;on in production&rdquo;. It is &ldquo;on when something you trust writes that header&rdquo;.</td></tr>
+<tr><td><code>ALLOWED_ORIGINS</code></td><td>Your Render URL for now. There is no deployed front end yet, and <code>origin: true</code> is still forbidden for the reason lesson 13 gave. Lesson 57 adds the front end&rsquo;s real origin here.</td></tr>
+</table></div>
+
+<h2>Step 4 &mdash; watch it come up</h2>
+<p>Click create. The build log is <code>docker build</code>, which you can read already. Then the deploy log should be lesson 54&rsquo;s boot, from a different continent:</p>
+<pre><code>==&gt; Running './docker-entrypoint.sh npm start'
+15 migrations found in prisma/migrations
+No pending migrations to apply.
+Script executed successfully.
+{"level":30,...,"msg":"Server listening at http://0.0.0.0:10000"}
+==&gt; Your service is live 🎉</code></pre>
+<p>Read line three. <code>No pending migrations to apply</code> &mdash; because you already migrated this Neon database from your laptop last lesson. Your entrypoint ran, took the advisory lock on the direct connection, found nothing to do, and got out of the way. Line four, the <code>REVOKE</code>, ran again and is equally idempotent.</p>
+<p>That is the payoff for lesson 54 being its own lesson. <b>Render was never told that this app has migrations.</b> There is no release command, no pre-deploy step, no checkbox. The container knows how to start itself, so anything that can start a container can deploy it.</p>
+<p>Then, from your Mac:</p>
+<pre><code>curl -i https://&lt;your-service&gt;.onrender.com/health</code></pre>
+<p>First call may take a minute &mdash; that is the free instance waking, plus Neon waking. Both are cold. Then log in with curl and look at the cookie you get back:</p>
+<pre><code>curl -i -X POST https://&lt;your-service&gt;.onrender.com/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"jay@example.com","password":"..."}'</code></pre>
+<p>In the response headers: <code>set-cookie: session=...; HttpOnly; SameSite=Lax; Path=/; Expires=...; <b>Secure</b></code>. That <code>Secure</code> has been written in your code since lesson 29 and has never once been emitted. It exists now because <code>NODE_ENV</code> is finally telling the truth.</p>
+
+<h2>The failure you should cause on purpose</h2>
+<p>You will hit this one whether you cause it or not, so cause it deliberately and understand it in five minutes instead of an evening.</p>
+<p>Point your local front end at the deployed API &mdash; <code>web/.env</code>, one line: <code>VITE_API_URL=https://&lt;service&gt;.onrender.com</code>, which <code>web/src/lib/api.ts</code> reads in place of its <code>http://localhost:3000</code> fallback. Run <code>npm run dev</code> and log in at <code>http://localhost:5173</code>.</p>
+<p>The login request succeeds. <b>The next request is a 401.</b></p>
+<p>Now work out which of the three plausible culprits it is, because they need three different fixes:</p>
+<div class="scroll"><table>
+<tr><th>Suspect</th><th>Verdict</th></tr>
+<tr><td>CORS</td><td>Not guilty, and it is the one you will blame. If CORS had blocked it, the login itself would have failed in the console with an origin message &mdash; and you would fix it by adding <code>http://localhost:5173</code> to <code>ALLOWED_ORIGINS</code>. Do add it. It is not why you are logged out.</td></tr>
+<tr><td><code>Secure</code></td><td>Not guilty. The cookie arrived over <code>https://</code>, so the browser stored it.</td></tr>
+<tr><td><code>SameSite=Lax</code></td><td><b>Guilty.</b> <code>localhost:5173</code> and <code>onrender.com</code> are different sites. <code>Lax</code> means: do not send this cookie on a cross-site request &mdash; and a <code>fetch()</code> from one site to another is exactly that. The cookie is sitting in the browser, and the browser is refusing to attach it.</td></tr>
+</table></div>
+<p>The fix is not a flag. <code>SameSite=None</code> would work and would delete the CSRF protection lesson 29 bought with that line. The fix is to <b>stop being cross-site</b>: serve the page and the API from one origin. Which is what <code>deploy/nginx.conf</code> has been waiting to do since lesson 53, and what lesson 57 is.</p>
+<p class="takeaway"><b>A deploy does not break your code. It stops your assumptions from being true.</b> Every flag that failed today was correct &mdash; correct for one origin, one scheme, one machine. The work of deploying is finding which sentence you stopped being able to say.</p>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why must <code>HOST</code> be <code>0.0.0.0</code> on Render?</p>
+<button>Its router reaches you over the network</button>
+<button>Its proxy needs the port published first</button>
+<p class="why" hidden>Render&rsquo;s router is a separate machine from your container, so it arrives on the container&rsquo;s network address, not its loopback. <code>127.0.0.1</code> accepts only connections that originate inside the container. The deploy fails with a <em>port</em> scan message for what is really a <em>host</em> mistake &mdash; and the port itself was open the whole time.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why leave the <b>Docker Command</b> field empty?</p>
+<button>Render ignores it for Dockerfile builds</button>
+<button>It replaces CMD, and CMD is correct</button>
+<p class="why" hidden>It overrides <code>CMD</code> only, never <code>ENTRYPOINT</code>. Your <code>CMD</code> is already <code>npm start</code>, so there is nothing to say &mdash; and the migrations run regardless, because they live in the <code>ENTRYPOINT</code>. That is the lesson-54 split doing its job on a platform that has never heard of it.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Local page, deployed API, logged out. Cause?</p>
+<button>CORS refused the credentialed fetch call</button>
+<button>SameSite=Lax skips cross-site requests</button>
+<p class="why" hidden>Two different sites, so <code>Lax</code> tells the browser not to attach the cookie. The cookie was stored fine and CORS let the login through. Loosening <code>SameSite</code> would fix the symptom and hand back the CSRF defence; putting the page and the API on one origin fixes the cause.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Yesterday&rsquo;s diagram with the left-hand box moved. Nothing inside the container changed.</p>
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  BROWSER["your browser"] -->|"https"| ROUTER
+  subgraph RENDER["Render &mdash; Singapore"]
+    ROUTER["router / TLS<br/>X-Forwarded-For"] -->|":10000 on 0.0.0.0"| EP["docker-entrypoint.sh<br/>&rarr; npm start"]
+  end
+  subgraph NEON["Neon &mdash; ap-southeast-1"]
+    POOL["PgBouncer<br/>-pooler"] --> PG[("neondb")]
+    DIR["direct"] --> PG
+  end
+  EP -->|"DATABASE_URL<br/>migrate + lock"| DIR
+  EP -->|"APP_DATABASE_URL<br/>every request"| POOL
+  MAC["your Mac<br/>git push"] -.->|"rebuild"| RENDER
+</pre>
+<figcaption>The Mac is now only a place you type. Your laptop can be shut and the URL still answers &mdash; after about a minute, if nobody has called it for fifteen.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div>the front end <span class="dim">lesson 57: <code>web/</code> as a second Render service, or nginx serving the built page and proxying <code>/api</code> so that page and API are one origin. The <code>SameSite</code> failure above is that lesson&rsquo;s reason to exist, and you will have felt it first.</span></div>
+<div>a real build step <span class="dim"><code>npm start</code> is <code>tsx src/server.ts</code> &mdash; TypeScript compiled on the fly, dev tooling in a production image. It works and it is slower and larger than <code>tsc</code> plus <code>node</code>. Worth doing when the image size or the boot time is a number you actually care about, not before.</span></div>
+<div><code>render.yaml</code> <span class="dim">the same settings as code instead of dashboard clicks. It earns its place at the second service, or the second environment &mdash; which is lesson 57 and probably a good reason to write it then.</span></div>
+<div>health checks and zero-downtime deploys <span class="dim">Render has a health-check path setting, and your <code>/health</code> route is right there. It matters when a bad deploy would take down something people use. Nobody uses this yet.</span></div>
+<div>keeping it awake <span class="dim">a cron pinging <code>/health</code> every ten minutes defeats the spin-down &mdash; and burns your 750 instance-hours (a month is 720). The sleep is the price of free, and it is the right price for a tracker you are still building.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://render.com/docs/web-services#port-binding">Render &mdash; port binding</a>, four paragraphs, and the one page that explains the most common failed deploy in the world. Then <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Cookies#controlling_third-party_cookies_with_samesite">MDN on <code>SameSite</code></a> &mdash; read the definition of &ldquo;same site&rdquo; carefully, because it is not the same thing as &ldquo;same origin&rdquo;.</p>
+<p><b>Then this:</b> ten minutes. Change one word in a comment in <code>server/src/app.ts</code>, commit, push, and watch Render rebuild on its own. Then open your Render URL, leave it for twenty minutes, and load it again with your laptop&rsquo;s Wi-Fi off &mdash; it still answers. That is the thing you have actually built today.</p>
+<p><b>Reference card:</b> <a href="../reference/environment.html">Environment</a> &mdash; it needs a new column today: the value on your Mac, and the value on Render. Three of them differ. <a href="../reference/sessions-and-cookies.html">Sessions and cookies</a> is where the <code>SameSite</code> finding belongs.</p>
+<p><b>Ask the community:</b> <a href="https://community.render.com/">Render&rsquo;s community forum</a>. Good question for them: <em>with a Docker service whose <code>ENTRYPOINT</code> runs <code>prisma migrate deploy</code>, is there any reason to use a pre-deploy command instead &mdash; what does it protect me from?</em></p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0055-the-database-that-is-not-on-your-laptop.html">&larr; Back</a>
+<a href="../reference/environment.html">Environment reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

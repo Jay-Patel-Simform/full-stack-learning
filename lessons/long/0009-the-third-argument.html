@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 9 — The Third Argument</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 09 &middot; Week 5&ndash;6 &middot; RBAC</p>
+<h1>The third argument</h1>
+<p class="lede">Your API has a hole, and you already know about it. An <code>ADMIN</code> can remove the <code>OWNER</code>. Today you close it &mdash; by teaching <code>can()</code> to look at the <em>thing being acted on</em>, not only at the person acting.</p>
+
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>&ldquo;An admin may remove a member, but not the owner&rdquo; has <em>three</em> parts. Your function had room for two.</li>
+<li>Add the third: the thing being acted on. <code>can(role, action, resource)</code>.</li>
+<li>The rule is one comparison: you may only act on somebody <strong>strictly below</strong> you.</li>
+<li>The <em>gate</em> fetches the target, never the handler. A check in a handler is a check you can forget.</li>
+<li>Same rule closed a second hole for free: an admin can no longer invite a new OWNER.</li>
+</ul>
+</div>
+
+<h2>Why the hole exists</h2>
+<p>Look at the shape of the question you have been asking:</p>
+<pre><code>can(role, action)</code></pre>
+<p>Two facts go in. <em>Who</em> you are, and <em>what</em> you want to do. The answer comes from a fixed table (<a href="../0007-one-place-that-says-no.html">lesson 7</a>).</p>
+<p>Now say the rule you want, out loud: <strong>"an admin may remove a member, but not the owner."</strong></p>
+<p>Count the things in that sentence. Three. The admin, the removing, and <em>the owner</em>. Your function has room for two. That is the whole bug. Not a missing <code>if</code> &mdash; a missing <em>argument</em>.</p>
+<blockquote>"An access control policy&hellip; decides whether a <em>subject</em> may perform an <em>operation</em> on an <em>object</em>." &mdash; <a href="https://csrc.nist.gov/glossary/term/access_control_policy">NIST, glossary</a></blockquote>
+<p>Subject, operation, object. Everybody who has ever built this ends up with three. You are about to add the third.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  A["Subject<br/>the admin"] --> OP["Operation<br/>member:remove"]
+  OP --> O["Object<br/>the owner"]
+  A -.-> C2["can(role, action)<br/>yesterday: sees 2"]
+  O -.-> C3["can(role, action, resource)<br/>today: sees 3"]
+</pre>
+<figcaption>Subject, operation, object. Everybody who builds this ends up with three. The bug was never a missing <code>if</code> &mdash; it was a missing argument.</figcaption>
+</figure>
+
+<h2>Where does the third fact get fetched?</h2>
+<p>This was your homework question, and it is the real content of the lesson. The target's role is in the database. Somebody has to go and get it. Route, gate, or store?</p>
+<p>Here is the answer most people write, and it is wrong:</p>
+<pre><code>// in the route handler
+const target = await getRole(teamId, userId);
+if (target === "OWNER") return reply.code(403).send(...);
+await removeMember(teamId, userId);</code></pre>
+<p>It works. Ship it and the test passes. It is still wrong, for one reason:</p>
+<blockquote>A handler only runs <em>after</em> the gate has already said yes. So a check inside a handler is a gate you can forget to write.</blockquote>
+<p>That is <a href="../0007-one-place-that-says-no.html">lesson 7</a>'s argument again, one level up. You did not put the role check in the handler, so do not put the rank check there either. Same rule, same reason: <strong>make the safe thing the default and the unsafe thing deliberate</strong>. A route with no gate is obviously naked. A route with a gate and a hidden second rule in the body is the dangerous one, because it <em>looks</em> guarded.</p>
+<p>So: the gate fetches it. Which means the gate can no longer be a plain <code>(action) =&gt; hook</code> factory. It needs to be told <em>how</em> to find the target.</p>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why not fetch the target's role inside <code>can()</code> itself?</p>
+<button>Because <code>can()</code> would need the request, and requests are not typed</button>
+<button>Because <code>can()</code> would need a database, and pure rules need neither</button>
+<p class="why" hidden>Right: <code>can.test.ts</code> runs with no Postgres at all. Keep the decision pure; let the gate do the fetching.</p>
+</div>
+
+<h2>The rule, in one comparison</h2>
+<p>You could write a special case: "if the action is <code>member:remove</code> and the target is <code>OWNER</code>, no." Don't. One special case becomes nine.</p>
+<p>Your four roles already sit in a line, least to most powerful. <code>ROLES</code> in <code>can.ts</code> is that line. So the rule is just a position on it:</p>
+<blockquote>You may only act on somebody <strong>strictly below</strong> you.</blockquote>
+<p>Strictly. Equal rank is a no too &mdash; an admin cannot remove a fellow admin. One comparison, and look how much it covers:</p>
+<div class="scroll">
+<table>
+<tr><th>actor</th><th>target</th><th>answer</th><th>why</th></tr>
+<tr><td>ADMIN</td><td>OWNER</td><td>no</td><td>target is above</td></tr>
+<tr><td>ADMIN</td><td>ADMIN</td><td>no</td><td>equal is not below</td></tr>
+<tr><td>ADMIN</td><td>MEMBER</td><td>yes</td><td>target is below</td></tr>
+<tr><td>OWNER</td><td>ADMIN</td><td>yes</td><td>target is below</td></tr>
+<tr><td>VIEWER</td><td>VIEWER</td><td>no</td><td>the table said no first</td></tr>
+</table>
+</div>
+<p>Read that last row twice. The rank rule never ran. The <em>table</em> already refused, because <code>VIEWER</code> was never granted <code>member:remove</code>. Two questions, in order:</p>
+<ol>
+<li>Does the table grant this role the action at all?</li>
+<li>If there is a target, does this role outrank it?</li>
+</ol>
+<p>Question one still guards everything it guarded yesterday. The rank rule can only take permission away, never add it.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  START["can(role, action, resource)"] --> Q1{"Does the table grant<br/>this role the action?"}
+  Q1 -- "no" --> NO1["false<br/>(same as yesterday)"]
+  Q1 -- "yes" --> Q2{"Is there a target?"}
+  Q2 -- "none" --> YES1["true"]
+  Q2 -- "yes" --> Q3{"rank(actor) &gt; rank(target)?"}
+  Q3 -- "no, equal or above" --> NO2["false"]
+  Q3 -- "yes, strictly below" --> YES2["true"]
+</pre>
+<figcaption>Two questions, in that order. The rank rule can only take permission away, never add it &mdash; so nothing you allowed yesterday quietly changed.</figcaption>
+</figure>
+
+<h2>The code</h2>
+<p><code>server/src/auth/can.ts</code>. A type for the target, and one more comparison:</p>
+<pre><code>// The *thing being acted on*. Lesson 9's third argument.
+export type Resource = { targetRole?: Role | undefined };
+
+// Derived from ROLES so there is no second list to drift.
+const rank = (role: Role): number =&gt; ROLES.indexOf(role);
+
+export function can(role: Role | undefined, action: Action, resource?: Resource): boolean {
+  if (role === undefined) return false;
+  if (!(PERMISSIONS[role]?.includes(action) ?? false)) return false;
+
+  const target = resource?.targetRole;
+  if (target !== undefined &amp;&amp; rank(role) &lt;= rank(target)) return false;
+
+  return true;
+}</code></pre>
+<p>Three small decisions in there, each worth naming.</p>
+<p><strong><code>rank</code> is derived, not written.</strong> You already have the order in <code>ROLES</code>. A second hand-typed list (<code>{ VIEWER: 0, MEMBER: 1&hellip; }</code>) would be a thing to keep in sync, and one day it would not be. Same move as importing <code>Role</code> from the Prisma enum instead of retyping the names (<a href="../0008-a-role-is-a-row.html">lesson 8</a>).</p>
+<p><strong>The third argument is optional.</strong> <code>can(role, action)</code> still compiles and still answers exactly what it answered before. Most actions have no target: <code>team:delete</code> aims at the team, <code>task:create</code> aims at nothing yet. There is a test that proves every old call is unchanged &mdash; look for it below.</p>
+<p><strong>A junk target loses to everyone.</strong> <code>ROLES.indexOf("SUPERUSER")</code> is <code>-1</code>, so the actor always outranks it. That is deliberate, and it is the opposite of deny-by-default &mdash; on purpose. Deny-by-default protects you from an <em>actor</em> you cannot read. A <em>target</em> you cannot read must not be allowed to lock a real owner out of their own team.</p>
+
+<h2>Teaching the gate to fetch</h2>
+<p><code>server/src/auth/require-permission.ts</code>. The factory takes a second, optional argument: a small function that knows where the target lives.</p>
+<pre><code>export type Load = (request: FastifyRequest) =&gt; Promise&lt;Resource&gt;;
+
+// The person named in the URL: DELETE /teams/:teamId/members/:userId
+export const targetMember: Load = async (request) =&gt; {
+  const { teamId, userId } = request.params as { teamId: number; userId: number };
+  return { targetRole: await getRole(teamId, userId) };
+};
+
+export function requirePermission(action: Action, load?: Load) {
+  return async function gate(request, reply) {
+    const { teamId } = request.params as { teamId: number };
+    const role = await getRole(teamId, request.userId!);
+
+    const resource = load ? await load(request) : undefined;
+
+    if (!can(role, action, resource)) return reply.code(403).send({ error: "forbidden" });
+    request.role = role;
+  };
+}</code></pre>
+<p>And the route says what it needs, still without naming a single role:</p>
+<pre><code>preHandler: requirePermission("member:remove", targetMember),</code></pre>
+<p>The <code>ponytail:</code> comment that admitted the hole is gone from <code>teams.route.ts</code>. Go and look &mdash; a shipped hole should leave a visible scar when it closes.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  R["DELETE /teams/3/members/9"] --> G["requirePermission<br/>('member:remove', targetMember)"]
+  G --> L1["getRole(3, me)<br/>= ADMIN"]
+  G --> L2["targetMember loads<br/>getRole(3, 9) = OWNER"]
+  L1 --> C["can(ADMIN, member:remove,<br/>{ targetRole: OWNER })"]
+  L2 --> C
+  C -- "false" --> F["403<br/>handler never runs"]
+  C -- "true" --> H["handler"]
+</pre>
+<figcaption>The <code>load</code> function is the only new part. It knows where the target lives &mdash; in the URL here, in the request body for the invite route. The rule itself never changed.</figcaption>
+</figure>
+
+<h2>The same rule, for free, on another route</h2>
+<p>Here is the payoff of writing a rule instead of a special case. Your invite route had the <em>same</em> hole, and you had not noticed: an <code>ADMIN</code> could invite a stranger as <code>OWNER</code>. Remove the owner in one request, promote yourself in the next.</p>
+<p>The target there is not a person in the database. It is the role in the request body. Different place, same shape:</p>
+<pre><code>export const grantedRole: Load = async (request) =&gt; {
+  const { role } = request.body as { role: Role };
+  return { targetRole: role };
+};</code></pre>
+<pre><code>preHandler: requirePermission("member:invite", grantedRole),</code></pre>
+<p>No change to <code>can()</code>. The rule already said "you may only act on somebody strictly below you", and handing out a role counts.</p>
+<div class="aside">
+<p><strong>Why <code>preHandler</code> matters more now.</strong> <code>grantedRole</code> reads <code>request.body</code>. In an <code>onRequest</code> hook the body has not been parsed or validated yet, so it would be <code>undefined</code>. <a href="../0008-a-role-is-a-row.html">Lesson 8</a>'s rule holds: <em>pick the hook by what it needs, not by habit</em>.</p>
+</div>
+
+<h2>The tests</h2>
+<p>Two kinds again, and the split is the same as last lesson. Pure decision tests in <code>can.test.ts</code>, real HTTP in <code>teams.test.ts</code>.</p>
+<p>The most valuable one is the boring one:</p>
+<pre><code>test("a missing target leaves the old answer alone", () =&gt; {
+  for (const role of ROLES) {
+    for (const action of ACTIONS) {
+      assert.equal(can(role, action, {}), can(role, action));
+    }
+  }
+});</code></pre>
+<p>Thirty-six comparisons, written once. It says: <em>I changed the shape of the most security-critical function in this codebase, and I did not change any answer it used to give.</em> When you touch a rule everything depends on, prove the old behaviour survived.</p>
+<p>Then the enforcement test, over a real request, asserting status <strong>and</strong> state:</p>
+<pre><code>test("an admin cannot remove the owner", async () =&gt; {
+  const r = await removeMemberAs("admin", ids.owner!);
+  assert.equal(r.statusCode, 403);
+  assert.ok(await prisma.membership.findUnique({
+    where: { teamId_userId: { teamId, userId: ids.owner! } },
+  }));
+});</code></pre>
+<p><code>npm test</code> is now <strong>40 passing</strong>, up from 28.</p>
+
+<div class="quiz" data-answer="0">
+<p class="q">Removing somebody who is in no team at all now answers 404, not 403. Why?</p>
+<button>No membership means no target role, so the rank rule never runs</button>
+<button>No membership means no target role, so the gate skips the whole check</button>
+<p class="why" hidden>Right: <code>targetRole</code> is <code>undefined</code>, the rank rule sits out, and the handler answers for itself. The owner was allowed to ask &mdash; there was simply nobody there.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Which change would break the rank rule without breaking a single test?</p>
+<button>Adding a role to the Prisma enum but not to <code>PERMISSIONS</code></button>
+<button>Reordering <code>ROLES</code> so it no longer runs weakest to strongest</button>
+<p class="why" hidden>Right: <code>rank</code> reads positions out of <code>ROLES</code>. The order is now load-bearing, not documentation. Your homework adds the guard.</p>
+</div>
+
+<h2>Read this</h2>
+<p><strong>Primary source:</strong> <a href="https://www.osohq.com/academy/what-is-rbac">Oso Authorization Academy &mdash; RBAC</a>, stage three: <em>Resource-Specific Roles</em>. You have just taken half a step into it. Oso's stage three moves the whole role onto the resource; you have kept team-level roles and only let the rule <em>look at</em> the target. Read it to see where this goes next, and notice you do not need to go there yet.</p>
+<p>Then skim <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html">OWASP &mdash; Authorization Cheat Sheet</a>, the section "Enforce Authorization Checks on Static Resources" and the one above it. It is the same argument as this lesson: one enforcement point, no per-handler exceptions.</p>
+
+<h2>Do this before lesson 10</h2>
+<ol>
+<li>Run <code>cd server &amp;&amp; npm test</code>. 40 pass.</li>
+<li>Open <code>server/src/auth/can.ts</code>. Delete the word <code>strictly</code> from the rule &mdash; that is, change <code>&lt;=</code> to <code>&lt;</code>. Run the tests. Read which one fails, and say out loud what an admin can now do to another admin. Put it back.</li>
+<li>Write the guard the second quiz asked for: a test in <code>can.test.ts</code> proving <code>ROLES</code> is ordered weakest to strongest. Hint &mdash; you already have a test named "more senior roles never lose a power". It nearly does this. Make it explicit.</li>
+<li>Attack it by hand, as an admin, with <code>curl</code>: try to remove the owner, then try to invite yourself a second account as OWNER. Both must be <code>403</code>. Save the commands next to last lesson's.</li>
+<li>Find the same mistake elsewhere in your own code. Open <code>server/src/store/task.store.ts</code> and look at <code>where: { id, ownerId }</code>. That is a permission rule &mdash; "you may only touch your own task" &mdash; and it is not in <code>can()</code>, not in a gate, and has no test. Write down, in one sentence, why that is the same problem as putting the rank check in a handler.</li>
+</ol>
+<p>Then two questions to bring me:</p>
+<ol>
+<li>An owner cannot remove themselves &mdash; equal rank. So a person can never leave a team they own. Is that a bug, a missing feature, or a correct refusal? If it needs fixing, does the fix belong in <code>can()</code>, in the gate, or somewhere else entirely?</li>
+<li>Your tasks are <em>still</em> not team-scoped, so half of <code>can()</code>'s table has no route behind it. To guard a task by a team role, <code>Task</code> needs a required <code>teamId</code> &mdash; a <code>NOT NULL</code> column on a table that already has rows. Postgres will refuse. Name three ways out, and say which one you would pick on a database with real users in it.</li>
+</ol>
+
+<div class="aside">
+<p>Stuck, or something felt hand-wavy? Ask me. I am your teacher here. Say what confused you and I will re-teach it another way. The "should an owner be able to leave?" question above is a genuinely arguable one &mdash; good to take to <a href="https://discord.gg/fastify">the Fastify Discord</a> or <a href="https://www.reddit.com/r/node/">r/node</a> and see how other people ruled on it.</p>
+</div>
+
+<hr>
+<p class="nav">Back: <a href="../0008-a-role-is-a-row.html">Lesson 8 &mdash; A role is a row</a> &middot; Keep for reference: <a href="../../reference/rbac-permissions.html">Roles &amp; permissions cheat sheet</a> &middot; <a href="../../reference/api-security-basics.html">API security basics</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a> &middot; Sources: <a href="../../RESOURCES.md">RESOURCES.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

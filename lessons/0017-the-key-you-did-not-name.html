@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 17 — Mass assignment</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.4rem 0 2.4rem; }
+.split > div { border: 1px solid var(--rule); border-radius: 6px; padding: 1rem 1.1rem; }
+.split h3 { margin: 0 0 .5rem; font-size: .95rem; }
+.split p { margin: 0 0 .5rem; font-size: .84rem; color: var(--muted); line-height: 1.5; }
+.split p:last-child { margin-bottom: 0; }
+.split .tag { font-family: var(--mono); font-size: .66rem; letter-spacing: .12em;
+  text-transform: uppercase; display: block; margin-bottom: .5rem; }
+.strip .tag { color: var(--muted); }
+.reject .tag { color: #2f6b3a; }
+.split .code { font-family: var(--mono); font-size: .74rem; line-height: 1.55;
+  background: var(--code-bg); padding: .5rem .6rem; border-radius: 4px;
+  display: block; margin: 0 0 .6rem; overflow-x: auto; white-space: pre; }
+.reject { border-color: #b6d3ba; background: #f7faf6; }
+.strip { border-style: dashed; }
+
+.pipe { list-style: none; padding: 0; margin: 1.3rem 0 2.2rem; }
+.pipe li { display: grid; grid-template-columns: 1.6rem 1fr auto; gap: .7rem;
+  align-items: center; padding: .7rem .9rem; border: 1px solid var(--rule);
+  border-radius: 5px; margin-bottom: .3rem; font-size: .85rem; }
+.pipe .n { font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+.pipe code { font-size: .8em; }
+.pipe .out { font-family: var(--mono); font-size: .68rem; letter-spacing: .06em;
+  padding: .2rem .5rem; border-radius: 3px; white-space: nowrap; }
+.pipe .pass .out { background: #f1f7f0; color: #2f6b3a; }
+.pipe .stop .out { background: #fdeeec; color: #93231a; }
+.pipe .why { grid-column: 2 / -1; font-size: .77rem; color: var(--muted);
+  margin: .3rem 0 0; line-height: 1.45; }
+.pipe .skip { border-style: dashed; }
+
+table.parts { font-size: .85rem; }
+table.parts .no { color: var(--muted); }
+.badge { font-family: var(--mono); font-size: .66rem; padding: .15rem .45rem;
+  border-radius: 3px; border: 1px solid var(--rule); white-space: nowrap; }
+.badge.on { background: #f1f7f0; border-color: #b6d3ba; color: #2f6b3a; }
+.badge.off { color: var(--muted); }
+
+.note { border-left: 3px solid var(--accent); padding: .1rem 0 .1rem 1rem;
+  margin: 1.6rem 0; font-size: .88rem; color: var(--muted); }
+.note strong { color: var(--ink); }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .reject { background: #17251a; border-color: #2f6b3a; }
+  :root:not([data-theme="light"]) .reject .tag { color: #7fbf8d; }
+  :root:not([data-theme="light"]) .pipe .pass .out { background: #17251a; color: #7fbf8d; }
+  :root:not([data-theme="light"]) .pipe .stop .out { background: #2a1614; color: #e58c80; }
+  :root:not([data-theme="light"]) .badge.on { background: #17251a; border-color: #2f6b3a; color: #7fbf8d; }
+}
+@media (max-width: 34rem) { .split { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 17 &middot; Week 7&ndash;8 &middot; API security</p>
+<h1>Mass assignment</h1>
+<p class="lede">Your handler does <code>data: { ...input, teamId, ownerId }</code> &mdash; the caller's JSON, spread straight into a database write. You are safe today for three reasons, none of which you chose.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>Mass assignment</strong>: the caller sends a key you never named, and your code passes it to the database anyway.</li>
+<li>You are already safe, because <code>z.object</code> <em>strips</em> unknown keys. You did not decide that. It is a default.</li>
+<li>Stripping is safe but silent. A front-end typo gets a 200 and changes nothing &mdash; the worst kind of bug to debug.</li>
+<li>Fix: four lines in <code>src/app.ts</code>, so every request <em>body</em> rejects an unnamed key with a 400.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  IN["POST /tasks<br/>{ title, ownerId: 99 }"] --> Z{"zod z.object"}
+  Z -- "default: strip" --> S["{ title }<br/>200 OK, silently"]
+  Z -- "strict()" --> R["400<br/>unrecognized key: ownerId"]
+  S --> DB[("write")]
+  R -.-> NO["never reaches the write"]
+</pre>
+<figcaption>Both paths are safe. Only one of them tells you something happened &mdash; and that difference is what you feel every day at work, debugging a front end that silently changes nothing.</figcaption>
+</figure>
+
+<h2>The idea</h2>
+<p>Count what is actually protecting you right now:</p>
+<ol>
+<li><code>z.object</code> strips keys you did not list. <em>A default you inherited.</em></li>
+<li>Your handler overwrites <code>ownerId</code> and <code>teamId</code> after the spread. <em>Ordering luck.</em></li>
+<li>Prisma rejects columns that do not exist. <em>Someone else's library.</em></li>
+</ol>
+<p>Three protections, zero decisions. That is a fine place to be safe from and a bad place to stay.</p>
+
+<div class="word"><b>strip</b> &mdash; silently drop the unknown key. Safe. Says nothing.</div>
+<div class="word"><b>reject</b> &mdash; answer 400 and name the key. Safe <em>and honest</em>.</div>
+
+<h2>The code &mdash; one place, not seven</h2>
+<pre><code>// src/app.ts — the validator compiler, four lines
+app.setValidatorCompiler(({ schema, httpPart }) =&gt; {
+  const s = httpPart === "body" &amp;&amp; schema instanceof ZodObject
+    ? schema.strict()
+    : schema;
+  return (data) =&gt; s.safeParse(data);
+});</code></pre>
+
+<p>The alternative was <code>.strict()</code> on all seven schemas. One place beats seven, and body number eight next month gets it for free.</p>
+
+<p><strong>Bodies only.</strong> A query string legitimately collects <code>utm_source</code>, <code>fbclid</code> and cache-busters. Rejecting those would break links, not attacks.</p>
+
+<p class="takeaway">Strip is safe. Reject is safe and honest. The honesty is worth more day to day.</p>
+
+<div class="aside"><strong>Two rules that came out of this:</strong> an <code>as</code> cast is not a check &mdash; it is a promise kept by something in another file, so say <em>which file</em> in a comment. And <code>strict</code> checks whether you <em>named</em> a key, never whether naming it was wise: <code>AddMember</code> names <code>role</code>, and <a href="./0009-the-third-argument.html">lesson 9</a>'s rank rule is what refuses escalation.</div>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">Stripping already stops the attack. Why switch to rejecting?</p>
+<button>Because stripping misses nested objects</button>
+<button>Because silence hides your own mistakes</button>
+<p class="why" hidden>Security-wise the two are equivalent here. The win is diagnostic: a front-end field name typo becomes a 400 that names the key, instead of a 200 that quietly changes nothing.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><code>npm test</code> &mdash; 101 tests, eight new in <code>src/routes/mass-assignment.test.ts</code>.</li>
+<li><code>curl -X POST .../tasks -d '{"title":"x","ownerId":99}'</code>. You want a 400 that names <code>ownerId</code>.</li>
+<li>Also confirm <code>?utm_source=x</code> on a <code>GET</code> still works. Bodies only.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Same request, twice. Both refuse the unnamed key. Only one says so.</p>
+
+<div class="split">
+<div class="strip">
+<span class="tag">Strip &mdash; zod&rsquo;s default</span>
+<h3><code>z.object({ title })</code></h3>
+<span class="code">POST /teams/7/tasks
+{ "title": "x",
+  "ownerId": 999 }
+
+&rarr; 201 Created</span>
+<p><strong>The attacker</strong> is stopped. <code>ownerId</code> is gone before the handler sees it.</p>
+<p><strong>You</strong> are lied to. Send <code>isDone</code> instead of <code>done</code> and you get a <code>200</code> with nothing changed. Then you debug your reducer for an hour.</p>
+</div>
+<div class="reject">
+<span class="tag">Reject &mdash; strict</span>
+<h3><code>z.object({ title }).strict()</code></h3>
+<span class="code">POST /teams/7/tasks
+{ "title": "x",
+  "ownerId": 999 }
+
+&rarr; 400 Bad Request
+Unrecognized key: "ownerId"</span>
+<p><strong>The attacker</strong> is stopped, identically.</p>
+<p><strong>You</strong> are told. The reply names the key, so a front-end typo is a ten-second fix instead of an hour.</p>
+</div>
+</div>
+
+<h2>Where the key dies</h2>
+<p class="lede" style="margin-bottom:1rem">One compiler in <code>src/app.ts</code>. Four lines, two of them just deciding whether the rule applies.</p>
+
+<ol class="pipe">
+<li class="pass skip"><span class="n">1</span>
+  <span>Is this the <strong>body</strong>? <code>httpPart === "body"</code></span>
+  <span class="out">else pass</span>
+  <p class="why">Params and query strings go straight through, unstrict. Dashed = the rule does not apply here.</p>
+</li>
+<li class="pass skip"><span class="n">2</span>
+  <span>Is the schema an object? <code>schema instanceof ZodObject</code></span>
+  <span class="out">else pass</span>
+  <p class="why"><code>.strict()</code> only exists on an object schema. An array or string body has no keys to argue about.</p>
+</li>
+<li class="pass"><span class="n">3</span>
+  <span><code>schema.strict()</code></span>
+  <span class="out">once</span>
+  <p class="why">Returns a <em>new</em> schema; yours is untouched. Runs at route registration, not per request. Per-request cost: zero.</p>
+</li>
+<li class="stop"><span class="n">4</span>
+  <span>Any key you never named?</span>
+  <span class="out">400</span>
+  <p class="why"><code>(root): Unrecognized key: "ownerId"</code>. The handler never runs, so <code>data: { ...input }</code> never sees it.</p>
+</li>
+<li class="stop"><span class="n">5</span>
+  <span>A <code>PATCH</code> with <em>zero</em> fields?</span>
+  <span class="out">400</span>
+  <p class="why">The other half of silent success. <code>.partial()</code> made every field optional <em>and</em> allowed none, so <code>{}</code> used to answer 200 and change nothing. One <code>.refine()</code> on <code>UpdateTask</code>.</p>
+</li>
+<li class="pass"><span class="n">6</span>
+  <span>Handler runs</span>
+  <span class="out">201</span>
+  <p class="why"><code>request.body</code> now holds only keys you named. The <code>as CreateTaskInput</code> cast is finally a true statement.</p>
+</li>
+</ol>
+
+<h2>Why only the body</h2>
+<table class="parts">
+<tr><th>Input</th><th>Strict</th><th>Because</th></tr>
+<tr><td><code>body</code></td><td><span class="badge on">yes</span></td><td>Your client composed every byte of it on purpose. An unnamed key is an attack or a typo, and both deserve a 400.</td></tr>
+<tr><td class="no"><code>querystring</code></td><td><span class="badge off">no</span></td><td><strong>This is the real reason for the check.</strong> Query strings collect keys nobody asked for &mdash; <code>?utm_source=newsletter</code>, <code>?fbclid=&hellip;</code>, a proxy cache-buster. Strict here turns a shared link into a 400.</td></tr>
+<tr><td class="no"><code>params</code></td><td><span class="badge off">no</span></td><td>Measured, not assumed: strict params break <strong>nothing</strong> in this app today &mdash; params hold exactly the URL segments you declared. Left out to match the query, not to avert a disaster.</td></tr>
+</table>
+
+<div class="note">
+<p><strong>What was protecting you before, and what you chose.</strong> Four things blocked <code>{"ownerId": 999}</code> yesterday: zod&rsquo;s default strip (a default), <code>ownerId</code> written after the spread (typing order), the output serializer (<em>your</em> decision, lesson 2), and an <code>as</code> cast (not a check at all &mdash; it does nothing at runtime). <strong>One of four.</strong> Free protection you cannot see is protection you delete by accident, on a Tuesday, for an unrelated reason.</p>
+</div>
+
+<hr>
+<p class="nav">Full lesson: <a href="./0017-the-key-you-did-not-name.html">Lesson 17 &mdash; The key you did not name</a> &middot; Reference: <a href="../reference/api-security-basics.html#mass-assignment">Mass assignment table</a> &middot; The code: <a href="../server/src/app.ts">server/src/app.ts</a></p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://cheatsheetseries.owasp.org/cheatsheets/Mass_Assignment_Cheat_Sheet.html">OWASP Mass Assignment Cheat Sheet</a>.</p>
+<p><b>The long version:</b> <a href="./long/0017-the-key-you-did-not-name.html">the seven-schema alternative, costed</a>.</p>
+<p>Ask me about the <code>.refine()</code> on <code>UpdateTask</code>. <code>.partial()</code> also allowed a completely empty patch.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0016-who-asked-for-this-write.html">&larr; Back</a>
+<a href="./0018-the-route-nobody-audited.html">Next: the route nobody audited &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

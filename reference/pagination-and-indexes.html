@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference — Pagination and Indexes</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<p class="kicker">Reference &middot; from lesson 30</p>
+<h1>Pagination and indexes</h1>
+<p class="lede">Quick-reference sheet. Print it. Every list route in this API should pass the four checks at the top.</p>
+
+<h2>The four checks for any list route</h2>
+<div class="scroll">
+<table>
+<tr><th>#</th><th>Check</th><th>What it costs if you skip it</th></tr>
+<tr><td>1</td><td>Is there a <b>default</b> limit?</td><td>The caller decides how much memory one request uses.</td></tr>
+<tr><td>2</td><td>Is there a <b>maximum</b> limit?</td><td><code>?limit=999999999</code> puts you back at zero.</td></tr>
+<tr><td>3</td><td>Is the sort order <b>unique</b>?</td><td>A cursor into an unstable order skips rows, silently.</td></tr>
+<tr><td>4</td><td>Does the query select only what the response sends?</td><td>Wasted query, and secrets in memory for nothing.</td></tr>
+</table>
+</div>
+
+<h2>The one question</h2>
+<p class="takeaway">Is the caller asking you to <b>count</b> to a place, or to <b>look up</b> a place? Counting gets slower every page. A look-up does not.</p>
+
+<div class="scroll">
+<table>
+<tr><th></th><th>offset / <code>skip</code></th><th>cursor / keyset</th></tr>
+<tr><td>SQL</td><td><code>OFFSET 4980 LIMIT 20</code></td><td><code>WHERE id &gt;= 4980 LIMIT 20</code></td></tr>
+<tr><td>Rows read for page 250</td><td>5,000</td><td class="yes">20</td></tr>
+<tr><td>Cost as pages go deeper</td><td>grows</td><td class="yes">flat</td></tr>
+<tr><td>Jump to &ldquo;page 7&rdquo;</td><td class="yes">yes</td><td>no &mdash; next/prev only</td></tr>
+<tr><td>Row inserted mid-read</td><td>shifts every later page</td><td class="yes">unaffected</td></tr>
+<tr><td>Use it for</td><td>admin tables with page numbers</td><td>feeds, infinite scroll, APIs</td></tr>
+</table>
+</div>
+<p>Offset is not forbidden. It is fine when the list is small and the user wants page numbers. It is wrong for anything that grows.</p>
+
+<h2>The store recipe</h2>
+<pre class="scroll"><code>export async function listTasks(
+  teamId: number,
+  { sort, dir, limit, cursor }: TaskQueryInput,
+): Promise&lt;{ items: Task[]; nextCursor: number | null }&gt; {
+  const rows = await prisma.task.findMany({
+    where: { teamId },
+    orderBy: [{ [sort]: dir }, { id: dir }],   // 3. tiebreak makes it unique
+    take: limit + 1,                            // 1. one extra = "is there more?"
+    ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+  });
+  const items = rows.slice(0, limit);
+  return { items, nextCursor: rows.length &gt; limit ? items.at(-1)!.id : null };
+}</code></pre>
+
+<div class="scroll">
+<table>
+<tr><th>Line</th><th>Why</th></tr>
+<tr><td><code>take: limit + 1</code></td><td>Answers &ldquo;is there a next page?&rdquo; without a second <code>COUNT(*)</code>. The extra row is already in the index you are walking.</td></tr>
+<tr><td><code>orderBy: [..., { id: dir }]</code></td><td><b>Not optional.</b> A non-unique sort key leaves ties in an order Postgres never promised, and may answer differently next time. A cursor is a position in that order.</td></tr>
+<tr><td><code>skip: 1</code></td><td>Steps over the cursor row itself. Without it, every page repeats its first row.</td></tr>
+<tr><td><code>.slice(0, limit)</code></td><td>The extra row is for you, not for the caller. Never send it.</td></tr>
+<tr><td><code>nextCursor: null</code></td><td>Means &ldquo;that was the last page&rdquo;. The front end stops asking.</td></tr>
+</table>
+</div>
+
+<h2>The schema half</h2>
+<pre><code>export const TaskQuery = z.object({
+  sort: z.enum(["id", "title", "createdAt"]).default("id"),
+  dir: z.enum(["asc", "desc"]).default("asc"),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.coerce.number().int().positive().optional(),
+  <b>done: z.stringbool().optional(),</b>              // NOT z.coerce.boolean()
+  <b>q: z.string().trim().min(1).max(100).optional(),</b>
+});
+
+export const TaskPage = z.object({
+  items: z.array(TaskPublic),
+  nextCursor: z.number().nullable(),
+});</code></pre>
+<p><code>z.coerce</code> because query strings are text. <code>.max(100)</code> because a limit the caller can raise without a ceiling is not a limit. And the reply is an <b>object</b>, not an array &mdash; an array has nowhere to put &ldquo;there is more&rdquo;.</p>
+<h2>Filters, and the two traps in them</h2>
+<pre><code>where: {
+  teamId,
+  <b>...(done === undefined ? {} : { done })</b>,
+  <b>...(q === undefined ? {} : { title: { contains: q, mode: "insensitive" } })</b>,
+},</code></pre>
+<div class="scroll">
+<table>
+<tr><th>Trap</th><th>Measured</th><th>Fix</th></tr>
+<tr><td><code>z.coerce.boolean()</code> on <code>"false"</code></td><td><b><code>true</code></b> &mdash; it is JavaScript's <code>Boolean()</code>, and a non-empty string is truthy. <code>?done=false</code> would filter for <em>done</em>.</td><td><code>z.stringbool()</code>: knows <code>true/1/yes/on</code> and <code>false/0/no/off</code>, 400 for anything else</td></tr>
+<tr><td>Prisma <code>contains</code></td><td>found <b>2 of 4</b> rows a person would call a match &mdash; Postgres <code>LIKE</code> reads capital letters</td><td><code>mode: "insensitive"</code> &rarr; <code>ILIKE</code>, seen as <code>~~*</code> in the plan</td></tr>
+<tr><td><code>...(done &amp;&amp; { done })</code></td><td>silently drops <code>done: false</code> &mdash; the filter people use most</td><td>test <code>=== undefined</code>, always</td></tr>
+<tr><td><code>where: { teamId, done }</code></td><td><code>TS2375</code> under <code>exactOptionalPropertyTypes</code>: an optional prop may be absent or a boolean, never present-and-undefined</td><td>the spread is load-bearing, not tidiness</td></tr>
+</table>
+</div>
+<p class="takeaway"><b>Coercion converts; parsing decides.</b> <code>coerce.number()</code> is fine &mdash; <code>Number("abc")</code> is <code>NaN</code> and zod still refuses it. <code>Boolean()</code> can never fail, and a conversion with no failing state is not a check.</p>
+<p><b>A cursor is a bookmark in one list.</b> The moment a list takes filters, a cursor is only valid for the filter it came from. Measured: <code>?done=true&amp;cursor=103</code>, where 103 came from the unfiltered list, returned <b>1 row</b> where 4 belong &mdash; no error, because on the server it is a perfectly ordinary request. This is why the filter belongs in the front end's query key: a new key has no cursor.</p>
+<p><b>A leading <code>%</code> ends index help.</b> <code>title ILIKE '%buy%'</code> uses the <code>teamId</code> index to find the team's rows, then filters every one of them (<code>Rows Removed by Filter: 8</code>). Free at 12 rows. At a million rows per team the answer is a trigram index (<code>pg_trgm</code>) &mdash; measure before you reach for it.</p>
+
+<div class="aside"><b>Changing an array reply into an object is a breaking change.</b> Budget for it: measured on this codebase, 4 tests and 1 front-end line. If nothing breaks when you change a response shape, nothing was checking it.</div>
+
+<h2>Reading a query plan in four lines</h2>
+<pre><code>EXPLAIN ANALYZE SELECT * FROM "Task"
+  WHERE "teamId" = 7 ORDER BY "createdAt" DESC LIMIT 20;</code></pre>
+<div class="scroll">
+<table>
+<tr><th>What you see</th><th>What it means</th></tr>
+<tr><td><code>Seq Scan</code></td><td>Read the whole table. Correct and fast on a tiny table &mdash; Postgres ignores indexes below a few hundred rows. Bad news on a big one.</td></tr>
+<tr><td><code>Index Scan using X</code></td><td>Used index X to find rows. Read the <code>Index Cond:</code> line to see which part of your <code>WHERE</code> the index actually answered.</td></tr>
+<tr><td><code>Sort</code> under a <code>Limit</code></td><td><b>The smell.</b> Everything matching had to be collected and sorted before the <code>LIMIT</code> could apply. A compound index on <code>(filter, sortkey)</code> removes it.</td></tr>
+<tr><td><code>rows=</code> at the bottom vs the top</td><td>Rows read vs rows returned. <code>rows=5000</code> in and <code>rows=20</code> out is work you paid for and threw away.</td></tr>
+</table>
+</div>
+
+<h2>Measured on this project, 5,000 rows in one team</h2>
+<div class="scroll">
+<table>
+<tr><th>Query</th><th>Index</th><th>Plan</th><th>Time</th></tr>
+<tr><td><code>ORDER BY createdAt DESC LIMIT 20</code></td><td><code>(teamId)</code></td><td>Sort, rows=5000 in</td><td>0.814 ms</td></tr>
+<tr><td>same</td><td><code>(teamId, createdAt)</code></td><td class="yes">Index Scan Backward, rows=20</td><td class="yes">0.025 ms</td></tr>
+<tr><td><code>ORDER BY id ASC LIMIT 21</code></td><td><code>(teamId)</code></td><td class="yes">Index Scan on <code>Task_pkey</code>, no sort</td><td class="yes">0.017 ms</td></tr>
+<tr><td>same</td><td><code>(teamId, id)</code></td><td>Index Scan, no sort</td><td>0.025 ms</td></tr>
+<tr><td>whole list + <code>include: { owner: true }</code></td><td>&mdash;</td><td>2 queries, 5000 rows</td><td>20 ms</td></tr>
+<tr><td><code>take: 20</code>, no include</td><td>&mdash;</td><td class="yes">1 query, 20 rows</td><td class="yes">3 ms</td></tr>
+</table>
+</div>
+<p class="takeaway">Add an index for a <code>Sort</code> you measured, not for a column that looks important. Every index also slows down every <code>INSERT</code>.</p>
+<div class="aside"><b>A plan is about your data, not about databases.</b> The <code>Task_pkey</code> row above is fast partly because that team owned 5,000 of the 5,005 rows, so almost nothing was filtered out. The same query for a 30-row team in a 50,000-row table chose a different plan. Re-run <code>EXPLAIN</code> when the shape of your data changes.</div>
+
+<h2>Overfetching: the query the response schema cannot fix</h2>
+<pre><code>include: { owner: true }   ->  SELECT "User"."id", "email", "passwordHash", ...</code></pre>
+<p>The response schema (<code>TaskPublic</code>, three fields) drops the owner before anything reaches the wire. It cannot un-run the query. The hashes were already decoded into JavaScript objects in your process.</p>
+<p class="takeaway">A field the response schema drops is a field you should not have selected. The schema is the last wall, not the first one.</p>
+
+<div class="scroll">
+<table>
+<tr><th>Shape</th><th>Queries</th><th>Name</th></tr>
+<tr><td>list, then Prisma fetches the relation in one batch</td><td>2</td><td>overfetching &mdash; 1+1</td></tr>
+<tr><td><code>for (const t of tasks) await getOwner(t.ownerId)</code></td><td>1 + N</td><td><b>N+1</b></td></tr>
+<tr><td>select only what you send</td><td class="yes">1</td><td>&mdash;</td></tr>
+</table>
+</div>
+<p>You find both the same way: turn on the query log and count the lines.</p>
+<pre><code>// src/db.ts, temporarily
+new PrismaClient({ adapter, log: [{ emit: "stdout", level: "query" }] })</code></pre>
+
+<h2>Is an index earning its space? (lesson 46)</h2>
+<pre><code>-- every index, worst first: never used, biggest
+select relname tbl, indexrelname idx, idx_scan,
+       pg_size_pretty(pg_relation_size(indexrelid)) size
+from pg_stat_user_indexes
+order by idx_scan, pg_relation_size(indexrelid) desc;
+
+-- ALWAYS read this before trusting an idx_scan of 0
+select stats_reset from pg_stat_database where datname = current_database();
+
+-- shrink a bloated index. VACUUM does not do this.
+REINDEX TABLE "Task";              -- locks writes; fine when small
+REINDEX TABLE CONCURRENTLY "Task"; -- slower, does not block writers</code></pre>
+<ul>
+<li><code>idx_scan = 0</code> over a long stats window &rarr; drop it. It costs disk <em>and</em> a write on every insert/update/delete.</li>
+<li><code>idx_scan = 0</code> over a short window &rarr; no information. <code>stats_reset</code> is the denominator.</li>
+<li>Index much bigger than the rows it indexes &rarr; bloat, not a schema mistake. <code>REINDEX</code>. Measured here: 4,408&nbsp;kB &rarr; 32&nbsp;kB.</li>
+<li><b>After any retention/delete job, reindex.</b> Otherwise the indexes keep the space the rows gave back.</li>
+<li><code>REINDEX</code> needs table <b>ownership</b> &mdash; <code>DATABASE_URL</code>, not <code>APP_DATABASE_URL</code>.</li>
+<li>High <code>seq_scan</code> on a tiny table is correct. Never read a scan ratio without the row count.</li>
+</ul>
+
+<h2>Should this index exist at all? (lesson 47)</h2>
+<p>An index is a bet that the query wants a <b>small slice</b>. If the query matches a large fraction of the table, Postgres ignores the index and scans the table &mdash; correctly. Measured on 200,000 rows, same index on <code>at</code>:</p>
+<div class="scroll"><table>
+<thead><tr><th>Rows matched</th><th>Plan chosen</th><th>Pages read</th></tr></thead>
+<tbody>
+<tr><td>75%</td><td><code>Seq Scan</code> &mdash; index untouched</td><td>1,082</td></tr>
+<tr><td>1.8%</td><td><code>Bitmap Index Scan</code></td><td>13</td></tr>
+</tbody></table></div>
+<p>The fold sits somewhere under a tenth of the table and moves with row width and physical order. Check, do not guess:</p>
+<pre><code>EXPLAIN (ANALYZE, COSTS OFF, BUFFERS) &lt;your query&gt;;</code></pre>
+<ul>
+<li><b>A plan from a small table is not evidence.</b> Build the rows first &mdash; 414 rows fit in two pages and every plan looks fine.</li>
+<li>Run <code>ANALYZE</code> after a bulk insert, or the planner is reading stale statistics.</li>
+<li>An index with no query is pure cost: disk, plus work on every insert, update and delete.</li>
+</ul>
+
+<h2>Adding an index properly (lesson 47)</h2>
+<p>Never <code>CREATE INDEX</code> by hand in <code>psql</code>. Prisma will not know about it and the next reset loses it. The schema file is the truth.</p>
+<pre><code>// 1. schema.prisma, inside the model
+@@index([at])
+
+// 2. write the SQL, do not run it
+npx prisma migrate dev --create-only --name audit_log_at_index
+
+// 3. read migration.sql, add CONCURRENTLY if the table is live
+CREATE INDEX CONCURRENTLY "AuditLog_at_idx" ON "AuditLog"("at");
+
+// 4. apply, then confirm both sides agree
+npx prisma migrate dev
+psql "$DATABASE_URL" -c '\d "AuditLog"'
+npx prisma migrate status</code></pre>
+<ul>
+<li>Plain <code>CREATE INDEX</code> takes <b><code>ShareLock</code></b>: reads pass, <b>every write waits</b>. On a big table that is an outage.</li>
+<li><code>CONCURRENTLY</code> <b>cannot run inside a transaction</b>. Prisma opens one only when the migration file holds more than one statement &mdash; so put a concurrent index <b>alone in its own migration file</b>.</li>
+<li>If a concurrent build fails halfway it leaves an <b>invalid</b> index behind. Drop it by hand and retry.</li>
+</ul>
+
+<h2>Where the planner's row estimate comes from (lesson 48)</h2>
+<p>Postgres never counts rows to plan a query. It reads a stored guess, written by <code>ANALYZE</code> from a sample of <b>30,000 rows</b> (<code>default_statistics_target</code> 100 &times; 300), and kept in <code>pg_stats</code> &mdash; one row per column.</p>
+<pre><code>psql "$DATABASE_URL" -c "select attname, null_frac, n_distinct from pg_stats where tablename = 'AuditLog';"
+psql "$DATABASE_URL" -c "select relname, last_analyze, last_autoanalyze, n_mod_since_analyze from pg_stat_user_tables order by relname;"</code></pre>
+<div class="scroll"><table>
+<thead><tr><th>Column of <code>pg_stats</code></th><th>Meaning</th><th>Used for</th></tr></thead>
+<tbody>
+<tr><td><code>null_frac</code></td><td>fraction of rows that are NULL</td><td><code>IS NULL</code> estimates</td></tr>
+<tr><td><code>n_distinct</code></td><td>count of different values; <b>negative = ratio</b> to row count (&minus;0.99 &asymp; unique)</td><td><code>col = X</code>: rows &divide; distinct</td></tr>
+<tr><td><code>most_common_vals</code> / <code>_freqs</code></td><td>the popular values and their real frequency</td><td><code>col = X</code> when values are skewed</td></tr>
+<tr><td><code>histogram_bounds</code></td><td>101 values cutting the column into 100 equal-row buckets</td><td><code>col &lt; X</code>, ranges, <code>BETWEEN</code></td></tr>
+</tbody></table></div>
+<ul>
+<li><b>A range estimate is bucket counting.</b> Cut-off near boundary 76 &rarr; ~75% of rows. That is where lesson 47's <code>rows=150677</code> came from.</li>
+<li><b>Measured:</b> same query, truth 3,852 rows. No statistics &rarr; estimate <b>72,193</b> (19&times; out). After one <code>ANALYZE</code> &rarr; <b>3,737</b>.</li>
+<li><b>Stale statistics pick the wrong plan.</b> 200,000 rows inserted unseen: estimate 5,811 &rarr; index scan over nearly the whole table. After <code>ANALYZE</code>: 201,208 &rarr; <code>Seq Scan</code>.</li>
+<li><b>Autovacuum analyses after 50 + 10% of rows change.</b> Under that, a small table can sit with no statistics for a long time.</li>
+<li><b>Run <code>ANALYZE</code> by hand after a bulk load or bulk delete</b>, and after a migration that adds an index. Milliseconds, no write lock.</li>
+</ul>
+<p class="takeaway"><b>Slow query after a data change?</b> <code>ANALYZE</code> &rarr; <code>EXPLAIN</code> again &rarr; <em>only then</em> consider an index. The free fix comes before the permanent one.</p>
+
+<h3>Equality estimates: the three cases (lesson 49)</h3>
+<pre><code>psql "$DATABASE_URL" -c "select attname, n_distinct, most_common_vals, most_common_freqs from pg_stats where tablename = 'Task' and attname = 'teamId';"</code></pre>
+<div class="scroll"><table>
+<thead><tr><th>Case for <code>WHERE col = X</code></th><th>Arithmetic</th><th>Measured example</th></tr></thead>
+<tbody>
+<tr><td>X is <b>in</b> <code>most_common_vals</code></td><td>its <code>most_common_freqs</code> entry &times; rows</td><td>0.96374 &times; 524 = <b>505</b>, truth 505</td></tr>
+<tr><td>X is <b>not</b> in the list</td><td>(1 &minus; sum of freqs) &divide; (unlisted distinct values) &times; rows</td><td>0.00191 &divide; 1 &times; 524 = <b>1</b></td></tr>
+<tr><td><b>No MCV list</b> (no value is common)</td><td>rows &divide; <code>n_distinct</code></td><td>524 &divide; 4 = <b>131</b>, wrong for all 4 teams</td></tr>
+</tbody></table></div>
+<ul>
+<li><b>The list holds up to 100 values</b> (<code>default_statistics_target</code>), paired positionally with the frequencies.</li>
+<li><b>An estimate is never 0.</b> A value the list covers but the table lacks estimates as <b>1</b> row.</li>
+<li><b>Selectivity is per value, not per column.</b> Same table, same index: <code>teamId = 652</code> (96%) &rarr; <code>Seq Scan</code>; <code>teamId = 11</code> (1%) &rarr; <code>Index Scan</code>. Both correct.</li>
+<li><b>Find your skew:</b> <code>select tablename, attname, most_common_freqs[1], (most_common_vals::text::text[])[1] from pg_stats where schemaname='public' and most_common_freqs[1] &gt; 0.3 order by 3 desc;</code> &mdash; <code>most_common_vals</code> is <code>anyarray</code> and must be cast before subscripting.</li>
+<li><b>The knob, for one symptom only:</b> <code>ALTER TABLE t ALTER COLUMN c SET STATISTICS 500;</code> then <code>ANALYZE t;</code> &mdash; for thousands of distinct values where a mid-sized one misses the top 100.</li>
+</ul>
+
+<h2>Related</h2>
+<ul>
+<li><a href="../lessons/0030-the-list-with-no-end.html">Lesson 30 &mdash; the list with no end</a></li>
+<li><a href="./sql-injection.html">SQL injection and allowlists</a> &mdash; <code>sort</code> is an identifier, <code>limit</code> is a value. Different defences.</li>
+<li><a href="./prisma-postgres.html">Prisma + Postgres</a></li>
+<li><a href="https://use-the-index-luke.com/no-offset">Use The Index, Luke &mdash; no-offset</a> &middot; <a href="https://www.postgresql.org/docs/current/using-explain.html">Postgres &mdash; Using EXPLAIN</a></li>
+</ul>
+
+<p class="nav"><a href="../lessons/index.html">All lessons</a> &middot; <a href="./the-whole-arc.html">The whole arc</a></p>
+
+</body>
+</html>

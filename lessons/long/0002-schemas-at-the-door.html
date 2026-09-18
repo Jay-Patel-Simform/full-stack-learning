@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 2 — Schemas At The Door</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 02 &middot; Week 1 &middot; API Basics</p>
+<h1>Schemas at the door</h1>
+<p class="lede">In lesson 1 you <em>remembered</em> to validate. Today you <em>declare</em> it. One win: the wall moves into the route definition, and the reply gets a wall too.</p>
+
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>Lesson 1 asked you to <em>remember</em> the wall. A wall you remember is a wall you forget.</li>
+<li>Move the wall into the route itself. Fastify runs it for you, before your handler.</li>
+<li>Add a second wall on the way <em>out</em>. It deletes any field you did not name.</li>
+<li>Two walls: one stops bad input, one stops leaks.</li>
+</ul>
+</div>
+
+<h2>The problem with lesson 1</h2>
+<p>Your <a href="../../server/src/app.ts"><code>api/server.ts</code></a> works. But look at the shape of it: every handler starts with <code>safeParse</code>, then <code>if (!parsed.success) return 400</code>. Three routes, five copies of the same four lines.</p>
+<p>That is not just ugly. It is a <strong>security shape</strong>: a wall you must remember to build is a wall you will one day forget. Route number nine, written at 6pm on a Friday, is the one with no <code>safeParse</code>.</p>
+<p class="takeaway">Make the safe thing the default thing. Then forgetting is not possible.</p>
+<p>Fastify already has a place to declare this: a <code>schema</code> on the route. It runs before your handler. If input fails, your handler never runs. <a href="https://fastify.dev/docs/latest/Reference/Validation-and-Serialization/">Fastify: Validation and Serialization</a>.</p>
+
+<h2>The two new ideas</h2>
+<div class="scroll">
+<table>
+<tr><th>Idea</th><th>What it means</th></tr>
+<tr><td><strong>Validator compiler</strong></td><td>You teach Fastify, once, how to check a schema. Fastify ships with Ajv (JSON Schema). You will swap in Zod, so you keep one language for shapes.</td></tr>
+<tr><td><strong>Response schema</strong></td><td>A shape for what goes <em>out</em>. Fields not named in it are deleted from the reply. This is output filtering.</td></tr>
+</table>
+</div>
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  REQ["Request"] --> IN{"schema.body<br/>schema.params<br/>schema.query"}
+  IN -- "bad" --> E["400"]
+  IN -- "good" --> H["Your handler<br/>does the job"]
+  H --> OUT{"schema.response<br/>keeps named fields only"}
+  OUT --> RES["Reply<br/>no ownerEmail"]
+</pre>
+<figcaption>Two walls, both declared in the route options. Your handler sits safely in the middle and never checks anything itself.</figcaption>
+</figure>
+
+<p>Input validation stops attacks coming in. Output filtering stops leaks going out. You need both. OWASP calls the leak side <a href="https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/">Broken Object Property Level Authorization</a> &mdash; number 3 on the API Top 10. It is usually just an object handed to <code>send()</code> with one field too many.</p>
+
+<h2>The code</h2>
+<p>Replace <code>api/server.ts</code> with this. Read the two <code>set...Compiler</code> blocks first &mdash; they are the whole lesson.</p>
+<pre><code>import Fastify from "fastify";
+import { z, type ZodType } from "zod";
+
+const app = Fastify({ logger: true });
+
+// 1. Teach Fastify to check input with Zod. Written once, used by every route.
+app.setValidatorCompiler(({ schema }) =&gt; (data) =&gt; {
+  const r = (schema as ZodType).safeParse(data);
+  if (r.success) return { value: r.data };
+  const why = r.error.issues
+    .map((i) =&gt; `${i.path.join(".") || "(root)"}: ${i.message}`)
+    .join("; ");
+  return { error: new Error(why) };
+});
+
+// 2. Teach Fastify to shape output with Zod. Unlisted fields are dropped.
+app.setSerializerCompiler(({ schema }) =&gt; (data) =&gt;
+  JSON.stringify((schema as ZodType).parse(data)),
+);
+
+const CreateTask = z.object({
+  title: z.string().min(1).max(200),
+  done: z.boolean().default(false),
+});
+const TaskParams = z.object({ id: z.coerce.number().int().positive() });
+const UpdateTask = z
+  .object({ title: CreateTask.shape.title, done: z.boolean() })
+  .partial();
+
+// What the outside world is allowed to see. Note: no owner email.
+const TaskPublic = z.object({
+  id: z.number(),
+  title: z.string(),
+  done: z.boolean(),
+});
+
+// The stored row has a private field, on purpose, to prove the point.
+type Task = z.infer&lt;typeof TaskPublic&gt; &amp; { ownerEmail: string };
+const tasks: Task[] = [];
+
+app.get("/health", async () =&gt; ({ ok: true }));
+
+app.post(
+  "/tasks",
+  { schema: { body: CreateTask, response: { 201: TaskPublic } } },
+  async (request, reply) =&gt; {
+    const body = request.body as z.infer&lt;typeof CreateTask&gt;;
+    const task = { id: tasks.length + 1, ...body, ownerEmail: "jay@example.com" };
+    tasks.push(task);
+    return reply.code(201).send(task);
+  },
+);
+
+app.get(
+  "/tasks",
+  { schema: { response: { 200: z.array(TaskPublic) } } },
+  async () =&gt; tasks,
+);
+
+app.patch(
+  "/tasks/:id",
+  {
+    schema: {
+      params: TaskParams,
+      body: UpdateTask,
+      response: { 200: TaskPublic },
+    },
+  },
+  async (request, reply) =&gt; {
+    const { id } = request.params as z.infer&lt;typeof TaskParams&gt;;
+    const task = tasks.find((t) =&gt; t.id === id);
+    if (!task) return reply.code(404).send({ error: "not found" });
+    Object.assign(task, request.body as z.infer&lt;typeof UpdateTask&gt;);
+    return task;
+  },
+);
+
+try {
+  await app.listen({ port: 3000 });
+} catch (err) {
+  app.log.error(err);
+  process.exit(1);
+}</code></pre>
+<p>Every <code>safeParse</code> in a handler is gone. The handler now only does the job. The wall is in the route options, where you cannot help but see it.</p>
+<p>One rough edge, told honestly: <code>request.body</code> is still typed <code>unknown</code>, so you cast it. A plugin (<code>fastify-type-provider-zod</code>) removes the cast. You are not adding it yet &mdash; casting once per handler is cheaper than a dependency you cannot yet explain.</p>
+
+<h2>Now attack it</h2>
+<p>Start the server: <code>npx tsx watch server.ts</code> in <code>/Users/jay/learning/full-stack-learning/api</code>. Predict the status code before each command.</p>
+<pre><code># 1. works
+curl -i -X POST localhost:3000/tasks \
+  -H 'content-type: application/json' \
+  -d '{"title":"buy milk"}'
+
+# 2. empty title
+curl -i -X POST localhost:3000/tasks \
+  -H 'content-type: application/json' \
+  -d '{"title":""}'
+
+# 3. bad id in the path
+curl -i -X PATCH localhost:3000/tasks/abc \
+  -H 'content-type: application/json' \
+  -d '{"done":true}'
+
+# 4. read them back
+curl -s localhost:3000/tasks</code></pre>
+<p>Test 1 is the money shot. You pushed <code>ownerEmail</code> into the object and handed the whole object to <code>send()</code>. Look at the reply: <code>{"id":1,"title":"buy milk","done":false}</code>. The email never left the building, because <code>TaskPublic</code> does not name it.</p>
+<p>Test 2 and 3 now say something useful: <code>"message":"title: Too small: expected string to have &gt;=1 characters"</code>. That came from your <code>why</code> string in the validator compiler. One place, every route.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  ROW["Stored row<br/>id, title, done, ownerEmail"]
+  ROW --> S["send(task)"]
+  S --> F{"TaskPublic names<br/>id, title, done"}
+  F -- "named" --> KEEP["ships to the client"]
+  F -- "not named" --> DROP["ownerEmail<br/>deleted"]
+</pre>
+<figcaption>The response schema is a guest list, not a bouncer. If a field is not on the list it never gets out &mdash; even when you hand it to <code>send()</code> by accident.</figcaption>
+</figure>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why is a declared route schema safer than a <code>safeParse</code> call inside the handler?</p>
+<button>Because Fastify checks a declared schema much faster than Zod can check it</button>
+<button>Because the check cannot be left out by a future you writing route nine</button>
+<p class="why" hidden>Right: safety that depends on memory eventually fails. A declared wall is visible in the route and runs before the handler.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">You add <code>passwordHash</code> to the stored row but not to <code>TaskPublic</code>. What ships?</p>
+<button>The reply is filtered, so the hash is dropped before it leaves the server</button>
+<button>The reply includes the hash, since the object handed to send has it</button>
+<p class="why" hidden>Right: the response schema is a whitelist. Only fields it names survive serialization. That is output filtering.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Which parts of a request need a schema?</p>
+<button>Body, params, query and headers, because a stranger picks all four</button>
+<button>Only the body, because your route pattern already shapes the others</button>
+<p class="why" hidden>Right: a path param is just text a stranger typed after a slash. <code>/tasks/abc</code> proved it. Headers and query strings are the same.</p>
+</div>
+
+<h2>Read this</h2>
+<p><strong>Primary source:</strong> <a href="https://fastify.dev/docs/latest/Reference/Validation-and-Serialization/">Fastify &mdash; Validation and Serialization</a>. Read the <em>Validator Compiler</em> and <em>Serialization</em> sections. Note the rule the docs repeat: a compiler returns <code>{ value }</code> or <code>{ error }</code>, and never throws.</p>
+<p>Also skim: <a href="https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/">OWASP API3:2023</a> &mdash; two pages on how APIs leak fields.</p>
+
+<h2>Do this before lesson 3</h2>
+<ol>
+<li>Run all four curl tests. Write down each status code.</li>
+<li>Delete <code>response: { 201: TaskPublic }</code> from the POST route and re-run test 1. Watch <code>ownerEmail</code> appear in the reply. Put it back.</li>
+<li>Add <code>DELETE /tasks/:id</code>. Reuse <code>TaskParams</code>. Return <code>204</code> with no body, and <code>404</code> if the id is missing.</li>
+<li>Add a query schema to <code>GET /tasks</code>: an optional <code>done</code> boolean filter. Hint: <code>z.coerce.boolean()</code> behaves oddly on the string <code>"false"</code> &mdash; find out why, and tell me what you found.</li>
+</ol>
+
+<p>Stuck, or something felt hand-wavy? <strong>Ask me.</strong> I am your teacher here, not just the person who wrote the page. Say what confused you and I will re-teach it another way, or write a follow-up lesson.</p>
+
+<hr>
+<p class="nav">Back: <a href="../0001-first-validated-route.html">Lesson 1 &mdash; Your first validated route</a> &middot; Keep for reference: <a href="../../reference/api-security-basics.html">API Security Basics cheat sheet</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a> &middot; Sources: <a href="../../RESOURCES.md">RESOURCES.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

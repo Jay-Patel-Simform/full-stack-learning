@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 22 &mdash; Auth state in the browser</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+/* Three panes, side by side, as the page actually renders them. */
+.states { display: grid; grid-template-columns: repeat(3, 1fr); gap: .9rem; margin: 1.3rem 0 .6rem; }
+.states > div { border: 1px solid var(--rule); border-radius: 6px; padding: .9rem 1rem; }
+.states h3 { margin: 0; font-size: .95rem; }
+.states .tag { font-family: var(--mono); font-size: .64rem; letter-spacing: .12em;
+  text-transform: uppercase; display: block; margin-bottom: .45rem; color: var(--muted); }
+.states p { margin: .5rem 0 0; font-size: .78rem; color: var(--muted); line-height: 1.5; }
+.states .ui { margin-top: .7rem; border: 1px dashed var(--rule); border-radius: 4px;
+  padding: .55rem .6rem; font-size: .72rem; font-family: var(--mono); color: var(--ink); }
+.states .u { border-color: var(--muted); }
+.states .u .tag { color: var(--muted); }
+.states .i { border-color: var(--ok); }
+.states .i .tag { color: var(--ok); }
+.states .o { border-color: var(--accent); }
+.states .o .tag { color: var(--accent); }
+
+.arrows { display: grid; grid-template-columns: repeat(3, 1fr); gap: .9rem;
+  font-family: var(--mono); font-size: .68rem; color: var(--muted);
+  text-align: center; margin-bottom: 1.8rem; }
+
+/* The two ports, seen twice. */
+.lens { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.2rem 0 1.6rem; }
+.lens > div { border: 1px solid var(--rule); border-radius: 6px; padding: 1rem 1.1rem; }
+.lens h4 { font-family: var(--mono); font-size: .7rem; letter-spacing: .1em;
+  text-transform: uppercase; margin: 0 0 .6rem; color: var(--muted); font-weight: 500; }
+.lens .pair { font-family: var(--mono); font-size: .82rem; line-height: 1.7; }
+.lens .verdict { margin: .7rem 0 0; font-size: .8rem; font-weight: 600; }
+.lens .same .verdict { color: var(--ok); }
+.lens .diff .verdict { color: var(--accent); }
+.lens .same { border-color: var(--ok); }
+.lens .diff { border-color: var(--accent); }
+.lens .port { background: var(--accent); color: var(--bg); padding: 0 .2em; border-radius: 2px; }
+.lens .host { background: var(--code-bg); padding: 0 .2em; border-radius: 2px; }
+
+/* Two views of one cookie. */
+.views { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.1rem 0 1.6rem; }
+.views pre { margin: 0; font-size: .74rem; }
+.views h4 { font-family: var(--mono); font-size: .7rem; letter-spacing: .1em;
+  text-transform: uppercase; margin: 0 0 .5rem; color: var(--muted); font-weight: 500; }
+
+.rule { font-size: .95rem; padding: .8rem 1rem; border-left: 3px solid var(--accent);
+  background: var(--code-bg); border-radius: 0 4px 4px 0; margin: 1.5rem 0 2.4rem; }
+@media (max-width: 40rem) {
+  .states, .arrows, .lens, .views { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 22 &middot; Week 9 &middot; Front end</p>
+<h1>Auth state in the browser</h1>
+<p class="lede">Twenty-one lessons of server. Today the first page. And the very first thing it does is discover that it cannot answer the only question it needs answered.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>You made the session cookie <code>HttpOnly</code> in <a href="./0006-a-door-that-stays-open.html">lesson 6</a>. So <code>document.cookie</code> is <strong>empty</strong>.</li>
+<li>There is no <code>isLoggedIn</code> variable to read. &ldquo;Logged in&rdquo; is not a fact the page holds &mdash; it is a <strong>question the page asks</strong>.</li>
+<li>So the app boots into <strong>three</strong> states, not two: <code>unknown</code> &rarr; <code>in</code> or <code>out</code>.</li>
+<li>A cross-origin request sends <strong>no cookie</strong> unless you ask: <code>withCredentials: true</code> on the axios instance.</li>
+<li>One axios <strong>interceptor</strong> handles the <code>401</code>, because a session can die <em>while the tab is open</em>.</li>
+</ul>
+</div>
+
+<h2>The word pair</h2>
+<div class="word"><b>a fact you hold</b> &mdash; something in the page's own memory. A theme, a draft, an open tab. Read it, trust it, render it. Costs nothing.</div>
+<div class="word"><b>a question you ask</b> &mdash; something only the server can answer. Who you are. What you may do. Costs a round trip, and can change its answer at any moment.</div>
+<p class="takeaway">Auth is the second kind. Every design mistake in front-end auth is treating it like the first.</p>
+
+<h2>Measured, in real Chrome, this morning</h2>
+<p>I drove your React app in headless Chrome and asked it five things. Read line three twice:</p>
+<pre><code>1. boot, no cookie      &rarr; state: out
+2. wrong password       &rarr; state: out  + "invalid email or password"
+3. right password       &rarr; state: in   + document.cookie === ""   &larr; signed in. empty.
+4. full page reload     &rarr; state: in
+5. every Session row DELETEd, then tab focus, no reload
+                        &rarr; state: out
+console errors / warnings: none
+
+stored cookie: { name: "session", domain: "localhost",
+                 httpOnly: true, sameSite: "Lax", secure: false }
+
+withCredentials: false &rarr; 401      withCredentials: true &rarr; 200</code></pre>
+<p>Chrome has the cookie and Chrome sends it. Your JavaScript cannot see it. That is not a limitation to work around &mdash; <strong>it is the feature you asked for.</strong> An XSS bug cannot steal a session it cannot read.</p>
+<div class="aside"><strong>The two 401/200 lines are the same URL, same tab, same logged-in user.</strong> The only difference is one option. Browsers default to <em>no credentials</em> across origins &mdash; <code>fetch</code> calls it <code>credentials: "same-origin"</code>, axios calls it <code>withCredentials: false</code> &mdash; and <code>:5173</code> is not the same <em>origin</em> as <code>:3000</code>. Forget it and your app looks logged out while the cookie sits in the jar. This is the single most common bug in this week's work.</div>
+
+<p><b>And the reload survived two different ports.</b> That is <a href="./0013-same-site-is-not-same-origin.html">lesson 13</a>, now visible instead of tabular. <code>SameSite=Lax</code> counts the <em>site</em> and a site ignores the port, so the cookie is sent. CORS counts the <em>origin</em> and a port makes a new one, so <code>credentials</code> is needed. Both true, about the same two URLs. That is why the pair exists.</p>
+
+<h2>Three states, not two</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  U["unknown<br/><i>asking…</i>"] -->|"GET /auth/me"| Q{"status?"}
+  Q -->|200| I["in<br/>show the app"]
+  Q -->|401| O["out<br/>show the form"]
+  I -.->|"any 401, any time"| O
+  O -->|"POST /auth/login 200"| I
+</pre>
+<figcaption>The dotted line is the one people forget. A session row can be deleted while the tab sits idle, so <code>in &rarr; out</code> is not only reachable through a logout button.</figcaption>
+</figure>
+<p>Boot into <code>out</code> and every reload flashes a login form at someone already signed in. Boot into <code>in</code> and you render an app for someone who is not. <code>unknown</code> deserves real markup.</p>
+
+<h2>Where the 401 lives</h2>
+<p>The app is React + Vite + Tailwind + shadcn/ui, with React Query holding the server state and axios doing the talking. Two pieces carry this whole lesson.</p>
+<p><b>One.</b> <code>src/lib/api.ts</code> &mdash; the axios instance, and the option that decides everything:</p>
+<pre><code>export const api = axios.create({
+  baseURL: import.meta.env.VITE_API_URL ?? "http://localhost:3000",
+  withCredentials: true,   &lt;-- the whole lesson
+  headers: { "content-type": "application/json" },
+});</code></pre>
+<p>Two small things came in with it. The origin is <code>VITE_API_URL</code> with the dev port as a fallback, because <a href="./0014-one-origin-no-question.html">lesson 14</a> says production is same-origin &mdash; the value that changes between dev and nginx belongs in the environment, not in the source. And <code>content-type: application/json</code> is set once here rather than at each call site, which is the same &ldquo;one place&rdquo; move as the interceptor below.</p>
+<p><b>Two.</b> <code>src/features/auth/session.ts</code> &mdash; the boot question, as a query:</p>
+<pre><code>async function getSession(): Promise&lt;User | null&gt; {
+  try {
+    return (await api.get&lt;User&gt;("/auth/me")).data;
+  } catch (error) {
+    // A 401 here is an ANSWER, not a failure.
+    if (error.response?.status === 401) return null;
+    throw error;
+  }
+}
+
+export function useSession() {
+  const { data: user, isPending } = useQuery({
+    queryKey: SESSION_KEY, queryFn: getSession, staleTime: 0,
+  });
+  return { user, isPending, signedIn: user != null };
+}</code></pre>
+<p>Turning the 401 into <code>null</code> instead of an error is what makes the three states fall out for free. <code>undefined</code> is <em>asking</em>, <code>null</code> is <em>out</em>, a user is <em>in</em>. One line in <code>App.tsx</code> reads them:</p>
+<pre><code>{isPending ? &lt;Asking /&gt; : user != null ? &lt;SignedInCard user={user} /&gt; : &lt;LoginForm /&gt;}</code></pre>
+<p>No <code>useState</code> mirroring the session, and <strong>no <code>useEffect</code> anywhere in the app</strong>. React Query is the state.</p>
+
+<h3>The 401 that arrives later</h3>
+<p>A session row can die while the tab sits idle. So one axios interceptor owns that case, for every request the app will ever make:</p>
+<pre><code>const CREDENTIAL_ROUTES = new Set(["/auth/login", "/auth/register"]);
+
+api.interceptors.response.use(undefined, (error: AxiosError) =&gt; {
+  const url = error.config?.url;
+  if (error.response?.status === 401 &amp;&amp;
+      url !== undefined &amp;&amp; !CREDENTIAL_ROUTES.has(url))
+    queryClient.setQueryData(SESSION_KEY, null);
+  return Promise.reject(error);
+});</code></pre>
+<p>The <code>url !== undefined</code> is not ceremony. <code>error.config?.url</code> is optional, and a <code>Set</code> asked about <code>undefined</code> answers <code>false</code> &mdash; so a 401 from a request with no recorded URL would take the &ldquo;session gone&rdquo; branch by accident. Name the unknown case instead of letting a falsy value decide.</p>
+<p><strong>One place sees the 401.</strong> Same rule as <a href="./0019-the-row-that-outlives-the-user.html">lesson 19</a>'s audit hook and <a href="./0007-one-place-that-says-no.html">lesson 7</a>'s <code>can()</code>: a rule with no exceptions does not belong in each caller. Third time now &mdash; it is a rule, not a coincidence.</p>
+<p>And <code>CREDENTIAL_ROUTES</code> is the deliberate exception &mdash; both credential routes, because the same status means two things:</p>
+<table>
+<tr><th>A 401 from</th><th>means</th><th>so show</th></tr>
+<tr><td>any ordinary request</td><td>your session is gone</td><td>the form, silently</td></tr>
+<tr><td><code>/auth/login</code>, <code>/auth/register</code></td><td>these credentials are wrong</td><td>the form, <em>with the error</em></td></tr>
+</table>
+<p>Route login through the generic handler and the user gets an empty form and no idea why.</p>
+
+<h3>Measured: the session that died elsewhere</h3>
+<p>I signed in, then deleted every <code>Session</code> row straight out of Postgres, then just <strong>gave the tab focus</strong> &mdash; no reload, no click:</p>
+<pre><code>deleted every Session row server-side. cookie still in the jar.
+document.cookie is still:  ""
+after a focus poke:        state: out   &larr; login form, by itself</code></pre>
+<p>That is React Query re-asking on window focus. It only works because <code>useSession</code> sets <code>staleTime: 0</code>: with the 30-second default I first wrote, this tab showed a signed-in UI for half a minute after the session was destroyed. <strong>Auth is the one query with no grace period.</strong></p>
+
+<h2>A correction to the plan</h2>
+<p><a href="../PLAN.md">PLAN.md</a> promised &ldquo;token refresh on 401&rdquo; this week. <strong>There is nothing to refresh.</strong> You chose server-side sessions over JWTs in lesson 6, and <code>readSession()</code> already pushes the expiry out to thirty days whenever half the life is gone. The refresh happens in Postgres, and the front end never hears about it.</p>
+<p class="takeaway">A good server decision shows up later as front-end code you never write.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">Why can the page not just read the cookie and skip the request?</p>
+<button>Because cookies are not sent to scripts</button>
+<button>Because HttpOnly hides it from all script</button>
+<p class="why" hidden><code>HttpOnly</code> is your own flag from lesson 6: the browser stores and sends the cookie, but <code>document.cookie</code> never shows it. That is what stops an XSS bug stealing a session. The cost is that the page must ask the server instead &mdash; a cost worth paying.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">A user sits on the page for an hour, then clicks. A 401 comes back. Why?</p>
+<button>The session row can die while idle</button>
+<button>The cookie string expires in the tab</button>
+<p class="why" hidden>Logging out in another tab, an admin ending sessions, expiry &mdash; all delete the <em>row</em>, and the cookie in the jar is unchanged. Nothing in the browser can detect it. That is why the axios <em>interceptor</em> handles a 401 on every response and not only at boot.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why does the session query set <code>staleTime: 0</code>?</p>
+<button>So a focus re-asks the server at once</button>
+<button>So the login form never gets cached</button>
+<p class="why" hidden>React Query only revalidates on focus if it thinks the answer is stale. With the 30-second default, a session destroyed elsewhere left this tab rendering a signed-in UI for half a minute &mdash; measured, on your app. Auth is the one query with no grace period.</p>
+</div>
+
+<h2>What this does NOT fix</h2>
+<table>
+<tr><th>Gap</th><th>Why it is still open</th></tr>
+<tr><td>Nothing is role-aware</td><td>The page knows your email, not your role. Hiding an Admin button is next lesson &mdash; along with why hiding it is <strong>not</strong> security.</td></tr>
+<tr><td>No CSP on the page</td><td>Your API's <code>default-src 'none'</code> protects JSON. Vite's dev server sends no CSP, and <code>npm run build</code> output needs one from whatever serves it. nginx, week 11&ndash;12.</td></tr>
+<tr><td>Still two origins</td><td><a href="./0014-one-origin-no-question.html">Lesson 14</a> chose same-origin for production. Until nginx is real, dev keeps CORS and <code>withCredentials: true</code>.</td></tr>
+</table>
+
+<h2>Do this</h2>
+<ol>
+<li>Two terminals. <code>cd server &amp;&amp; npm run dev</code> in one, <code>cd web &amp;&amp; npm run dev</code> in the other. Open <a href="http://localhost:5173">http://localhost:5173</a>.</li>
+<li>Register once, then sign in on the page:
+<pre><code>curl -X POST localhost:3000/auth/register \
+  -H 'content-type: application/json' \
+  -d '{"email":"you@x.com","password":"password123"}'</code></pre></li>
+<li>Open devtools &rarr; Console. Type <code>document.cookie</code>. It is <code>""</code>, while you are signed in. Then look at <strong>Application &rarr; Cookies &rarr; localhost:3000</strong> &mdash; there it is, <code>HttpOnly</code> ticked. Two views, one truth.</li>
+<li>Reload and watch the <code>state:</code> line: <code>unknown</code> for a blink, then <code>in</code>. That blink is a real request.</li>
+<li><strong>Break it on purpose:</strong> in <code>web/src/lib/api.ts</code>, change <code>withCredentials: true</code> to <code>false</code>. Save &mdash; Vite reloads on its own. You are logged out, and the cookie is still in Application &rarr; Cookies. Put it back.</li>
+<li><strong>Kill your own session</strong> and watch the app find out with no reload. In a third terminal:
+<pre><code>cd server &amp;&amp; psql "$(grep -m1 DATABASE_URL .env | cut -d'=' -f2- | tr -d '"')" \
+  -c 'DELETE FROM "Session";'</code></pre>
+Now click on another window and back to the tab. The login form appears by itself. That is React Query revalidating on focus.</li>
+<li><code>cd server &amp;&amp; npm test</code> &mdash; <strong>135</strong>, five new in <code>src/routes/me.test.ts</code>. The route your entire front end depends on had no test until today.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Two pictures. The first is what your page renders. The second is why the cookie arrives anyway.</p>
+
+<h2>1. The page has three states</h2>
+<div class="states">
+<div class="u"><span class="tag">on load</span><h3>unknown</h3>
+<div class="ui">Asking the server<br>who you are&hellip;</div>
+<p>The page has just started. <code>document.cookie</code> is empty whether you are signed in or not, so it knows <em>nothing</em>.</p></div>
+<div class="i"><span class="tag">200</span><h3>in</h3>
+<div class="ui">Signed in as<br>jay@x.com<br>[ Sign out ]</div>
+<p><code>/auth/me</code> answered with a user. The server looked up the session row and vouched for you.</p></div>
+<div class="o"><span class="tag">401</span><h3>out</h3>
+<div class="ui">Email [______]<br>Password [___]<br>[ Sign in ]</div>
+<p>No session row, or a dead one. Reachable from <code>in</code> at any moment, not only via the button.</p></div>
+</div>
+<div class="arrows">
+<div>&darr;&nbsp; GET /auth/me</div>
+<div>&larr;&nbsp; POST /auth/login &nbsp;&rarr;</div>
+<div>&uarr;&nbsp; any 401, any time</div>
+</div>
+<p class="rule">Most front ends have two states because they read a token from <code>localStorage</code>. Yours has three because it asks. Three is the honest number.</p>
+
+<h2>2. Two ports, looked at twice</h2>
+<p>The same two URLs. Two different rules read them, and each reaches a different answer.</p>
+<div class="lens">
+<div class="diff"><h4>CORS asks: same ORIGIN?</h4>
+<div class="pair">http://<span class="host">localhost</span>:<span class="port">5173</span><br>http://<span class="host">localhost</span>:<span class="port">3000</span></div>
+<p class="verdict">No. A port makes a new origin.</p>
+<p style="font-size:.78rem;color:var(--muted);margin:.5rem 0 0">&rarr; the reply needs <code>Access-Control-Allow-Origin</code>, and the request needs <code>withCredentials: true</code> (axios) or no cookie is sent at all.</p></div>
+<div class="same"><h4>SameSite asks: same SITE?</h4>
+<div class="pair">http://<span class="host">localhost</span>:<s style="opacity:.4">5173</s><br>http://<span class="host">localhost</span>:<s style="opacity:.4">3000</s></div>
+<p class="verdict">Yes. A site ignores the port.</p>
+<p style="font-size:.78rem;color:var(--muted);margin:.5rem 0 0">&rarr; <code>SameSite=Lax</code> is satisfied, so the browser is willing to send the cookie &mdash; if you asked it to.</p></div>
+</div>
+<p class="rule">Both boxes are true at the same time. <code>withCredentials: true</code> is you satisfying the left box; <code>SameSite=Lax</code> already satisfied the right one.</p>
+
+<h2>3. One cookie, two views</h2>
+<div class="views">
+<div><h4>devtools console</h4>
+<pre><code>&gt; document.cookie
+""
+
+(signed in.)</code></pre></div>
+<div><h4>devtools application tab</h4>
+<pre><code>session  OuoCku3TQHQ...
+domain   localhost
+HttpOnly &check;
+SameSite Lax</code></pre></div>
+</div>
+<p>Left is what your JavaScript can reach. Right is what the browser holds and sends. The gap between them is the whole of <a href="./0006-a-door-that-stays-open.html">lesson 6</a>, and the reason this lesson exists.</p>
+
+<footer class="ask">
+<p><b>Back to the lesson:</b> <a href="./0022-the-browser-does-not-know-you.html">The browser does not know you</a>.</p>
+<p>Ask me about any box here.</p>
+</footer>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://developer.mozilla.org/en-US/docs/Web/API/RequestInit#credentials">MDN, <code>fetch</code> credentials</a> &mdash; three values, and the default is the one that surprises you. Two minutes.</p>
+<p><b>Also:</b> <a href="https://tkdodo.eu/blog/react-query-as-a-state-manager">React Query as a State Manager</a> &mdash; by a React Query maintainer, and it is the argument for why there is no <code>useState</code> holding your session.</p>
+<p><b>Also:</b> <a href="https://thecopenhagenbook.com/sessions">The Copenhagen Book, Sessions</a> &mdash; the sliding-expiry design you already shipped, written down by someone else.</p>
+<p><b>Reference card:</b> <a href="../reference/sessions-and-cookies.html">Sessions and cookies</a>.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/reactjs/">r/reactjs</a> &mdash; ask how people avoid the login-form flash on reload. Watch for anyone who says &ldquo;keep a flag in localStorage&rdquo;: that is a fact standing in for a question, and it goes stale exactly when it matters.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0021-what-a-crash-is-allowed-to-say.html">&larr; Back</a>
+<a href="../reference/the-whole-arc.html">The whole arc, one page &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

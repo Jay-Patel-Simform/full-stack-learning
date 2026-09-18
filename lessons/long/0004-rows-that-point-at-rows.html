@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 4 — Rows That Point At Rows</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 04 &middot; Week 1&ndash;2 &middot; API Basics</p>
+<h1>Rows that point at rows</h1>
+<p class="lede">Right now every task carries the text <code>"jay@example.com"</code>. That is a sticky note, not an owner. Today a task points at a real <code>User</code> row. One win: you can ask the database &ldquo;whose task is this?&rdquo; and it cannot lie.</p>
+
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>A task should point at a <em>user row</em>, not at a copy of their email.</li>
+<li>The pointer is called a <strong>foreign key</strong>. Postgres refuses ids that do not exist.</li>
+<li>One line, <code>where: { ownerId }</code>, is the first real security in this app.</li>
+<li>Leave it out and every user reads everyone else's tasks. That bug is called <strong>IDOR</strong>.</li>
+</ul>
+</div>
+
+<h2>Why a string owner is a bug waiting</h2>
+<div class="scroll">
+<table>
+<tr><th>Question</th><th>String <code>ownerEmail</code></th><th><code>ownerId</code> pointing at <code>User</code></th></tr>
+<tr><td>Owner changes email</td><td>Old tasks point at nobody</td><td>Nothing breaks. The id never changes.</td></tr>
+<tr><td>Typo <code>"jya@example.com"</code></td><td>Accepted. Task is orphaned.</td><td>Rejected by the database.</td></tr>
+<tr><td>&ldquo;All tasks for this user&rdquo;</td><td>Match text, hope for the best</td><td>One indexed lookup</td></tr>
+<tr><td>Delete the user</td><td>Tasks silently rot</td><td>You must say what happens</td></tr>
+</table>
+</div>
+<p>The one new idea: a <strong>foreign key</strong>. It is a column that must hold an id that really exists in another table. Postgres checks it on every write. Same argument as lesson 3 &mdash; <a href="../0003-rows-that-survive-a-restart.html">put the rule where forgetting is impossible</a>. <a href="https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-FK">PostgreSQL: Foreign keys</a>.</p>
+
+<h2>Step 1 &mdash; two models, one link</h2>
+<p><code>server/prisma/schema.prisma</code>:</p>
+<pre><code>model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  createdAt DateTime @default(now())
+  tasks     Task[]
+}
+
+model Task {
+  id        Int      @id @default(autoincrement())
+  title     String   @db.VarChar(200)
+  done      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  owner     User     @relation(fields: [ownerId], references: [id])
+  ownerId   Int
+}</code></pre>
+<p>Read the two relation lines as one sentence: <em>the column <code>ownerId</code> holds a <code>User.id</code>, and in TypeScript I will call that user <code>owner</code>.</em></p>
+<div class="scroll">
+<table>
+<tr><th>Line</th><th>Lives in the database?</th></tr>
+<tr><td><code>ownerId Int</code></td><td>Yes. A real column, plus a foreign-key rule.</td></tr>
+<tr><td><code>owner User @relation(...)</code></td><td>No. A name for Prisma, so you can write <code>include: { owner: true }</code>.</td></tr>
+<tr><td><code>tasks Task[]</code> on <code>User</code></td><td>No. The same link, read from the other side.</td></tr>
+</table>
+</div>
+<p><code>@unique</code> on <code>email</code> is the thing that stops two accounts sharing one email in week 3. You get it now, free.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+erDiagram
+  USER ||--o{ TASK : "owns"
+  USER {
+    int id PK
+    string email UK
+    datetime createdAt
+  }
+  TASK {
+    int id PK
+    string title
+    boolean done
+    int ownerId FK
+  }
+</pre>
+<figcaption>One user, many tasks. <code>PK</code> is the row's own id. <code>FK</code> is the pointer. <code>UK</code> means no two users may share an email.</figcaption>
+</figure>
+
+<h2>Step 2 &mdash; the migration will refuse you</h2>
+<p>Your <code>Task</code> table already has rows. You are adding a column that may not be empty and must point at a real user. Prisma cannot invent owners, so it will offer to wipe the table.</p>
+<p>You are in week 2 with test data. Take the wipe. It is the honest answer here:</p>
+<pre><code>cd /Users/jay/learning/full-stack-learning/server
+npx prisma migrate reset          # drops, re-runs every migration
+npx prisma migrate dev --name task-owner</code></pre>
+<div class="aside"><strong>In production you never do this.</strong> The real move is three migrations: add <code>ownerId</code> as nullable, backfill it with an <code>UPDATE</code>, then make it required. Remember the shape; you will need it at week 11&ndash;12. <a href="https://www.prisma.io/docs/orm/prisma-migrate/workflows/data-migration">Prisma: data migration</a>.</div>
+<p>Now open <code>prisma/migrations/*_task_owner/migration.sql</code>. Find the line that starts <code>ALTER TABLE "Task" ADD CONSTRAINT</code>. That sentence is the wall.</p>
+
+<h2>Step 3 &mdash; one user to own things</h2>
+<p>Login does not exist until week 3. So make one user by hand and keep using it:</p>
+<pre><code>psql "$(grep '^DATABASE_URL' .env | cut -d'\"' -f2)" \
+  -c 'insert into "User"(email) values (''jay@example.com'') returning id;'</code></pre>
+<p>Put that id in <code>server/.env</code> as <code>DEV_USER_ID=1</code>. It is a placeholder with an expiry date: week 3 deletes it and reads the real user from the session.</p>
+
+<h2>Step 4 &mdash; the store learns the join</h2>
+<p><code>src/store/task.store.ts</code>:</p>
+<pre><code>export function listTasks(ownerId: number): Promise&lt;Task[]&gt; {
+  return prisma.task.findMany({
+    where: { ownerId },              // only this person's tasks
+    orderBy: { id: "asc" },
+    include: { owner: true },        // pull the User row along
+  });
+}
+
+export function createTask(input: CreateTaskInput, ownerId: number): Promise&lt;Task&gt; {
+  return prisma.task.create({
+    data: { ...input, ownerId },
+    include: { owner: true },
+  });
+}</code></pre>
+<p>And the route passes the placeholder instead of the email string:</p>
+<pre><code>const ownerId = Number(process.env.DEV_USER_ID);
+const task = await createTask(body, ownerId);
+</code></pre>
+<p>Update the type in <code>src/schemas/task.schema.ts</code>, since <code>ownerEmail</code> is gone:</p>
+<pre><code>export type Task = z.infer&lt;typeof TaskPublic&gt; &amp; {
+  ownerId: number;
+  owner?: { email: string };
+};</code></pre>
+<p><code>TaskPublic</code> does not change, so the reply still shows only <code>id</code>, <code>title</code>, <code>done</code>. The owner came out of the database and never left the server. <a href="../0002-schemas-at-the-door.html">The response schema is still filtering.</a></p>
+
+<h2>The same query in raw SQL</h2>
+<p><code>include</code> is not magic. It is a <strong>join</strong>: read two tables as one, matched on a column.</p>
+<pre><code>select t.id, t.title, u.email
+from "Task" t
+join "User" u on u.id = t."ownerId"
+where t."ownerId" = 1;</code></pre>
+<p>Run it in <code>psql</code>. Compare it to what <code>listTasks(1)</code> gives back. Knowing this SQL is how you will spot an <a href="https://www.prisma.io/docs/orm/prisma-client/queries/query-optimization-performance#solving-n1-in-graphql-with-findunique-and-prismas-dataloader">N+1 query</a> in week 13.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  Q["GET /tasks"] --> W{"where: { ownerId }"}
+  W -- "present" --> MINE["Only your rows<br/>safe"]
+  W -- "missing" --> ALL["Everybody's rows<br/>IDOR"]
+  MINE --> F["TaskPublic trims columns"]
+  ALL --> F
+  F --> OUT["Reply"]
+</pre>
+<figcaption>Read this carefully: the response schema trims <em>columns</em>, never <em>rows</em>. It cannot save you from a missing <code>where</code>.</figcaption>
+</figure>
+
+<h2>The line to remember</h2>
+<p><code>where: { ownerId }</code> is not a filter for tidiness. It is the first piece of security in this app. Drop it, and <code>GET /tasks</code> hands every user everybody else's tasks. That bug has a name: <strong>IDOR</strong> &mdash; broken object level authorization, number one on the <a href="https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/">OWASP API Security Top 10</a>. Weeks 5&ndash;8 are mostly about never forgetting this line.</p>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">What does <code>owner User @relation(...)</code> add to the actual Postgres table?</p>
+<button>A hidden column that stores the whole related user row for fast reads</button>
+<button>Nothing at all. It only names the link so Prisma can query it.</button>
+<p class="why" hidden>Right: only <code>ownerId</code> is a real column. The relation field is a name for your code.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">You insert a task with <code>ownerId = 999</code> and no user 999 exists.</p>
+<button>Postgres refuses the insert, because the foreign key must point somewhere</button>
+<button>Postgres accepts the insert and quietly stores 999 as a plain number</button>
+<p class="why" hidden>Right: that refusal is the whole point of a foreign key. A string email column could never do it.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">You delete <code>where: { ownerId }</code> from <code>listTasks</code>. What breaks?</p>
+<button>Nothing breaks, because the response schema still hides private fields</button>
+<button>Every caller reads every user's tasks, which is the IDOR bug</button>
+<p class="why" hidden>Right: hiding fields is not the same as hiding rows. The response schema trims columns, never rows.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why keep <code>ownerId</code> instead of matching on the owner's email text?</p>
+<button>An id never changes, so the link holds when the person edits their email</button>
+<button>An id is smaller, so Postgres can store many more rows on the disk</button>
+<p class="why" hidden>Right: a key should be something that never needs to change. Email is data about a person, not their identity.</p>
+</div>
+
+<h2>Read this</h2>
+<p><strong>Primary source:</strong> <a href="https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/one-to-many-relations">Prisma &mdash; One-to-many relations</a>. Read it with your <code>schema.prisma</code> open. Then skim <a href="https://www.prisma.io/docs/orm/prisma-client/queries/relation-queries">Relation queries</a> for <code>include</code> vs <code>select</code>.</p>
+<p>Ten minutes only: <a href="https://www.postgresql.org/docs/current/tutorial-join.html">PostgreSQL &mdash; Joins between tables</a>.</p>
+
+<h2>Do this before lesson 5</h2>
+<ol>
+<li>Make the change. Confirm <code>curl -s localhost:3000/tasks</code> still shows no email.</li>
+<li>Try to break it: <code>psql</code> an <code>insert into "Task"(title,"ownerId") values ('x', 999);</code>. Read the error out loud.</li>
+<li>Add a second user and a task for them. Confirm <code>listTasks(1)</code> does not return it.</li>
+<li>Write the join query above by hand in <code>psql</code>. Then write one more: count tasks per user (<code>group by</code>).</li>
+<li>Guess first, then check: what happens if you <code>delete from "User" where id = 1;</code> while that user has tasks? Tell me the error name.</li>
+</ol>
+
+<p>Stuck, or something felt hand-wavy? <strong>Ask me.</strong> I am your teacher here. Say what confused you and I will re-teach it another way.</p>
+
+<hr>
+<p class="nav">Back: <a href="../0003-rows-that-survive-a-restart.html">Lesson 3 &mdash; Rows that survive a restart</a> &middot; Keep for reference: <a href="../../reference/prisma-postgres.html">Prisma + Postgres cheat sheet</a> &middot; <a href="../../reference/api-security-basics.html">API Security Basics</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a> &middot; Sources: <a href="../../RESOURCES.md">RESOURCES.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

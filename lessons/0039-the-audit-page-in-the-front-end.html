@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 39 &mdash; The audit page in the front end</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.box { font-family: var(--mono); font-size: 0.72rem; margin: 0.9rem 0;
+    border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  .box > .cap { background: var(--code-bg); color: var(--muted); font-size: 0.66rem;
+    padding: 0.35rem 0.7rem; border-bottom: 1px solid var(--rule); }
+  .box .body { padding: 0.6rem 0.7rem; overflow-x: auto; }
+  .box .body > div { padding: 0.12rem 0; white-space: nowrap; }
+  .bad { color: var(--bad); font-weight: 600; }
+  .ok { color: var(--ok); font-weight: 600; }
+  .dim { color: var(--muted); }
+  .acc { color: var(--accent); font-weight: 600; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; margin: 1.1rem 0; }
+  .two h4 { font-family: var(--mono); font-size: 0.66rem; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--muted); margin: 0 0 0.2rem; font-weight: 600; }
+  @media (max-width: 34rem) { .two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 39 &middot; Week 11 &middot; Real world</p>
+<h1>The audit page in the front end</h1>
+<p class="lede">The route from <a href="./0038-reading-the-audit-log.html">lesson 38</a> now gets a screen. The page itself is easy &mdash; it is <a href="./0030-the-list-with-no-end.html">lesson 30's</a> cursor list with no writes. What is worth twenty minutes is this: the browser keeps <b>two copies</b> of what the server promised, and TypeScript checks one of them and simply believes the other. I built both, compiled both, and only one turned red.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong><code>at</code> is a string, not a <code>Date</code>.</strong> The server schema says <code>z.date()</code>. JSON has no date type, so ISO text is what arrives.</li>
+<li><strong>Typing it <code>Date</code> is a bug with no error.</strong> <code>row.at.toLocaleString()</code> compiles, runs, and prints <code>2026-09-11T06:58:31.158Z</code> &mdash; because a string has <code>toLocaleString</code> too.</li>
+<li><strong>The other stale copy <em>is</em> caught.</strong> Adding <code>audit:read</code> to the server's <code>ACTIONS</code> left the web <code>Action</code> union behind, and <code>can.includes("audit:read")</code> is <code>TS2345</code>.</li>
+<li><strong>Checked vs believed.</strong> A value you pass <em>in</em> is checked against the type. A value that arrives from <em>outside</em> is believed.</li>
+<li><strong>No <code>auditScope</code>.</strong> <code>tasksScope</code> exists because three mutations invalidate it. Nothing writes to a log, so the prefix has no user.</li>
+<li><strong>Hidden, not disabled.</strong> A MEMBER's <code>can</code> has no <code>audit:read</code>, so the button is not drawn. The 403 is still the gate.</li>
+<li><strong>Measured:</strong> an allowed read adds <b>0</b> rows to the log. A refused read adds <b>1</b>.</li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<pre><code>server: npm test          <b>162 passing</b>
+web:    npm test          <b>5 passing</b>
+web:    npx tsc -b        clean
+server: npm run typecheck clean</code></pre>
+<p>Seventh clean hand-over. Lesson 38 landed whole: <code>audit:read</code> is in <code>ACTIONS</code> and in the ADMIN list, the route, schema and store are all there, and the five tests took you from 157 to 162. I read your code before writing this page &mdash; <code>AuditPublic</code> has no <code>ip</code>, and <code>at</code> is <code>z.date()</code>, so you hit neither trap.</p>
+<p>Homework 7 is closed. I asked three times, that was two too many, and today's lesson answers it for you anyway.</p>
+
+<h2>Two copies of one promise</h2>
+<p>The server is the only place that knows what <code>GET /teams/:teamId/audit</code> returns. The browser cannot import <code>audit.schema.ts</code> &mdash; different process, different build. So the front end writes down what it <em>expects</em>. That written-down expectation is a copy, and copies go stale.</p>
+<p>Today you go stale twice, in two different ways:</p>
+<div class="vs">
+<div class="yes"><h4>Copy one &mdash; checked</h4><pre><code>type Action =
+  | "task:read"
+  | ...
+  | "team:delete";   // no audit:read
+
+can.includes("audit:read")</code></pre>
+<p><code>TS2345: Argument of type '"audit:read"' is not assignable to parameter of type 'Action'.</code></p>
+<p>Red before you run it.</p></div>
+<div class="no"><h4>Copy two &mdash; believed</h4><pre><code>type AuditRow = {
+  at: Date;          // it is a string
+};
+
+row.at.toLocaleString()</code></pre>
+<p>No error. Compiles, runs, and prints the raw ISO text on screen.</p>
+<p>Green all the way to production.</p></div>
+</div>
+<p>Both lines are wrong in the same way &mdash; a local copy no longer matches the server. The difference is only <b>which direction the value travels</b>.</p>
+<div class="word"><b>checked</b> &mdash; you hand a value <em>to</em> typed code. The compiler compares what you handed over against the type, and can say no. <code>"audit:read"</code> is an argument, so it is checked.</div>
+<div class="word"><b>believed</b> &mdash; a value arrives from outside the program: JSON, <code>localStorage</code>, a URL. Nothing compares it to anything. The type is your claim about it, and the compiler takes your word.</div>
+<p class="takeaway">A type on data you received is a promise <em>you</em> made, not one the compiler kept. This is <a href="./0031-the-pages-you-threw-away.html">record 0034</a> again, in the browser: a declared type is believed, not checked.</p>
+<p>That is why <code>row.at.toLocaleString()</code> is so nasty. It is not even a crash. <code>Date</code> has <code>toLocaleString</code>, and <code>String</code> has <code>toLocaleString</code> as well, and on a string it returns the string. So the method exists, the call succeeds, and the page shows a timestamp nobody can read. Measured, both lines, same input:</p>
+<pre><code>const at = "2026-09-11T06:58:31.158Z";
+
+at.toLocaleString()              -> "2026-09-11T06:58:31.158Z"   <b>// wrong, silent</b>
+new Date(at).toLocaleString()    -> "9/11/2026, 12:28:31 PM"     <b>// right</b></code></pre>
+<p>Your <b>seventh</b> bug with no error message, and the first one that lives in a <em>type</em>. The fix is to stop lying: type the field <code>string</code>, because that is what comes down the wire, and make the conversion a visible line of code.</p>
+<div class="aside"><b>Why the server's <code>z.date()</code> is still correct.</b> A response schema describes the value your handler returns, and Prisma hands the handler a real <code>Date</code>. Then <code>JSON.stringify</code> calls <code>Date.prototype.toJSON</code>, which is defined to return ISO text &mdash; see <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toJSON">MDN, <code>Date.prototype.toJSON</code></a>. Both types are right about their own side. The wire is where the type changes, and nothing on the wire enforces either one.</div>
+
+<h2>What the reply really looks like</h2>
+<p>Do not take my word for it, and do not take the schema's word either. I ran your own route against your own database:</p>
+<pre><code>{ "items": [
+    { "id": 9958,
+      "at": <b>"2026-09-11T06:58:31.158Z"</b>,
+      "userId": 4399,
+      "actorEmail": "l39-26076@x.com",
+      "method": "DELETE",
+      "route": "/teams/:teamId/tasks/:id",
+      "status": 400,
+      "targetType": null,
+      "targetId": null } ],
+  "nextCursor": 9956 }</code></pre>
+<p><code>at</code> is quoted. Everything nullable in <code>AuditPublic</code> really can be <code>null</code>, so the page has to say something for an empty <code>actorEmail</code> &mdash; a 401 has no actor to name. And there is homework 7, answered by looking: <code>targetId</code> is the field a page displays, because it is a number the reader can search for. <code>params</code> is not in the reply at all.</p>
+
+<h2>Where the code is allowed to live</h2>
+<p>You want one tiny function under test:</p>
+<pre><code>export const formatAt = (at: string) =&gt; when.format(new Date(at));</code></pre>
+<p>Put it in the hook file and the test cannot load it. I tried it first, and got:</p>
+<pre><code>Error [ERR_MODULE_NOT_FOUND]: Cannot find package '@/lib/api'</code></pre>
+<p><code>web/package.json</code> runs <code>node --test</code>, and <code>@/</code> is a Vite alias. Vite is not running. You already wrote this rule down as a comment in <code>edit-pages.ts</code> in <a href="./0032-the-function-you-cannot-import.html">lesson 32</a>; today it decides your file layout before you write a line:</p>
+<div class="scroll"><table>
+<tr><th>file</th><th>imports</th><th>testable by <code>node --test</code></th></tr>
+<tr><td><code>audit-row.ts</code></td><td>nothing</td><td class="yes">yes</td></tr>
+<tr><td><code>audit.ts</code></td><td><code>@/lib/api</code></td><td>no</td></tr>
+<tr><td><code>audit-panel.tsx</code></td><td>both, plus React</td><td>no</td></tr>
+</table></div>
+<p class="takeaway">Testability is decided by the import graph, not by how pure the function looks. Three files, and the pure one is the one that has no imports.</p>
+
+<h2>Two things this list does not need</h2>
+<p>Copying <code>tasks.ts</code> would give you two things that have no job here.</p>
+<p><b>No scope prefix.</b> <code>tasksScope(teamId)</code> exists so that three mutations can invalidate every filter at once. An audit log has no mutations &mdash; that is the whole point of <a href="./0036-the-row-that-outlives-the-row.html">append-only</a>. Nothing will ever invalidate this list, so the prefix would be a function with no caller.</p>
+<p><b>No <code>sort</code> or <code>dir</code> parameter.</b> The server does not accept one. Order is fixed at <code>at DESC, id DESC</code> because that is the index. The UI cannot offer a column picker, and it should not pretend.</p>
+<p>What it <em>does</em> keep is the filter in the key, which is <a href="./0033-the-list-is-a-question.html">lesson 33</a>:</p>
+<pre><code>export const auditKey = (teamId: number, filter: AuditFilter) =&gt;
+  ["teams", teamId, "audit", filter] as const;</code></pre>
+<p>Leave <code>filter</code> out and clicking &ldquo;Refused&rdquo; sends zero requests, because the entry is already fresh. Same bug, same shape, second route.</p>
+
+<h2>Reading is free. Being refused is not.</h2>
+<p>An OWNER opening this page does not pollute the log they are reading. I counted, on a team with four rows, before and after two full page loads:</p>
+<pre><code>rows before two GETs   4
+rows after  two GETs   <b>4</b></code></pre>
+<p>Then I logged in as a MEMBER of the same team and hit the route twice, plus the invite that made them a member:</p>
+<pre><code>rows now               <b>7</b>
+
+newest row:
+{ "route": "/teams/:teamId/audit", "status": 403, "method": "GET",
+  "actorEmail": "l39m-31871@x.com", "targetId": null }</code></pre>
+<p><code>shouldAudit()</code> has said since <a href="./0018-the-route-nobody-audited.html">lesson 18</a>: writes and refusals. A successful GET is neither. So the log records attempts to read it and ignores permitted reads &mdash; which is exactly the right way round, and it is a rule you wrote twenty-one lessons before this page existed.</p>
+<p>That same MEMBER, asking <code>GET /teams</code>, gets this <code>can</code> list:</p>
+<pre><code>["task:read","task:create","task:update","task:delete","project:create"]</code></pre>
+<p>No <code>audit:read</code>. So the page never draws the button, and a MEMBER does not learn that a log exists here. <a href="./0023-the-button-you-can-still-press.html">Lesson 23's</a> split, unchanged: <code>can</code> hides, <code>requirePermission</code> refuses.</p>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why is <code>at</code> typed <code>string</code> in the browser?</p>
+<button>Because JSON has no dates</button>
+<button>Because Prisma sends text</button>
+<p class="why" hidden>JSON has six value types and none of them is a date. <code>JSON.stringify</code> calls <code>Date.prototype.toJSON</code>, which returns ISO text, so text is what crosses the wire. Prisma is innocent &mdash; it hands the handler a real <code>Date</code>, and the serializer is where the type changes.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Which stale copy does the compiler catch?</p>
+<button>The action, an argument</button>
+<button>The date, a declaration</button>
+<p class="why" hidden><code>"audit:read"</code> is a value you pass <em>into</em> typed code, so it is compared to <code>Action</code> and refused: <code>TS2345</code>. The <code>at: Date</code> field describes data arriving from <em>outside</em>, so there is nothing to compare it against. Checked vs believed.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">An ADMIN loads the log page. Rows added?</p>
+<button>None, reads are not audited</button>
+<button>One, reads are also audited</button>
+<p class="why" hidden><code>shouldAudit()</code> is true for writes and for refusals. A 200 on a GET is neither, so an allowed read writes nothing. Measured: 4 rows before two page loads, 4 after. A <em>refused</em> read is a refusal, and does earn a row.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>Meet the error first.</strong> In <code>web/src/features/teams/teams-card.tsx</code>, temporarily add <code>{team.can.includes("audit:read") &amp;&amp; <span>null</span>}</code> inside <code>TeamRow</code> and run <code>npx tsc -b</code>. <b>Expect <code>TS2345</code>.</b> Read it, then fix it by adding <code>| "audit:read"</code> to the <code>Action</code> union in <code>teams.ts</code>. Clean again. That is the copy TypeScript guards for you.</li>
+
+<li><strong>The pure file.</strong> New <code>web/src/features/audit/audit-row.ts</code>. No <code>@/</code> imports, ever:
+<pre><code>export type AuditRow = {
+  id: number;
+  <b>at: string;</b>                    // ! ISO text, not a Date
+  userId: number | null;
+  actorEmail: string | null;
+  method: string;
+  route: string;
+  status: number;
+  targetType: string | null;
+  targetId: number | null;
+};
+export type AuditPage = { items: AuditRow[]; nextCursor: number | null };
+export type AuditFilter = { status?: number };
+
+export const auditKey = (teamId: number, filter: AuditFilter) =&gt;
+  ["teams", teamId, "audit", filter] as const;
+
+// Built once, not once per row. The formatter is expensive; the rows are not.
+const when = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "short",
+  timeStyle: "medium",
+});
+export const formatAt = (at: string) =&gt; when.format(new Date(at));</code></pre></li>
+
+<li><strong>The hook.</strong> New <code>web/src/features/audit/audit.ts</code>. It is <code>useTasks</code> with the writes and the sort removed &mdash; open <code>tasks.ts</code> beside it and delete rather than type:
+<pre><code>queryKey: auditKey(teamId, filter),
+queryFn: async ({ pageParam }) =&gt;
+  (await api.get&lt;AuditPage&gt;(`/teams/${teamId}/audit`, {
+    params: { cursor: pageParam, ...filter },
+  })).data,
+initialPageParam: undefined as number | undefined,
+getNextPageParam: (last) =&gt; last.nextCursor ?? undefined,
+placeholderData: keepPreviousData,</code></pre></li>
+
+<li><strong>Two tests, and break them first.</strong> <code>audit-row.test.ts</code>, importing only <code>./audit-row.ts</code>:
+<pre><code>test("the filter is part of the key", () =&gt; {
+  assert.notDeepEqual(auditKey(1, {}), auditKey(1, { status: 403 }));
+});
+test("an ISO string is formatted, not echoed", () =&gt; {
+  const at = "2026-09-11T06:58:31.158Z";
+  assert.notEqual(formatAt(at), at);
+});</code></pre>
+<b>Expect <code>npm test</code> in <code>web/</code> to report 7.</b> Now do the routine from lesson 35: drop the <code>new Date(...)</code> from <code>formatAt</code>, watch the second test go red, put it back. A test you have never seen fail is not a test.</li>
+
+<li><strong>The panel.</strong> New <code>audit-panel.tsx</code>. Read-only, so there is no form and no mutation: the filter buttons (All / Refused &rarr; <code>{}</code> and <code>{ status: 403 }</code>), the three states from <a href="./0022-the-browser-does-not-know-you.html">lesson 22</a>, a <code>&lt;ul&gt;</code> of <code>data.pages.flatMap(p =&gt; p.items)</code>, and &ldquo;Load more&rdquo; behind <code>hasNextPage</code>. Per row: <code>formatAt(row.at)</code>, the status, <code>{row.method} {row.route}</code>, and <code>{row.actorEmail ?? "anonymous"}</code>.</li>
+
+<li><strong>Mount it behind the hint.</strong> In <code>TeamRow</code>, wrap the whole block &mdash; toggle button included &mdash; in <code>{team.can.includes("audit:read") &amp;&amp; ( … )}</code>. Hidden, not disabled. <b>Expect <code>npx tsc -b</code> clean and 7 tests still passing.</b></li>
+
+<li><strong>Prove the split by hand.</strong> Log in as a MEMBER of a team you own: no &ldquo;Show log&rdquo; button. Then call the route directly with that MEMBER's cookie and watch it answer <b>403</b>. Then open the page as the OWNER: <b>the newest row is your own refusal.</b> Three facts, one minute, and they are the whole of lesson 23 plus the whole of lesson 18.</li>
+
+<li><strong>Words, not code.</strong> Two things, two sentences each. First: <b>question 9 is still open</b> &mdash; a MEMBER can write 144,000 refusal rows a day through the rate limit. Bug, feature, or retention problem? Second, and I am asking directly because I have waited four lessons: <b>explain &ldquo;hint vs gate&rdquo; to me in your own words</b>, using today's page as the example.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Two copies of the same reply live in the browser. Both went stale today. The compiler stopped one of them.</p>
+
+<h2>Where the copies are</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+    P["prisma<br/>at = Date object"] --> Z["AuditPublic<br/>z.date()"]
+    Z --> W["the wire<br/>at = &quot;2026-09-11T06:58:31.158Z&quot;"]
+    W --> T["AuditRow<br/>at: string"]
+    W --> B["AuditRow<br/>at: Date"]
+    T --> G["formatAt&#40;at&#41;<br/>9/11/2026, 12:28:31 PM"]
+    B --> R["at.toLocaleString&#40;&#41;<br/>2026-09-11T06:58:31.158Z"]
+    style G fill:#1b3a1b,stroke:#4c9a4c,color:#d7f0d7
+    style R fill:#3a1b1b,stroke:#9a4c4c,color:#f0d7d7
+    style W fill:#332f22,stroke:#8a7b4c,color:#f0e7d7
+</pre>
+<figcaption>The type changes at the wire, in the middle. Both schemas are right about their own side of it, and nothing on the wire enforces either one.</figcaption>
+</figure>
+
+<h2>Which way the value travels</h2>
+<div class="two">
+<div>
+<h4>Checked &mdash; you pass it in</h4>
+<div class="box"><div class="body">
+<div><span class="dim">type Action = ... | "team:delete";</span></div>
+<div><span class="dim">declare const can: Action[];</span></div>
+<div>&nbsp;</div>
+<div>can.includes(<span class="acc">"audit:read"</span>)</div>
+<div>&nbsp;</div>
+<div class="bad">error TS2345: Argument of type</div>
+<div class="bad">'"audit:read"' is not assignable</div>
+<div class="bad">to parameter of type 'Action'.</div>
+</div></div>
+<p class="dim" style="font-size:0.78rem">The argument is compared to the type. Red before it runs.</p>
+</div>
+<div>
+<h4>Believed &mdash; it arrives</h4>
+<div class="box"><div class="body">
+<div><span class="dim">type AuditRow = { at: Date };</span></div>
+<div><span class="dim">declare const row: AuditRow;</span></div>
+<div>&nbsp;</div>
+<div>row.at.<span class="acc">toLocaleString()</span></div>
+<div>&nbsp;</div>
+<div class="ok">tsc exit=0</div>
+<div class="dim">no error, no warning, no hint</div>
+<div class="dim">&nbsp;</div>
+</div></div>
+<p class="dim" style="font-size:0.78rem">Nothing to compare it to. Green all the way out.</p>
+</div>
+</div>
+<p>Measured: both lines in one file, one <code>tsc --strict</code> run, <b>one</b> error. The two mistakes are identical &mdash; a local copy that no longer matches the server &mdash; and only the direction of travel decides whether you hear about it.</p>
+
+<h2>Why the silent one survives</h2>
+<div class="box">
+<div class="cap">at = "2026-09-11T06:58:31.158Z" &mdash; a string, declared as a Date</div>
+<div class="body">
+<div><span class="dim">Date.prototype.toLocaleString</span>    exists</div>
+<div><span class="dim">String.prototype.toLocaleString</span>  <span class="bad">exists too</span></div>
+<div>&nbsp;</div>
+<div>at.toLocaleString()           <span class="bad">"2026-09-11T06:58:31.158Z"</span></div>
+<div>new Date(at).toLocaleString() <span class="ok">"9/11/2026, 12:28:31 PM"</span></div>
+</div>
+</div>
+<p>A wrong type usually crashes on the first method call. Not here. The method <em>exists</em> on a string, and on a string it hands back the string. So the call succeeds, the page renders, and the only symptom is an ugly timestamp.</p>
+
+<h2>What the log records about reading the log</h2>
+<div class="box">
+<div class="cap">one team, measured before and after</div>
+<div class="body">
+<div><span class="dim">OWNER opens the page twice (200)</span>   4 rows -&gt; <span class="ok">4 rows</span></div>
+<div><span class="dim">then: invite (201) + two 403s</span>      4 rows -&gt; <span class="bad">7 rows</span></div>
+<div>&nbsp;</div>
+<div><span class="dim">newest row:</span></div>
+<div>  GET /teams/:teamId/audit  <span class="bad">403</span></div>
+<div>  actorEmail: l39m-...@x.com</div>
+</div>
+</div>
+<p><code>shouldAudit()</code> means writes and refusals. An allowed read is neither, so the reader leaves no trace. A refused read is the most interesting line in the file.</p>
+
+<p class="takeaway">A type on data you received is a promise you made. A type on a value you pass is a promise the compiler keeps.</p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://tkdodo.eu/blog/react-query-and-type-script">TkDodo &mdash; React Query and TypeScript</a>. The maintainer of the library you are using, on exactly this: the type on <code>data</code> is a claim you made, not a check that ran. Today's one thing to read.</p>
+<p><b>Then this:</b> <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toJSON">MDN &mdash; <code>Date.prototype.toJSON</code></a>. Four paragraphs, and it is the primary source for why <code>at</code> is text.</p>
+<p><b>Reference cards:</b> <a href="../reference/react-query-rules.html">React Query rules</a> and <a href="../reference/rbac-permissions.html">RBAC and permissions</a>.</p>
+<p><b>Ask the community:</b> <a href="https://github.com/TanStack/query/discussions">TanStack Query discussions</a>. Search &ldquo;zod parse queryFn&rdquo; before you post &mdash; validating the reply instead of declaring it is a real argument with real trade-offs, and it is where question 9 in reverse gets settled.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0038-reading-the-audit-log.html">&larr; Back</a>
+<a href="../reference/react-query-rules.html">React Query reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

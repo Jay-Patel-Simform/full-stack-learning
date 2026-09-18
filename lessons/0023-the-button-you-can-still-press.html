@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 23 &mdash; Client UI is not a permission</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+/* Team rows, as the page actually draws them. */
+.rows { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.2rem 0 .8rem; }
+.rows > div { border: 1px solid var(--rule); border-radius: 6px; padding: .9rem 1rem; }
+.rows .head { display: flex; justify-content: space-between; align-items: baseline;
+  font-size: .9rem; font-weight: 600; }
+.rows .head span { font-family: var(--mono); font-size: .7rem; color: var(--muted); font-weight: 500; }
+.rows .btns { margin: .7rem 0 0; display: flex; flex-wrap: wrap; gap: .35rem; min-height: 1.8rem; }
+.rows .btns b { font-family: var(--mono); font-size: .66rem; font-weight: 500;
+  border: 1px solid var(--rule); border-radius: 3px; padding: .25rem .45rem; color: var(--muted); }
+.rows .none { font-family: var(--mono); font-size: .66rem; color: var(--muted); opacity: .7; }
+.rows .probe { margin: .7rem 0 0; font-family: var(--mono); font-size: .72rem; }
+.rows .ok { color: var(--ok); }
+.rows .no { color: var(--bad); }
+.rows .owner { border-color: var(--ok); }
+.rows .viewer { border-color: var(--accent); }
+.rows .hacked { border-style: dashed; }
+
+/* One table, two consumers. */
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.1rem 0 1.4rem; }
+.split > div { border: 1px solid var(--rule); border-radius: 6px; padding: .9rem 1rem;
+  font-family: var(--mono); font-size: .74rem; line-height: 1.8; }
+.split h4 { font-family: var(--mono); font-size: .7rem; letter-spacing: .1em;
+  text-transform: uppercase; margin: 0 0 .6rem; color: var(--muted); font-weight: 500; }
+.split .end { margin: .6rem 0 0; font-family: var(--serif); font-size: .82rem; font-weight: 600; }
+.split .hint { border-color: var(--muted); }
+.split .hint .end { color: var(--muted); }
+.split .gate { border-color: var(--ok); }
+.split .gate .end { color: var(--ok); }
+.source { text-align: center; font-family: var(--mono); font-size: .76rem;
+  border: 1px solid var(--rule); border-radius: 6px; padding: .6rem; background: var(--code-bg); }
+.fork { text-align: center; font-family: var(--mono); font-size: .7rem; color: var(--muted);
+  margin: .5rem 0; }
+
+.rule { font-size: .95rem; padding: .8rem 1rem; border-left: 3px solid var(--accent);
+  background: var(--code-bg); border-radius: 0 4px 4px 0; margin: 1.4rem 0 2.2rem; }
+@media (max-width: 40rem) { .rows, .split { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 23 &middot; Week 10 &middot; Front end</p>
+<h1>Client UI is not a permission</h1>
+<p class="lede">Your page now knows your role, and hides what your role may not do. That is a courtesy to the user. It is not a wall, and today you watch it fail on purpose.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>New route: <code>GET /teams</code>. It has <strong>no permission gate</strong>, and that is not an omission &mdash; the <code>where</code> clause is the scope.</li>
+<li>It answers with <code>{ id, name, role, can }</code>. <code>can</code> is the list of actions your role may do, straight out of the server's own table.</li>
+<li>The page draws a button only if the action is in <code>can</code>. <strong>Hidden, not disabled.</strong></li>
+<li>Un-hide the button and the server still says <code>403</code>. Two independent facts. Only the second one is security.</li>
+<li>So the teams query keeps a 30-second cache while the session query has none. A stale <em>hint</em> cannot open anything.</li>
+</ul>
+</div>
+
+<h2>The word pair</h2>
+<div class="word"><b>hiding</b> &mdash; the page chooses not to offer something. Happens in your JavaScript, which the user owns, can read, and can edit. Costs nothing and can be undone in ten seconds.</div>
+<div class="word"><b>refusing</b> &mdash; the server declines to do it. Happens on a machine the user does not own. Costs a round trip, and cannot be undone from the browser.</div>
+<p class="takeaway">Every access-control bug that ships is somebody who did the first one and believed they had done the second.</p>
+
+<h2>Measured, in real Chrome, on your app</h2>
+<p>I gave your account two teams &mdash; Owner of one, Viewer of the other &mdash; signed in through the form, and clicked the same button on each row. Then I deleted the one line that hides buttons and clicked again:</p>
+<pre><code>                         buttons drawn   "Ask the server anyway"
+Platform   OWNER    (9)   4              409   &larr; the gate agreed
+Marketing  VIEWER   (1)   0              403   &larr; the gate refused
+
+after deleting the filter line:
+Marketing  VIEWER   (1)   4              403   &larr; unchanged</code></pre>
+<p>The last line is the whole lesson. The page changed its mind about what a Viewer may do. <strong>The server did not.</strong> Full output, and the two-lens picture, are in <a href="#see-it-drawn">See it drawn</a> below.</p>
+<div class="aside"><b>Why 409 and not 201.</b> The probe invites <em>you</em> to a team you are already in. The gate refuses (<code>403</code>), or the gate agrees and the store finds your row already there (<code>409</code>). No third answer, so the button can never change anything.</div>
+
+<h2>The route with no gate</h2>
+<p>Every route since <a href="./0008-a-role-is-a-row.html">lesson 8</a> names a team in the URL, so <code>requirePermission()</code> can ask &ldquo;what is your role <em>there</em>&rdquo;. This one asks the opposite question, and there is no <code>:teamId</code> to scope it with:</p>
+<pre><code>app.get("/teams", { schema: { response: { 200: TeamList } } }, async (request) =&gt; {
+  const rows = await listMemberships(request.userId!);
+  return rows.map(({ role, team }) =&gt; ({ ...team, role, can: allowedActions(role) }));
+});</code></pre>
+<pre><code>where: { userId },   &lt;-- in listMemberships. this line is the authorisation.</code></pre>
+<p>There is no &ldquo;all teams&rdquo; query to forget a <code>where</code> clause on, so there is nothing to refuse. Somebody in no team gets <code>[]</code> and a <code>200</code>, not a <code>403</code>, and so never learns your team exists &mdash; same reasoning as <a href="./0018-the-route-nobody-audited.html">lesson 18</a>.</p>
+<p class="takeaway">A permission check needs a scope. When the scope <em>is</em> the query, the query is the check.</p>
+
+<h3>One table, two consumers</h3>
+<p><code>can</code> is not a new decision. It is three words in <code>src/auth/can.ts</code>:</p>
+<pre><code>export const allowedActions = (role: Role): readonly Action[] =&gt; PERMISSIONS[role] ?? [];</code></pre>
+<p>The obvious alternative was to write the role&rarr;actions table again in React. Don't: two copies drift, and the copy that drifts is the one nobody tests. Send the answer instead. The front end then holds no policy at all &mdash; only labels:</p>
+<pre><code>const BUTTONS: readonly [Action, string][] = [
+  ["task:create", "New task"],
+  ["member:invite", "Invite member"],
+  ["team:delete", "Delete team"],
+];
+
+BUTTONS.filter(([action]) =&gt; team.can.includes(action)).map(...)   &lt;-- the line you deleted</code></pre>
+<p><b>Hidden, not disabled.</b> A greyed-out <em>Delete team</em> still tells a Viewer that deleting the team is a thing that happens on this screen, and invites them to go looking. If they may not do it, do not mention it.</p>
+
+<h2>The knob that proves it is only a hint</h2>
+<p><a href="./0022-the-browser-does-not-know-you.html">Lesson 22</a> ended with a rule: <strong>auth is the one query with no grace period</strong>, <code>staleTime: 0</code>. The teams query breaks that rule on purpose and keeps the 30-second default.</p>
+<table>
+<tr><th>Query</th><th>staleTime</th><th>Because a stale answer means</th></tr>
+<tr><td><code>["session"]</code></td><td><code>0</code></td><td>a signed-out user still seeing an app</td></tr>
+<tr><td><code>["teams"]</code></td><td><code>30_000</code></td><td>a button drawn that the server will refuse</td></tr>
+</table>
+<p>If <code>can</code> were the check, this cache would be a thirty-second hole. It is not the check, so it is a thirty-second cosmetic wobble. <strong>The safety of a cache depends entirely on what the cached value is allowed to decide.</strong></p>
+
+<h3>And <code>can</code> is approximate even when it is fresh</h3>
+<p>Your <code>can()</code> takes three arguments since <a href="./0009-the-third-argument.html">lesson 9</a>: role, action, <em>and the target</em>. The rank rule &mdash; act only on somebody strictly below you &mdash; needs to know who you are aiming at. A flat list has no target in it. So an Admin's <code>can</code> contains <code>member:remove</code>, and the answer for &ldquo;remove the Owner&rdquo; is still no.</p>
+<p class="takeaway">The UI can be told what a role may generally do. It can never be told what it may do to <em>this</em> person. That gap is a permanent argument for deciding on the server.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="0">
+<p class="q">What does the <code>can</code> list in the reply actually decide?</p>
+<button>Which buttons the page draws</button>
+<button>Which writes the server allows</button>
+<p class="why" hidden>Only the drawing. Every write still passes <code>requirePermission()</code>, which asks <code>can()</code> again with the target loaded. Delete the filter in the React file and the buttons come back &mdash; the 403 does not go away. Measured above.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why does <code>GET /teams</code> need no <code>requirePermission</code> gate?</p>
+<button>The where clause is the scope</button>
+<button>The route reads and never writes</button>
+<p class="why" hidden>A permission is scoped, and this route has no <code>:teamId</code> to scope to. <code>where: { userId }</code> returns only your own membership rows, so there is no row to refuse. &ldquo;It only reads&rdquo; is the wrong reason &mdash; reading somebody else's team would be exactly the leak lesson 18 closed.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why may the teams query cache 30s when the session query may not?</p>
+<button>A stale hint cannot open anything</button>
+<button>A stale role cannot be refreshed</button>
+<p class="why" hidden>A stale session leaves a signed-out person looking at an app. A stale <code>can</code> leaves a button on screen that the server refuses. One is a hole, the other is a cosmetic wobble &mdash; and the difference is not the cache, it is what the value is allowed to decide.</p>
+</div>
+
+<h2>What this does NOT fix</h2>
+<table>
+<tr><th>Gap</th><th>Why it is still open</th></tr>
+<tr><td>The buttons do nothing yet</td><td>They are placeholders. Tasks on screen is the next lesson, and it is the first one where the UI and the gate disagree about a <em>row</em>.</td></tr>
+<tr><td>No front-end test</td><td><code>tsc</code>, <code>oxlint</code> and my browser probe are not a test suite. Vitest when there is a second screen to break.</td></tr>
+<tr><td>No way to create a team in the UI</td><td><code>POST /teams</code> exists and nothing calls it. You seeded rows with a script today.</td></tr>
+</table>
+
+<h2>Do this</h2>
+<ol>
+<li>Two terminals: <code>cd server &amp;&amp; npm run dev</code>, and <code>cd web &amp;&amp; npm run dev</code>. Sign in at <a href="http://localhost:5173">http://localhost:5173</a>.</li>
+<li>Give yourself a second role. In psql, make a team you are only a Viewer in:
+<pre><code>cd server &amp;&amp; psql "$(grep -m1 DATABASE_URL .env | cut -d'"' -f2)"
+
+INSERT INTO "Team" (name) VALUES ('Marketing') RETURNING id;
+-- use that id, and your own user id, below
+INSERT INTO "Membership" ("teamId", "userId", role) VALUES (&lt;teamId&gt;, &lt;userId&gt;, 'VIEWER');</code></pre>
+Reload. Two rows, two roles, two different sets of buttons.</li>
+<li>Click <b>Ask the server anyway</b> on each row. <code>409</code> where you are Owner, <code>403</code> where you are Viewer. Same button, same code, same session.</li>
+<li><strong>Break it on purpose.</strong> In <code>web/src/features/teams/teams-card.tsx</code>, change <code>BUTTONS.filter(([action]) =&gt; team.can.includes(action))</code> to just <code>BUTTONS</code>. Save. The Viewer row now offers <em>Delete team</em>. Click the probe again: still <code>403</code>. Put it back.</li>
+<li>Same thing with no source edit, the way an attacker would. Devtools &rarr; Console, on your own page:
+<pre><code>await fetch("http://localhost:3000/teams/&lt;viewerTeamId&gt;/members", {
+  method: "POST", credentials: "include",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ userId: 999999, role: "OWNER" }),
+}).then(r =&gt; r.status)</code></pre>
+<code>403</code>. The gate does not care whether the request came from your page, your console or curl.</li>
+<li><code>cd server &amp;&amp; npm test</code> &mdash; <strong>141</strong>, six new in <code>src/routes/team-list.test.ts</code>; the last asserts both halves of this lesson at once. Then <code>npm run log</code>: your <code>403</code> is in the audit table with your user id on it, which is what <a href="./0019-the-row-that-outlives-the-user.html">lesson 19</a> was for.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>One account, two teams, two roles. Everything below is from your own app, driven in real Chrome.</p>
+
+<h2>1. What the page draws, and what the server says</h2>
+<div class="rows">
+<div class="owner"><div class="head">Platform <span>OWNER &middot; can: 9</span></div>
+<div class="btns"><b>New task</b><b>Delete task</b><b>Invite member</b><b>Delete team</b></div>
+<p class="probe">Ask the server anyway &rarr; <span class="ok">409</span> <span style="color:var(--muted)">allowed; already a member</span></p></div>
+<div class="viewer"><div class="head">Marketing <span>VIEWER &middot; can: 1</span></div>
+<div class="btns"><span class="none">(nothing offered)</span></div>
+<p class="probe">Ask the server anyway &rarr; <span class="no">403</span> <span style="color:var(--muted)">forbidden</span></p></div>
+</div>
+<p>So far so good, and this is the part most apps stop at. Now delete the one line that filters the buttons &mdash; the change a user can make in their own devtools:</p>
+<div class="rows">
+<div class="viewer hacked"><div class="head">Marketing <span>VIEWER &middot; can: 1</span></div>
+<div class="btns"><b>New task</b><b>Delete task</b><b>Invite member</b><b>Delete team</b></div>
+<p class="probe">Ask the server anyway &rarr; <span class="no">403</span> <span style="color:var(--muted)">unchanged</span></p></div>
+<div style="border:none;display:flex;align-items:center">
+<p style="margin:0;font-size:.85rem;color:var(--muted)">Four buttons appeared. The Viewer's powers did not. The page's opinion of what you may do and the server's decision about it were never the same object.</p></div>
+</div>
+<p class="rule">Hiding happens in code the user owns. Refusing happens on a machine they do not.</p>
+
+<h2>2. One table, two consumers</h2>
+<p>Both answers come out of the same twelve lines in <code>src/auth/can.ts</code>. They leave by different doors and end in different kinds of thing.</p>
+<div class="source">PERMISSIONS: Record&lt;Role, Action[]&gt; &nbsp; &mdash; &nbsp; src/auth/can.ts</div>
+<div class="fork">&darr; &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; &darr;</div>
+<div class="split">
+<div class="hint"><h4>the hint</h4>
+allowedActions(role)<br>
+&darr;<br>
+GET /teams &rarr; can: [&hellip;]<br>
+&darr;<br>
+useTeams() &mdash; 30s cache<br>
+&darr;<br>
+BUTTONS.filter(&hellip;)
+<p class="end">ends in pixels</p></div>
+<div class="gate"><h4>the gate</h4>
+can(role, action, target)<br>
+&darr;<br>
+requirePermission(&hellip;)<br>
+&darr;<br>
+runs on every write<br>
+&darr;<br>
+403, or the handler
+<p class="end">ends in a status code</p></div>
+</div>
+<p>Look at the third argument on the right. The gate knows <em>who you are aiming at</em>; the list cannot &mdash; so an Admin's <code>can</code> holds <code>member:remove</code> while removing the Owner is still refused. The hint is approximate by construction, not by accident.</p>
+<p class="rule">Write the role&rarr;actions table twice and you have two policies. Send the answer instead and you have one, with a copy of its output on screen.</p>
+
+<h2>3. The raw output</h2>
+<pre><code>GET /teams
+  Platform    OWNER    can: [task:read, task:create, task:update, task:delete,
+                             project:create, project:delete, member:invite,
+                             member:remove, team:delete]
+  Marketing   VIEWER   can: [task:read]
+
+what the page drew
+  Platform  | OWNER  | New task | Delete task | Invite member | Delete team
+  Marketing | VIEWER |
+
+probe (POST /teams/:id/members, inviting myself)
+  Platform  -> server said 409
+  Marketing -> server said 403
+
+after replacing BUTTONS.filter(...) with BUTTONS
+  Marketing | VIEWER | New task | Delete task | Invite member | Delete team
+  Marketing -> server said 403
+
+console errors / warnings: none</code></pre>
+<p>Signed in through the form in a fresh browser profile, with <code>npm run dev</code> on both sides.</p>
+
+<footer class="ask">
+<p><b>Back to the lesson:</b> <a href="./0023-the-button-you-can-still-press.html">The button you can still press</a>.</p>
+<p>Ask me about any box here.</p>
+</footer>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://owasp.org/Top10/A01_2021-Broken_Access_Control/">OWASP Top 10 &mdash; A01:2021 Broken Access Control</a>. It is the number one risk on the list, and read the second bullet: &ldquo;bypassing access control checks by modifying the URL, internal application state, or the HTML page&rdquo;. That bullet is the button you just un-hid. Five minutes.</p>
+<p><b>Also:</b> <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html">OWASP Authorization Cheat Sheet</a> &mdash; enforce the check on <em>every</em> request, and fail securely.</p>
+<p><b>Reference card:</b> <a href="../reference/rbac-permissions.html">RBAC and permissions</a>.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/webdev/">r/webdev</a> &mdash; ask how people keep front-end permission hints in step with the server's rules. Watch for anyone who ships a copy of the table to the client, and ask what happens the day the two disagree.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0022-the-browser-does-not-know-you.html">&larr; Back</a>
+<a href="../reference/the-whole-arc.html">The whole arc, one page &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

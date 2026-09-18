@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 24 &mdash; 403 vs 404</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+/* The pipeline: two checks, in order. */
+.pipe { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: stretch;
+  gap: .5rem; margin: 1.2rem 0 .6rem; }
+.pipe > div { border: 1px solid var(--rule); border-radius: 6px; padding: .8rem .9rem;
+  font-family: var(--mono); font-size: .72rem; line-height: 1.7; }
+.pipe .arrow { border: none; display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 1rem; padding: 0; }
+.pipe h4 { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
+  text-transform: uppercase; margin: 0 0 .5rem; color: var(--muted); font-weight: 500; }
+.pipe .gate { border-color: var(--bad); }
+.pipe .row { border-color: var(--accent); }
+.pipe .done { border-color: var(--ok); }
+.pipe .out { margin: .6rem 0 0; font-family: var(--serif); font-size: .82rem; font-weight: 600; }
+.pipe .gate .out { color: var(--bad); }
+.pipe .row .out { color: var(--accent); }
+.pipe .done .out { color: var(--ok); }
+.pipe .file { color: var(--muted); font-size: .66rem; }
+
+/* The five measured URLs. */
+table.urls { font-family: var(--mono); font-size: .74rem; }
+table.urls td:last-child { text-align: right; font-weight: 600; }
+.s200 { color: var(--ok); }
+.s403 { color: var(--bad); }
+.s404 { color: var(--accent); }
+.pair { background: var(--code-bg); }
+
+/* Cache buckets. */
+.cache { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.1rem 0 1rem; }
+.cache > div { border: 1px solid var(--rule); border-radius: 6px; padding: .9rem 1rem;
+  font-family: var(--mono); font-size: .72rem; line-height: 1.75; }
+.cache h4 { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
+  text-transform: uppercase; margin: 0 0 .6rem; color: var(--muted); font-weight: 500; }
+.cache .good { border-color: var(--ok); }
+.cache .bad { border-color: var(--bad); border-style: dashed; }
+.cache .end { margin: .7rem 0 0; font-family: var(--serif); font-size: .82rem; font-weight: 600; }
+.cache .good .end { color: var(--ok); }
+.cache .bad .end { color: var(--bad); }
+
+.rule { font-size: .95rem; padding: .8rem 1rem; border-left: 3px solid var(--accent);
+  background: var(--code-bg); border-radius: 0 4px 4px 0; margin: 1.3rem 0 2.2rem; }
+@media (max-width: 44rem) { .pipe, .cache { grid-template-columns: 1fr; }
+  .pipe .arrow { transform: rotate(90deg); } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 24 &middot; Week 10 &middot; Front end</p>
+<h1>403 vs 404</h1>
+<p class="lede">Tasks go on screen. The moment the page asks about a <em>row</em>, the server gains a second refusal &mdash; and the two mean completely different things. Getting the difference wrong is how a list leaks.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>403 is the gate.</strong> It is decided from your role in <em>this</em> team, before anything looks at the row.</li>
+<li><strong>404 is the row.</strong> <code>where: { id, teamId }</code> found nothing &mdash; because the task is in another team, <em>or</em> because it does not exist. Same word for both, on purpose.</li>
+<li>403 always wins, because the gate runs first. You can never get a 404 from a team you may not touch.</li>
+<li>The cache key mirrors the URL: <code>["teams", teamId, "tasks"]</code>. A key of <code>["tasks"]</code> is one bucket for every team.</li>
+<li>The error line on screen says what the server said and <b>nothing more</b>. A helpful message here un-blurs the 404.</li>
+</ul>
+</div>
+
+<h2>The word pair</h2>
+<div class="word"><b>forbidden</b> &mdash; &ldquo;I know exactly what you asked for, and no.&rdquo; About <em>you</em>. Answerable without reading a single row.</div>
+<div class="word"><b>not found</b> &mdash; &ldquo;there is nothing here under that name.&rdquo; About the <em>row</em>. Deliberately ambiguous: it covers both &ldquo;not in this team&rdquo; and &ldquo;never existed&rdquo;.</div>
+<p class="takeaway">A refusal is an answer, and every answer teaches the asker something. Choose what it teaches.</p>
+
+<h2>Measured, on your API, just now</h2>
+<p>One account: Owner of <b>Platform</b> (431) and of <b>174</b>, Viewer of <b>Marketing</b> (432), not in <b>Legacy</b> (11). Task <b>357</b> lives in Platform. Same <code>PATCH</code>, same cookie, five URLs:</p>
+<pre><code>PATCH /teams/431/tasks/357     own team, own task            200
+PATCH /teams/174/tasks/357     team I own, task is elsewhere 404
+PATCH /teams/174/tasks/999999  team I own, no such task      404   &lt;-- same as above
+PATCH /teams/432/tasks/357     team where I am a Viewer      403
+PATCH /teams/11/tasks/1        team I am not in at all       403   &lt;-- same as above</code></pre>
+<p>Read the two arrows. Line 2 and line 3 are indistinguishable, so an owner of 174 cannot use 174 to find out which task ids exist elsewhere. Line 4 and line 5 are indistinguishable, so a stranger cannot tell a real team from a made-up one &mdash; <a href="./0018-the-route-nobody-audited.html">lesson 18</a>'s rule, still holding four lessons later.</p>
+<div class="aside"><b>Where each answer comes from.</b> The 403 is <code>requirePermission("task:update")</code> in <code>tasks.route.ts</code>, a <code>preHandler</code>. The 404 is <code>if (!task) return reply.code(404)</code> in the handler, after <code>updateTask(id, teamId, …)</code> returned nothing. Two different files, in that order &mdash; which is why 403 always wins.</div>
+<p class="takeaway">Which refusal you get tells you which question was asked first. The gate asks about you; only then does the query ask about the row.</p>
+
+<h2>Why the list route only ever says 403</h2>
+<p><code>GET /teams/:teamId/tasks</code> has no row to miss. It answers <code>200</code> with <code>[]</code> for a team with no tasks, and <code>403</code> for a team that is not yours. An empty list and a forbidden list are different replies &mdash; and that is fine, because the 403 already refused to confirm the team.</p>
+<pre><code>GET /teams/432/tasks   Viewer, no tasks     200 []
+GET /teams/11/tasks    not a member         403 {"error":"forbidden"}</code></pre>
+<p>A <code>VIEWER</code> holds <code>task:read</code> and nothing else, so this is the one task route they get &mdash; and it is exactly the screen you are about to build.</p>
+
+<h2>The code &mdash; type it yourself</h2>
+<p>Three pieces. Nothing here is in your app yet; read it, then write it.</p>
+
+<h3>1. <code>web/src/features/tasks/tasks.ts</code> &mdash; new file</h3>
+<pre><code>import { useQuery } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+
+export type Task = { id: number; title: string; done: boolean };
+
+// The key mirrors the URL. Every guarded route since lesson 8 carries the team
+// in the path, so the cache entry carries it too: one entry per team, never a
+// single shared "tasks" bucket that a second team could read out of.
+export const tasksKey = (teamId: number) =&gt; ["teams", teamId, "tasks"] as const;
+
+export function useTasks(teamId: number) {
+  return useQuery({
+    queryKey: tasksKey(teamId),
+    // sort names a COLUMN, so the server only accepts three strings (lesson 20).
+    queryFn: async () =&gt;
+      (await api.get&lt;Task[]&gt;(`/teams/${teamId}/tasks`, {
+        params: { sort: "id", dir: "asc" },
+      })).data,
+  });
+}</code></pre>
+<p><b>The one line to stare at is the key.</b> Drop the <code>teamId</code> out of it and the first team you open fills the bucket; the second team reads the first team's rows out of the cache and renders them, with no request and no 403 to stop it. <strong>The server never leaked. The cache did.</strong> A query key is not a name for a request &mdash; it is a claim about which answers are interchangeable.</p>
+
+<h3>2. <code>web/src/features/tasks/tasks-panel.tsx</code> &mdash; new file</h3>
+<pre><code>import { errorMessage } from "@/lib/api";
+import { useTasks } from "@/features/tasks/tasks";
+
+export function TasksPanel({ teamId }: { teamId: number }) {
+  const { data: tasks, isPending, error } = useTasks(teamId);
+
+  if (isPending) return &lt;p className="text-muted-foreground text-sm"&gt;Asking…&lt;/p&gt;;
+
+  // Say what the server said, and no more. A friendlier line here — "that task
+  // belongs to another team" — hands back precisely what the 404 blurs.
+  if (error !== null)
+    return &lt;p className="text-destructive text-sm"&gt;{errorMessage(error, "Could not load tasks.")}&lt;/p&gt;;
+
+  if (tasks.length === 0)
+    return &lt;p className="text-muted-foreground text-sm"&gt;No tasks yet.&lt;/p&gt;;
+
+  return (
+    &lt;ul className="grid gap-1"&gt;
+      {tasks.map((task) =&gt; (
+        &lt;li key={task.id} className="flex items-baseline gap-2 text-sm"&gt;
+          &lt;span className="text-muted-foreground font-mono text-xs"&gt;
+            {task.done ? "done" : "open"}
+          &lt;/span&gt;
+          &lt;span className={task.done ? "text-muted-foreground line-through" : ""}&gt;
+            {task.title}
+          &lt;/span&gt;
+        &lt;/li&gt;
+      ))}
+    &lt;/ul&gt;
+  );
+}</code></pre>
+
+<h3>3. <code>web/src/features/teams/teams-card.tsx</code> &mdash; four lines into <code>TeamRow</code></h3>
+<pre><code>import { useState } from "react";                                  // top of file
+import { TasksPanel } from "@/features/tasks/tasks-panel";         // top of file
+
+function TeamRow({ team, user }: { team: Team; user: User }) {
+  const probe = useInviteProbe(team.id, user.id);
+  const [open, setOpen] = useState(false);        // local UI only, not server state
+  …
+      &lt;Button size="sm" variant="ghost" onClick={() =&gt; setOpen((o) =&gt; !o)}&gt;
+        {open ? "Hide tasks" : "Show tasks"}
+      &lt;/Button&gt;
+      {open ? &lt;TasksPanel teamId={team.id} /&gt; : null}</code></pre>
+<p>Closed means unmounted, and an unmounted component asks nothing &mdash; so there is no <code>enabled</code> flag and no effect. And <code>open</code> is honest <code>useState</code>: it is a fact about this browser tab, not a copy of anything the server knows.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">You PATCH a task in a team where your role is Viewer. What comes back?</p>
+<button>404, because the query found nothing</button>
+<button>403, because the gate ran first</button>
+<p class="why" hidden><code>requirePermission</code> is a <code>preHandler</code>: it refuses before <code>updateTask</code> is ever called, so the row is never looked for. A 404 is only reachable once the gate has already said yes. Measured above, line 4.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why does a task in another team answer 404 rather than 403?</p>
+<button>403 would confirm that id exists</button>
+<button>404 is what Prisma throws here</button>
+<p class="why" hidden>You passed the gate for <em>this</em> team, so "forbidden" would be a lie about your role and a fact about somebody else's row. 404 covers "elsewhere" and "nowhere" with one word. Nothing throws &mdash; <code>updateMany</code> reports zero rows and the handler chooses the code.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">What breaks if the query key is <code>["tasks"]</code> instead?</p>
+<button>Every open team refetches its rows</button>
+<button>One team renders another's rows</button>
+<p class="why" hidden>One key means one cached value. Open Platform, then open Marketing: Marketing reads Platform's tasks straight out of the cache, fresh for 30 seconds, with no request made. The API refused nothing because the API was never asked.</p>
+</div>
+
+<h2>What this does NOT do</h2>
+<table>
+<tr><th>Gap</th><th>Why it is still open</th></tr>
+<tr><td>The list is read-only</td><td>Ticking a box is a write, and a write needs the cache updated without a refetch. Next lesson.</td></tr>
+<tr><td>No <code>ownerId</code> on screen</td><td><code>TaskPublic</code> deliberately omits it (lesson 17). The screen cannot show what the reply does not carry.</td></tr>
+<tr><td>No pagination</td><td><code>listTasks</code> has no <code>take</code>. Fine at five rows; a five-line change when it is not.</td></tr>
+</table>
+
+<h2>Do this</h2>
+<ol>
+<li>Write the three pieces above. <code>cd web &amp;&amp; npx tsc -b &amp;&amp; npm run lint</code> before you look at the page.</li>
+<li>Two terminals: <code>cd server &amp;&amp; npm run dev</code>, <code>cd web &amp;&amp; npm run dev</code>. Sign in.</li>
+<li>Give the team you own some tasks &mdash; through the API, not psql, because you are allowed to:
+<pre><code>await fetch("http://localhost:3000/teams/&lt;ownerTeamId&gt;/tasks", {
+  method: "POST", credentials: "include",
+  headers: { "content-type": "application/json" },
+  body: JSON.stringify({ title: "Ship the tasks screen" }),
+}).then(r =&gt; r.json())</code></pre>
+Try the same call against your Viewer team: <code>403</code>, and no row is created.</li>
+<li><b>Show tasks</b> on both rows. Owner team: your tasks. Viewer team: <code>No tasks yet.</code> &mdash; a <code>200</code> with an empty array, not a refusal.</li>
+<li><strong>Reproduce the table.</strong> In the console, PATCH the id of an owned task through each of your team ids in turn. Watch the 403 and the 404 swap places as you change only the team in the URL &mdash; the task id never moves.</li>
+<li><strong>Break it on purpose.</strong> Change the key to <code>["tasks"]</code>. Open your owner team, then your viewer team. The viewer team now shows the owner team's tasks, and the Network tab shows no second request. Put it back.</li>
+<li><code>npm run log</code> in <code>server/</code>: every 403 you just collected is a row with your user id on it, from <a href="./0019-the-row-that-outlives-the-user.html">lesson 19</a>.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Everything below is from your own API, measured with one cookie and five URLs.</p>
+
+<h2>1. One request, two checks, in order</h2>
+<div class="pipe">
+<div class="gate"><h4>preHandler</h4>
+requirePermission<br>("task:update")<br>
+<span class="file">auth/require-permission.ts</span>
+<p class="out">403 forbidden</p>
+<span class="file">asks about YOU.<br>Never reads the task.</span></div>
+<div class="arrow">&rarr;</div>
+<div class="row"><h4>handler</h4>
+updateTask(id, teamId)<br>
+where: { id, teamId }<br>
+<span class="file">store/task.store.ts</span>
+<p class="out">404 not found</p>
+<span class="file">asks about the ROW.<br>Only runs if the gate agreed.</span></div>
+<div class="arrow">&rarr;</div>
+<div class="done"><h4>reply</h4>
+the changed task<br>
+TaskPublic.parse(&hellip;)<br>
+<span class="file">schemas/task.schema.ts</span>
+<p class="out">200 ok</p>
+<span class="file">id, title, done.<br>No ownerId, ever.</span></div>
+</div>
+<p class="rule">The gate runs first, so <b>403 always wins</b>. A 404 is proof that you passed the gate &mdash; which is exactly why it must not say which of &ldquo;elsewhere&rdquo; or &ldquo;nowhere&rdquo; it means.</p>
+
+<h2>2. Five URLs, one cookie, one task id</h2>
+<p>Owner of <b>Platform (431)</b> and <b>174</b>. Viewer of <b>Marketing (432)</b>. Not in <b>Legacy (11)</b>. Task <b>357</b> lives in Platform. Only the team in the path changes:</p>
+<table class="urls">
+<tr><th>PATCH</th><th>who you are there</th><th></th></tr>
+<tr><td>/teams/431/tasks/357</td><td>owner, and the task is here</td><td class="s200">200</td></tr>
+<tr class="pair"><td>/teams/174/tasks/357</td><td>owner, task is somewhere else</td><td class="s404">404</td></tr>
+<tr class="pair"><td>/teams/174/tasks/999999</td><td>owner, no such task anywhere</td><td class="s404">404</td></tr>
+<tr><td>/teams/432/tasks/357</td><td>viewer &mdash; no <code>task:update</code></td><td class="s403">403</td></tr>
+<tr><td>/teams/11/tasks/1</td><td>not a member at all</td><td class="s403">403</td></tr>
+</table>
+<p>The two shaded rows are indistinguishable, so nobody can walk task ids. The last two are indistinguishable, so nobody can walk team ids. <b>Ambiguity is the feature, not sloppiness.</b></p>
+<p>And the list route, which has no row to miss:</p>
+<table class="urls">
+<tr><td>GET /teams/432/tasks</td><td>viewer, empty team</td><td class="s200">200 []</td></tr>
+<tr><td>GET /teams/11/tasks</td><td>not a member</td><td class="s403">403</td></tr>
+</table>
+
+<h2>3. The query key is the scope</h2>
+<p>Open Platform, then open Marketing. Same two clicks, two different keys:</p>
+<div class="cache">
+<div class="good"><h4>["teams", teamId, "tasks"]</h4>
+["teams", 431, "tasks"] &rarr; [357, 358]<br>
+["teams", 432, "tasks"] &rarr; <span style="color:var(--muted)">miss &rarr; GET /teams/432/tasks</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&rarr; <span class="s200">200 []</span>
+<p class="end">Marketing shows Marketing.</p></div>
+<div class="bad"><h4>["tasks"]</h4>
+["tasks"] &rarr; [357, 358]<br>
+["tasks"] &rarr; <span style="color:var(--muted)">hit. fresh for 30s. no request.</span><br>
+&nbsp;&nbsp;&nbsp;&nbsp;&rarr; <span class="s403">no status at all</span>
+<p class="end">Marketing shows Platform's tasks.</p></div>
+</div>
+<p class="rule">Nothing was forbidden, because nothing was asked. <b>A query key is not a name for a request &mdash; it is a claim about which answers are interchangeable.</b> Leave the scope out of the key and you have told the cache that two teams are the same team.</p>
+
+<p class="nav"><a href="./0024-two-ways-to-say-no.html">&larr; Lesson 24</a> &middot; <a href="../reference/rbac-permissions.html">RBAC reference card</a> &middot; <a href="./index.html">All lessons</a></p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html">OWASP &mdash; Insecure Direct Object Reference Prevention</a>. Short, and it is exactly this lesson: an id in a URL is not permission to see the thing it names. Five minutes.</p>
+<p><b>Also:</b> <a href="https://tanstack.com/query/latest/docs/framework/react/guides/query-keys">TanStack Query &mdash; Query Keys</a>. &ldquo;If your query function depends on a variable, include it in your query key&rdquo;, which today is a security rule.</p>
+<p><b>Reference card:</b> <a href="../reference/rbac-permissions.html">RBAC and permissions</a> &mdash; the 403/404 table is on it now.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/webdev/">r/webdev</a> &mdash; ask when people return 404 instead of 403, and watch for the ones who say &ldquo;always 404&rdquo;. Ask them what their own users see when they genuinely lose access.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0023-the-button-you-can-still-press.html">&larr; Back</a>
+<a href="../reference/the-whole-arc.html">The whole arc, one page &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

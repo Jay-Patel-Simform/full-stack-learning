@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 40 &mdash; A believed type can check itself</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 40 &middot; Week 11 &middot; Real world</p>
+<h1>A believed type can check itself</h1>
+<p class="lede"><a href="./0039-the-audit-page-in-the-front-end.html">Lesson 39</a> named a gap and did not close it: <code>AuditRow</code> is a <b>believed</b> type &mdash; a claim about JSON, with nothing checking it. Today you close it, for real code, with a number attached: I measured what a full validator library costs your bundle (<b>91.5&nbsp;KB gzip</b>, for one small schema) against what fifteen lines of your own code cost (<b>0&nbsp;KB, no install</b>). Both catch the same bug. You are taking the second one.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>A believed type can be turned into a checked one</strong> &mdash; you just have to write the check yourself, at the one place the value arrives.</li>
+<li><strong>Measured: a full schema-validator bundle costs 91.5&nbsp;KB gzip</strong> for a nine-field object, in a minified bundle. Your whole app's JS is smaller than that today.</li>
+<li><strong>A hand-written guard for the same object is 15 lines and 0&nbsp;KB.</strong> It catches the exact bug lesson 39 found, on the exact field that hid it.</li>
+<li><strong>The guard throws inside <code>queryFn</code>.</strong> React Query already has a place for that error &mdash; it is the <code>error</code> state from <a href="./0022-the-browser-does-not-know-you.html">lesson 22's</a> three states. No new UI code.</li>
+<li><strong>Streak: 40 lessons, no new dependency.</strong> This lesson is the one that could have broken it, on purpose, and did not.</li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<pre><code>server: npm test          <b>162 passing</b>
+web:    npm test          <b>7 passing</b>
+web:    npx tsc -b        clean
+web:    npm run build     clean</code></pre>
+<p>Nothing to hand over &mdash; you built lesson 39 yourself, and I read it before writing this. No open bug in your code today. The open thing is a question, from lesson 39's footer: <em>validate the reply with zod, or keep believing it?</em> This lesson answers it.</p>
+
+<h2>The question, measured both ways</h2>
+<p>A <b>schema validator</b> is a library that turns a believed type into a checked one: you describe the shape once, and it inspects the actual value at runtime and tells you if it disagrees. Zod is the one your server already uses. The question is not whether validation works &mdash; it does, I ran it:</p>
+<pre><code>AuditPage.safeParse({ ..., status: "200" })
+-> { success: false, error: { path: ["items",0,"status"], message: "expected number, received string" } }</code></pre>
+<p>The question is what it costs to have that in the browser. I bundled one nine-field zod schema, alone, with nothing else in the file, through the same minifier Vite uses:</p>
+<div class="scroll"><table>
+<tr><th>build</th><th>minified</th><th>gzip</th></tr>
+<tr><td>one zod schema, bundled alone</td><td>440&nbsp;KB</td><td class="no"><b>91.5&nbsp;KB</b></td></tr>
+<tr><td>your whole <code>web/dist</code> today (lesson 26's number)</td><td>&mdash;</td><td>well under that</td></tr>
+</table></div>
+<p>That number is not zod being bloated for no reason &mdash; a real validator handles unions, refinements, async checks, error formatting, dozens of things <code>AuditPage</code> never uses. You would pay for machinery your one schema does not need. This is the same shape as <a href="./0022-the-browser-does-not-know-you.html">lesson 22's</a> lucide-react finding: 44&nbsp;MB installed, 0 imports. Except this time the import <em>would</em> be real, and the cost would ship to every visitor.</p>
+
+<h2>Show the bad version first</h2>
+<div class="vs">
+<div class="no"><h4>Add zod to <code>web</code></h4>
+<pre><code>npm install zod
+// audit-row.ts
+import { z } from "zod";
+export const AuditRow = z.object({
+  id: z.number(),
+  at: z.string(),
+  // ...9 fields
+});</code></pre>
+<p>Works. Also: a new dependency, 91.5&nbsp;KB gzip for this one schema, and a second copy of &ldquo;what the reply looks like&rdquo; to keep in sync with the server's own zod schema &mdash; the exact staleness problem from lesson 39, just moved one level up.</p></div>
+<div class="yes"><h4>Write the check you actually need</h4>
+<pre><code>// audit-row.ts, still 0 imports
+function isAuditRow(v: unknown): v is AuditRow {
+  const r = v as Partial&lt;AuditRow&gt;;
+  return typeof r?.id === "number"
+    &amp;&amp; typeof r.at === "string"
+    &amp;&amp; typeof r.status === "number";
+    // the three fields a wrong type would hide silently
+}</code></pre>
+<p>15 lines total (full version below). 0&nbsp;KB. Runs in the same file that already has no imports, so <a href="./0032-the-function-you-cannot-import.html">lesson 32's</a> import-graph rule keeps it testable.</p></div>
+</div>
+<p class="takeaway">The library and the hand-check catch the <em>same</em> bug. The library also validates shapes you do not have. You are not rejecting validation &mdash; you are rejecting the 96% of it this page does not use. Ninth dependency decision in this workspace, and it fits the fourth rule from <a href="./0016-the-request-with-no-body.html">lesson 16</a>'s table: take a dependency only when the problem has no decisions left in it. This one still has all its decisions left &mdash; nine fields, three that matter.</p>
+
+<h2>Where the check belongs</h2>
+<p>Not in the component. Lesson 39 put the pure function in <code>audit-row.ts</code> because it has no <code>@/</code> imports and <code>node --test</code> can load it. The guard belongs there too, and it runs at the one place a believed value turns into a used one &mdash; inside <code>queryFn</code>, before the page ever holds it:</p>
+<pre><code>// audit.ts
+queryFn: async ({ pageParam }) =&gt; {
+  const page = (
+    await api.get&lt;unknown&gt;(`/teams/${teamId}/audit`, {
+      params: { cursor: pageParam, ...filter },
+    })
+  ).data;
+  return assertAuditPage(page); // throws here, or you get an AuditPage back
+},</code></pre>
+<p>That single change is why <code>api.get&lt;unknown&gt;</code> replaces <code>api.get&lt;AuditPage&gt;</code> &mdash; the type parameter was always a claim, never a check. Now the claim is backed by code on the next line.</p>
+<div class="word"><b>believed</b> &mdash; a type on a value from outside, with nothing comparing them. What lesson 39 found.</div>
+<div class="word"><b>checked, by hand</b> &mdash; the same value, run through code that actually looks at it before anything downstream trusts it. What today adds.</div>
+<p>A wrong shape now throws inside <code>queryFn</code>. React Query already has a place for a thrown error &mdash; it is the same <code>error</code> the page has shown since lesson 39's <code>if (error !== null)</code> line. No new UI branch, no new state. The three states from <a href="./0022-the-browser-does-not-know-you.html">lesson 22</a> already cover &ldquo;the server sent something the page cannot use.&rdquo;</p>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">What does the 91.5&nbsp;KB measurement actually prove?</p>
+<button>Zod is badly written</button>
+<button>Most of a general validator is unused here</button>
+<p class="why" hidden>Zod handles unions, refinements, async parsing, and detailed error trees &mdash; real work for a general tool. <code>AuditPage</code> uses none of that. The cost is proportional to the tool's generality, not to this one schema's needs.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Where does <code>assertAuditPage</code> have to run?</p>
+<button>Inside <code>queryFn</code>, before the hook returns data</button>
+<button>Inside the component, before rendering rows</button>
+<p class="why" hidden>By the time the component has the data, code has already trusted it &mdash; the query already cached it, <code>data.pages</code> already exists. The check has to sit at the boundary where an unknown value first becomes a typed one, which is the line that turns the raw response into what <code>queryFn</code> returns.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>Break it first.</strong> In your dev tools or with <code>curl</code>, confirm today's page believes anything: temporarily change <code>audit-row.ts</code>'s <code>formatAt</code> to accept a number too (<code>at: string | number</code>) and pass a number through by hand in a quick console call. It prints a wrong date with no error. Revert.</li>
+
+<li><strong>Add the guard.</strong> In <code>web/src/features/audit/audit-row.ts</code>, no new imports:
+<pre><code>function isAuditRow(v: unknown): v is AuditRow {
+  const r = v as Partial&lt;AuditRow&gt;;
+  return typeof r?.id === "number"
+    &amp;&amp; typeof r.at === "string"
+    &amp;&amp; (r.userId === null || typeof r.userId === "number")
+    &amp;&amp; (r.actorEmail === null || typeof r.actorEmail === "string")
+    &amp;&amp; typeof r.method === "string"
+    &amp;&amp; typeof r.route === "string"
+    &amp;&amp; typeof r.status === "number"
+    &amp;&amp; (r.targetType === null || typeof r.targetType === "string")
+    &amp;&amp; (r.targetId === null || typeof r.targetId === "number");
+}
+
+export function assertAuditPage(v: unknown): AuditPage {
+  const p = v as Partial&lt;AuditPage&gt;;
+  if (!p || !Array.isArray(p.items) || !p.items.every(isAuditRow)) {
+    throw new Error("audit page did not match the shape the page expects");
+  }
+  return v as AuditPage;
+}</code></pre></li>
+
+<li><strong>Wire it into the hook.</strong> In <code>audit.ts</code>, change the return type of the <code>api.get</code> call to <code>unknown</code> and pass the result through <code>assertAuditPage</code> before returning it from <code>queryFn</code>.</li>
+
+<li><strong>Two tests, break them first.</strong> Add to <code>audit-row.test.ts</code>:
+<pre><code>test("a well-formed page passes", () =&gt; {
+  assertAuditPage({ items: [], nextCursor: null });
+});
+test("status as a string is rejected", () =&gt; {
+  assert.throws(() =&gt; assertAuditPage({
+    items: [{ id: 1, at: "x", userId: null, actorEmail: null,
+      method: "GET", route: "/x", status: "200",
+      targetType: null, targetId: null }],
+    nextCursor: null,
+  }));
+});</code></pre>
+<b>Expect <code>npm test</code> in <code>web/</code> to report 9.</b> Then comment out the <code>status</code> check inside <code>isAuditRow</code>, watch the second test go red, put it back.</li>
+
+<li><strong>Prove it against the real server.</strong> Load the page as before. <b>Expect nothing to change on screen</b> &mdash; a correct reply passes the guard silently, same as lesson 39's ending. The guard is dormant until the server disagrees with it.</li>
+
+<li><strong>Words, not code.</strong> One sentence: name one other reply in this app that is still a believed type after today (there is at least one &mdash; <code>useSession</code>'s <code>User</code>, or <code>useTeams</code>'s <code>can</code> list). You do not have to fix it. Just name it.</li>
+</ol>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://zod.dev/?id=parseasync">Zod docs &mdash; parse vs safeParse</a>. Even without installing it, the API shape (a schema that returns a typed value or a typed error) is worth twenty minutes, because <code>assertAuditPage</code> today is a hand-rolled version of exactly that idea.</p>
+<p><b>Then this:</b> <a href="https://web.dev/articles/reduce-javascript-payloads-with-tree-shaking">web.dev &mdash; reduce JavaScript payloads with tree-shaking</a>. Short, and it is the general version of today's measurement: you pay for what you import, not for what you use of it.</p>
+<p><b>Reference card:</b> <a href="../reference/react-query-rules.html">React Query rules</a>, gaining a row today: <code>queryFn</code> is where a believed reply becomes a checked one.</p>
+<p><b>Ask the community:</b> <a href="https://github.com/TanStack/query/discussions">TanStack Query discussions</a>, search &ldquo;validate response queryFn&rdquo;. You will find people who chose zod anyway, for bigger APIs than this one &mdash; a useful check on whether 91.5&nbsp;KB stays the right call as this app grows.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0039-the-audit-page-in-the-front-end.html">&larr; Back</a>
+<a href="../reference/react-query-rules.html">React Query reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

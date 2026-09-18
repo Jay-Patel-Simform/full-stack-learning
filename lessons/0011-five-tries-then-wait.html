@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 11 — Login throttling</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 11 &middot; Week 7&ndash;8 &middot; API security</p>
+<h1>Login throttling</h1>
+<p class="lede">Every route is behind a gate now &mdash; except the one that hands out the keys. The interesting part is <em>what you count</em>.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>Login has no gate, and does 252 ms of expensive work per attempt.</li>
+<li>Counting per IP does not work &mdash; an attacker rents thousands of them.</li>
+<li>Count the thing they have only <strong>one</strong> of: the email.</li>
+<li>Do not <em>lock</em> the account. Back off instead. A lockout is a free denial-of-service button.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  A["attacker<br/>10,000 proxies<br/>1 victim email"] --> K{"what do you count?"}
+  K -- "request.ip" --> BAD["10,000 keys<br/>5 free tries each<br/>= 50,000 guesses"]
+  K -- "email" --> GOOD["1 key<br/>5 free tries<br/>then 1s, 2s, 4s...15min"]
+</pre>
+<figcaption>The defence is only as good as the key. The attacker rotates whatever is cheap for them; you must count whatever is scarce for them.</figcaption>
+</figure>
+
+<h2>The idea</h2>
+<p>Two attacks, and they need different keys.</p>
+<table>
+<tr><th>Attack</th><th>One of these, many of those</th></tr>
+<tr><td>Credential stuffing</td><td>one email, many stolen passwords</td></tr>
+<tr><td>Password spraying</td><td>one password, many emails</td></tr>
+</table>
+<p>The default that every rate-limit library ships is <code>request.ip</code>. It is the wrong key for a login, because the IP is the cheap part for the attacker.</p>
+
+<h3>Back off, do not lock</h3>
+<p>A lockout after five failures looks strict and is a gift: I fail your login five times and <em>you</em> cannot get in. Doubling the wait costs an attacker everything and a real person almost nothing, because a real person types the right password on try three.</p>
+
+<div class="word"><b>exponential backoff</b> &mdash; wait 1s, then 2, 4, 8, 16&hellip; up to a 15 minute cap. The wait grows faster than the attacker can work.</div>
+
+<h2>The code</h2>
+<pre><code>// src/auth/throttle.ts
+const fails = new Map&lt;string, { n: number; until: number }&gt;();
+const MAX_KEYS = 10_000;   // any store keyed on caller input, the caller can fill
+
+export function blockedFor(email: string): number {
+  const e = fails.get(email.toLowerCase());
+  return e &amp;&amp; e.until &gt; Date.now() ? e.until - Date.now() : 0;
+}</code></pre>
+
+<pre><code>// src/routes/auth.routes.ts — ORDER MATTERS
+const wait = blockedFor(body.email);
+if (wait) return reply.code(429).send({ retryAfter: wait });  // 1st: a Map lookup
+
+const user = await findUser(body.email);                       // 2nd
+const ok = await verify(body.password, user.passwordHash);     // 3rd: 252 ms</code></pre>
+
+<p>The check runs <em>before</em> the hash. A blocked request costs you a <code>Map</code> lookup, not a quarter of a second of CPU.</p>
+
+<p class="takeaway">Rate-limit the thing the attacker has only one of.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">Why is locking an account after five failures a bad idea?</p>
+<button>Attackers simply wait out the lock</button>
+<button>Anyone can lock anyone else out</button>
+<p class="why" hidden>The lock is triggered by a stranger's failures but the pain lands on the real owner. You have handed the internet a button that disables your users.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><code>npm test</code> &mdash; 66 tests.</li>
+<li>Fail login six times with <code>curl</code>. Watch for the 429 and the growing wait.</li>
+<li>Break it on purpose: delete <code>.toLowerCase()</code> and watch one test catch it. Put it back.</li>
+</ol>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://owasp.org/www-community/controls/Blocking_Brute_Force_Attacks">OWASP, Blocking Brute Force Attacks</a>.</p>
+<p><b>The long version:</b> <a href="./long/0011-five-tries-then-wait.html">with the full "what this does NOT fix" table</a>.</p>
+<p>Question I want you to sit with: where does this counter live after a restart? That is lesson 12's neighbour.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0010-a-task-belongs-to-a-team.html">&larr; Back</a>
+<a href="./0012-the-floor-under-everything.html">Next: the floor under everything &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

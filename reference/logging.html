@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference &mdash; Logging and redaction</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<p class="kicker">Reference &middot; Real world</p>
+<h1>Logging and redaction</h1>
+<p class="lede">What a log line may carry, what it may never carry, and how to prove it. Open this before you add a log call. From <a href="../lessons/0034-the-log-that-keeps-the-secret.html">lesson 34</a>.</p>
+
+<h2>The rule</h2>
+<p class="takeaway">Log the fields you <b>chose</b>. Never a whole object.</p>
+<div class="word"><b>structured log</b> &mdash; every line is JSON with named fields, not a sentence. You filter on <code>userId=7</code>; you do not write a regular expression.</div>
+<div class="word"><b>allowlist</b> &mdash; you name what is permitted. Everything else is refused by default. <code>{ userId: user.id }</code>, <code>TaskPublic</code>, <code>strict()</code>.</div>
+<div class="word"><b>denylist</b> &mdash; you name what is forbidden. Everything else passes. <code>redact</code> is one, and it only covers what you predicted.</div>
+<div class="word"><b>redaction</b> &mdash; replacing a value with <code>"[Redacted]"</code> before it is written. The key stays, so you can still see the field existed.</div>
+<div class="word"><b>log stream</b> &mdash; where the lines are written. Default stdout. Point it at memory and a test can read them.</div>
+<p class="takeaway">The second rule, and the one that costs money when it is broken: <b>a log is a second wire out of your process.</b> The reply has a schema. The log does not. Same <code>catch</code> block, same secrets in scope.</p>
+
+<h2>Never log these</h2>
+<div class="scroll">
+<table>
+<tr><th>Value</th><th>Where it hides in this app</th><th>Why</th></tr>
+<tr><td>Password</td><td><code>body.password</code> on register and login</td><td>Plain text, reusable on other sites.</td></tr>
+<tr><td>Password hash</td><td><code>user.passwordHash</code>, and any <code>err</code> a user object is attached to</td><td>Offline cracking. The reason lesson 30 stopped selecting it.</td></tr>
+<tr><td>Session id</td><td>the <code>sid</code> cookie, <code>req.headers.cookie</code></td><td>Whoever reads the log can be that user. No password needed.</td></tr>
+<tr><td>Tokens, API keys</td><td><code>req.headers.authorization</code>, <code>config</code> values</td><td>Same as above, and they outlive the log.</td></tr>
+<tr><td>Whole request body</td><td><code>{ body: req.body }</code> while debugging</td><td>It is whatever the caller sent, including the three rows above.</td></tr>
+<tr><td>Whole rows from the database</td><td><code>{ user }</code>, <code>{ team }</code></td><td>Logs today&rsquo;s columns <em>and</em> the ones added next year.</td></tr>
+</table>
+</div>
+
+<h2>The two layers</h2>
+<div class="scroll">
+<table>
+<tr><th></th><th>Plan: choose the fields</th><th>Net: redact</th></tr>
+<tr><td>Lives</td><td>At every call site</td><td>Once, in <code>buildApp</code></td></tr>
+<tr><td>Shape</td><td>allowlist</td><td>denylist</td></tr>
+<tr><td>Survives a new column</td><td><b>yes</b></td><td>no</td></tr>
+<tr><td>Survives a tired developer</td><td>no</td><td><b>yes</b>, if the path was predicted</td></tr>
+<tr><td>Fails</td><td>visibly &mdash; the field is simply not there</td><td><b>silently</b></td></tr>
+</table>
+</div>
+<p>Keep both. Only the first one is the plan.</p>
+
+<h2>The redact list, as it stands</h2>
+<pre><code>// server/src/app.ts
+export const REDACT_PATHS = [
+  "*.password",
+  "*.passwordHash",
+  "err.user.password",
+  "err.user.passwordHash",
+  "req.headers.cookie",
+  "req.headers.authorization",
+];</code></pre>
+
+<h2>Path syntax, and the trap</h2>
+<p>A path is <b>exact</b>, counted from the root of the log line. The wildcard is <b>one level</b>.</p>
+<div class="scroll">
+<table>
+<tr><th>Path</th><th>Against <code>{ err: { user: { passwordHash } } }</code></th></tr>
+<tr><td><code>"user.passwordHash"</code></td><td>misses &mdash; wrong root</td></tr>
+<tr><td><code>"*.passwordHash"</code></td><td>misses &mdash; <code>*</code> is one level, this is two</td></tr>
+<tr><td><code>"err.*.passwordHash"</code></td><td>catches</td></tr>
+<tr><td><code>"err.user.passwordHash"</code></td><td>catches</td></tr>
+<tr><td><code>"**.passwordHash"</code></td><td><b>misses, and says nothing.</b> Not pino syntax. No throw, no warning, value printed in full.</td></tr>
+</table>
+</div>
+<p class="takeaway">Third member of a family you now know: <b>dead code has no failing state</b> (lesson 29), <b>a filter missing from the key sends zero requests</b> (lesson 33), <b>a redact path that matches nothing is silence</b> (lesson 34).</p>
+<p><code>remove: true</code> deletes the key instead of the value. Not used here &mdash; &ldquo;this field was present&rdquo; is worth keeping while reading a log.</p>
+
+<h2>Levels</h2>
+<div class="scroll">
+<table>
+<tr><th>Name</th><th>Number</th><th>Use it for</th></tr>
+<tr><td><code>error</code></td><td>50</td><td>Our code broke. Someone should look.</td></tr>
+<tr><td><code>warn</code></td><td>40</td><td>Recovered, but suspicious. Rate limit hit, bad login burst.</td></tr>
+<tr><td><code>info</code></td><td>30</td><td>The default. One line in, one line out, per request.</td></tr>
+<tr><td><code>debug</code></td><td>20</td><td>Turned on while hunting something. Off in production.</td></tr>
+<tr><td><code>silent</code></td><td>&mdash;</td><td><code>npm test</code>. Nothing is written at all.</td></tr>
+</table>
+</div>
+<p><code>LOG_LEVEL</code> sets the floor: lines below it are never written. See <a href="./environment.html">environment and config</a>.</p>
+
+<h2>Testing a log line</h2>
+<p>A log line has no failing state, so give it a stream and read it.</p>
+<pre><code>const out: string[] = [];
+const sink = new Writable({
+  write(chunk, _enc, cb) { out.push(chunk.toString()); cb(); },
+});
+const app = await buildApp(sink);          // a stream also raises the level
+
+app.log.error({ err }, "unhandled error");
+await app.close();
+
+const all = out.join("");
+assert.ok(all.length &gt; 0, "the log wrote nothing - check the level");
+assert.ok(!all.includes("scrypt$SALT$HASH"));</code></pre>
+<p class="takeaway">Assert the log is <b>not empty</b> first. An empty string passes every &ldquo;does not include&rdquo; check, so without that line the test is green on the day redaction breaks.</p>
+
+<h2>Audit rows: pointer and copy (lesson 36)</h2>
+<p class="takeaway">An id is a pointer. A pointer into a deleted row is nothing. An audit row stores <b>copies</b>.</p>
+<div class="scroll">
+<table>
+<tr><th>Column</th><th>Kind</th><th>Still true after the target is deleted?</th></tr>
+<tr><td><code>userId</code>, <code>teamId</code>, <code>params.id</code></td><td>Pointer</td><td>No &mdash; measured: 3,428 of 7,201 rows point at a user that is gone</td></tr>
+<tr><td><code>actorEmail</code>, <code>targetType</code>, <code>targetSnapshot</code></td><td>Copy</td><td>Yes, forever</td></tr>
+</table>
+</div>
+<p>Rules that go with it:</p>
+<ul>
+<li><b>No <code>@relation</code> on <code>userId</code> or <code>targetId</code>.</b> A cascade deletes the evidence at the moment it becomes evidence.</li>
+<li><b>Snapshot columns are nullable.</b> Old rows cannot be backfilled, and invented data in an audit log is worse than an empty column.</li>
+<li><b>Never update a snapshot.</b> If it followed the live row, a rename would rewrite history.</li>
+<li><b>Append-only.</b> Enforced in code today; <code>REVOKE UPDATE, DELETE</code> in the database is the week-13 version.</li>
+</ul>
+
+<h2>When to capture (lesson 36)</h2>
+<p>The audit write lives in one <code>onResponse</code> hook. That hook runs <b>after</b> the handler, so on a delete there is nothing left to read &mdash; the snapshot read returns <code>null</code>, silently.</p>
+<pre><code>onRequest   requireAuth        target alive
+preHandler  requirePermission  target alive
+handler     deleteTask(...)    <b>target gone from here on</b>
+onResponse  writeAudit(...)    too late to copy anything</code></pre>
+<p class="takeaway">Capture early, write once. The handler fills <code>request.auditTarget</code>; the hook is still the only code that inserts a row.</p>
+
+<h2>Retention: how rows leave (lesson 43)</h2>
+<p>The app cannot delete an audit row &mdash; <code>tasks_app</code> has no DELETE. One job does it, and it is the second job that needs the owner login (migrations were the first).</p>
+<pre><code>npm run audit:prune              # uses AUDIT_RETENTION_DAYS, default 90
+AUDIT_RETENTION_DAYS=3 npm run audit:prune   # one run, different cutoff
+
+0 3 * * * cd /path/to/server &amp;&amp; /usr/local/bin/npm run audit:prune >> /tmp/audit-prune.log 2>&amp;1</code></pre>
+<div class="scroll"><table>
+<tr><th>Rule</th><th>Why</th></tr>
+<tr><td>Own connection, on <code>DATABASE_URL</code></td><td>The shared <code>prisma</code> is <code>tasks_app</code> outside tests, and would be refused with <code>42501</code>.</td></tr>
+<tr><td>Cron, never a route</td><td>The strong login is allowed only where no stranger can reach the code path.</td></tr>
+<tr><td><code>now() - interval</code> in SQL</td><td>One clock decides what &ldquo;old&rdquo; means &mdash; the same one that stamped <code>at</code>.</td></tr>
+<tr><td>Running it twice deletes nothing more</td><td>A scheduled job runs whether or not you are watching.</td></tr>
+<tr><td>Never accept 0 days</td><td>&ldquo;Older than now&rdquo; is every row. Guarded at boot and again in the function.</td></tr>
+</table></div>
+
+<h2>Space: DELETE does not shrink the table (lesson 44)</h2>
+<p>A DELETE marks a row version dead and leaves the bytes in the file. Retention <b>bounds</b> the table; it does not make it smaller.</p>
+<div class="scroll"><table>
+<tr><th></th><th><code>VACUUM</code></th><th><code>VACUUM FULL</code></th></tr>
+<tr><td>frees space for</td><td>Postgres, inside the same file</td><td>the operating system</td></tr>
+<tr><td>lock</td><td>none that blocks reads or writes</td><td><b>ACCESS EXCLUSIVE</b> &mdash; table is offline</td></tr>
+<tr><td>who runs it</td><td>autovacuum, automatically, at 20% dead</td><td>you, by hand, almost never</td></tr>
+<tr><td>on a log table</td><td>this is the answer</td><td>only after a one-off huge delete, off-hours</td></tr>
+</table></div>
+<pre><code># is it happening? one query, changes nothing
+select n_live_tup, n_dead_tup, vacuum_count, autovacuum_count, last_autovacuum
+from pg_stat_user_tables where relname='AuditLog';
+
+select pg_size_pretty(pg_total_relation_size('"AuditLog"'));   # total
+select pg_size_pretty(pg_relation_size('"AuditLog"'));         # heap only
+select pg_size_pretty(pg_indexes_size('"AuditLog"'));          # indexes &mdash; often bigger</code></pre>
+<p class="warn"><b>The silent failure.</b> <code>VACUUM</code> as a non-owner prints <code>WARNING: permission denied to vacuum ... skipping it</code>, then reports <code>VACUUM</code> and <b>exits 0</b>. DELETE under the same login is a hard <code>ERROR</code>. A maintenance job must report a number it measured &mdash; the way <code>pruneAuditLog()</code> returns a row count &mdash; not just finish.</p>
+
+<h2>Two things both called a log</h2>
+<div class="scroll">
+<table>
+<tr><th></th><th><code>AuditLog</code> (lesson 18)</th><th>pino output (lesson 34)</th></tr>
+<tr><td>Where</td><td>A Postgres table</td><td>stdout, then a file or a search tool</td></tr>
+<tr><td>Answers</td><td>Who did what to this team</td><td>What happened inside this process</td></tr>
+<tr><td>Read by</td><td>A person, on purpose, later</td><td>You, while debugging, soon</td></tr>
+<tr><td>Kept</td><td>As long as the team exists</td><td>Days or weeks</td></tr>
+<tr><td>Read with</td><td><code>npm run log</code></td><td><code>grep reqId</code></td></tr>
+</table>
+</div>
+
+<h2>Before you add a log call</h2>
+<ol>
+<li>Is it an object? Replace it with the two or three fields you actually want.</li>
+<li>Could any of those fields ever hold a secret? Then it is an id, not the thing.</li>
+<li>Is it inside a loop or a hot path? A log line per row is how you fill a disk.</li>
+<li><code>grep -rnE "\.log\.(info|error|warn)|console\." server/src</code> &mdash; keep this number small enough to read.</li>
+</ol>
+
+<nav class="nav">
+<a href="../lessons/0036-the-row-that-outlives-the-row.html">&larr; Lesson 36</a>
+<a href="../lessons/index.html">All lessons</a>
+<a href="./api-security-basics.html">API security basics &rarr;</a>
+</nav>
+
+</body>
+</html>

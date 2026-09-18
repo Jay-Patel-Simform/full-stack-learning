@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference — SQL Injection and Allowlists</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<p class="kicker">Reference &middot; from lesson 20</p>
+<h1>SQL injection and allowlists</h1>
+<p class="lede">Quick-reference sheet. Print it. The decision at the top answers every case below.</p>
+
+<h2>The one question</h2>
+<p class="takeaway">Is the caller's input a <b>value</b> or an <b>identifier</b>? A value can be a parameter. An identifier cannot &mdash; so it needs a list.</p>
+
+<div class="scroll">
+<table>
+<tr><th>Kind</th><th>Examples</th><th>Defence</th></tr>
+<tr><td><b>value</b></td><td>a title to match, an id, a date, a page size</td><td class="yes">parameter &mdash; free, automatic</td></tr>
+<tr><td><b>identifier</b></td><td>column in <code>ORDER BY</code> / <code>GROUP BY</code>, table name, <code>ASC</code>/<code>DESC</code></td><td>allowlist you wrote</td></tr>
+</table>
+</div>
+
+<h2>Prisma: which call is safe</h2>
+<div class="scroll">
+<table>
+<tr><th>Call</th><th>Values</th><th>Injectable?</th></tr>
+<tr><td><code>prisma.task.findMany({ where })</code></td><td>parameterised</td><td class="yes">no</td></tr>
+<tr><td><code>$queryRaw`... = ${v}`</code> (tagged template)</td><td>parameterised</td><td class="yes">no</td></tr>
+<tr><td><code>$queryRawUnsafe(`... = '${v}'`)</code></td><td><b>glued into the text</b></td><td><b>yes</b></td></tr>
+<tr><td><code>$queryRawUnsafe(sql, v)</code></td><td>parameterised</td><td class="yes">no &mdash; values only</td></tr>
+</table>
+</div>
+<p class="aside"><strong>The rule:</strong> a tagged template gets the fixed text and the <code>${}</code> values as two separate arrays. It <em>cannot</em> mix them. Backticks safe, <code>Unsafe(</code> + <code>${</code> not.</p>
+
+<h2>The two failure modes, both silent</h2>
+<pre><code># 1. a parameter in an identifier slot: accepted, then IGNORED
+ORDER BY ${"title"}       -> unsorted
+ORDER BY ${"nonsense!!"}  -> unsorted, identical
+
+# 2. a Fastify route with no querystring schema: validation SKIPPED
+schema: { params: X }             -> ?sort=anything answers 200
+schema: { params: X, querystring: Y }  -> ?sort=anything answers 400</code></pre>
+<p>Neither throws. Test for them by asserting a <b>reordering</b>, never just a <code>200</code>.</p>
+
+<h2>The allowlist, in this codebase</h2>
+<pre><code>// src/schemas/task.schema.ts -- the enum IS the allowlist
+export const TaskQuery = z.object({
+  sort: z.enum(["id", "title", "createdAt"]).default("id"),
+  dir: z.enum(["asc", "desc"]).default("asc"),
+});
+
+// src/routes/tasks.route.ts -- without this line the schema does nothing
+schema: { params: TeamParams, querystring: TaskQuery, response: { ... } }
+
+// src/store/task.store.ts -- sort is a KEY, so it is only ever safe upstream
+orderBy: { [sort]: dir }</code></pre>
+<p><b>Allowlist, not denylist.</b> <code>ownerId</code> is a real column and still refused. Not-on-the-list beats does-it-exist.</p>
+
+<h2>Writing a sort test that cannot lie</h2>
+<pre><code>// titles chosen so id order and title order DISAGREE
+const TITLES = ["cherry", "apple", "banana"];
+// then assert the ORDER, not the status code
+assert.deepEqual(titles(res), ["apple", "banana", "cherry"]);</code></pre>
+
+<h2>Do not declare a response schema for a framework reply</h2>
+<pre><code>// WRONG -- the serializer drops `message`, every 400 becomes {"error":"Bad Request"}
+response: { 200: z.array(TaskPublic), 400: ErrorReply, 403: ErrorReply }
+
+// RIGHT -- 403/404 are replies WE write; 400 is Fastify's, shaped
+//          { statusCode, error, message }. Leave it alone.
+response: { 200: z.array(TaskPublic), 403: ErrorReply }</code></pre>
+<p>A validation <code>message</code> describes the <em>caller's</em> input, so it is safe to send. <code>"sort: Invalid option: expected one of \"id\"|\"title\"|\"createdAt\""</code> is the API contract.</p>
+
+<h2>What an allowlist does not fix</h2>
+<ul>
+<li><b>The 500 body.</b> Prisma's error message carries absolute file paths, line numbers and your source comments. Fastify sends it. The allowlist stops one route reaching that; only an error handler stops the rest.</li>
+<li><b>Identifiers built from input at all.</b> If you ever need a dynamic table name, the list is still the only answer &mdash; <code>quote_ident</code> makes it valid SQL, not authorised SQL.</li>
+<li><b>Volume.</b> A sortable list with no <code>LIMIT</code> is a free full-table read.</li>
+</ul>
+
+<h2>Sources</h2>
+<ul>
+<li><a href="https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html">OWASP &mdash; SQL Injection Prevention</a> (Defense Option 4 is the allowlist)</li>
+<li><a href="https://www.prisma.io/docs/orm/prisma-client/using-raw-sql/raw-queries">Prisma &mdash; raw queries</a></li>
+<li><a href="https://www.postgresql.org/docs/current/sql-prepare.html">PostgreSQL &mdash; PREPARE</a> (what a parameter is, and where one may go)</li>
+</ul>
+
+<hr>
+<footer>
+<p>From <a href="../lessons/0020-the-column-that-cannot-be-a-parameter.html">Lesson 20</a>. Sources: <a href="../RESOURCES.md">RESOURCES.md</a>. Questions go to your teacher &mdash; ask in the session.</p>
+</footer>
+</body>
+</html>

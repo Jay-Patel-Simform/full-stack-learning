@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 43 &mdash; Deleting the audit log on purpose</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 43 &middot; Week 13 &middot; Polish and prove it</p>
+<h1>Deleting the audit log on purpose</h1>
+<p class="lede">Your audit log is <b>7,292 rows and 2,960 kB</b>, four days old, and it has never had a single row removed. In <a href="./0041-the-role-that-can-erase-the-evidence.html">lesson 41</a> you took DELETE away from the app. Today you give it back &mdash; to exactly one job, in one file, running from cron, connecting as the owner. Suite goes <b>166 &rarr; 169</b>. Every number below came off your machine.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>A log with no retention is a log you delete in a panic.</strong> Yours grows ~1,800 rows a day. That is ~650,000 rows a year on a table you promised never to touch by hand.</li>
+<li><strong>The prune job is the second job for the owner login.</strong> Migrations were the first. Both are things you run; neither is a thing the internet can reach.</li>
+<li><strong>The scheduler is the operating system.</strong> <code>cron</code> already runs on your Mac. No scheduler package, no worker process. Streak intact: <b>no new dependency, 43 lessons</b>.</li>
+<li><strong>Measured, as <code>tasks_app</code>:</strong> the same DELETE the job runs is refused with <code>42501</code>. The wall from lesson 41 is still up; the job walks around it with a different key, not through it.</li>
+<li><strong>The dangerous value gets a default.</strong> <code>AUDIT_RETENTION_DAYS</code> defaults to 90 &mdash; the opposite rule to <code>DATABASE_URL</code>, and the reason is in the lesson.</li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<pre><code>server: npm test          <b>169 passing</b>   (was 166)
+server: npm run typecheck clean
+web:    npm test          9 passing
+psql:   "AuditLog"        <b>7,292 rows / 2,960 kB / 4 days</b>
+        older than 3 days <b>1,162 rows</b></code></pre>
+<p>You did four of the five things lesson 42 asked. The one still open is the password &mdash; <code>APP_DATABASE_URL</code> in your <code>.env</code> still has the literal word <code>tasks_app</code> as the password. It is at the bottom of &ldquo;Do this&rdquo; again, because a password equal to the username is the one that gets found.</p>
+
+<h2>Why this is a real problem and not housekeeping</h2>
+<p>Four days of your own clicking produced 7,292 rows. That rate is ~1,800 a day. Nothing in your code ever removes one, and since lesson 41 nothing in your code <em>can</em>. So there are exactly two futures:</p>
+<div class="scroll"><table>
+<tr><th></th><th>No retention</th><th>Retention</th></tr>
+<tr><td>Year one</td><td>~650,000 rows, hundreds of MB</td><td>90 days, bounded, ~160,000 rows</td></tr>
+<tr><td>How rows leave</td><td>a human panics and runs <code>TRUNCATE</code></td><td>one job, on a schedule, a number in the log</td></tr>
+<tr><td>What you can answer</td><td>everything, until the day you can answer nothing</td><td>&ldquo;the last 90 days&rdquo;, forever</td></tr>
+</table></div>
+<p class="takeaway"><b>A table with no delete path has a delete path. It is called an emergency.</b> The job you write on a calm day is the one that runs correctly.</p>
+
+<h2>The whole change</h2>
+<p>Two new files and one config line.</p>
+<pre><code>// src/config.ts
+<b>AUDIT_RETENTION_DAYS: z.coerce.number().int().min(1).default(90),</b>
+
+// src/audit/retention.ts
+export async function pruneAuditLog(days = config.AUDIT_RETENTION_DAYS) {
+  if (!Number.isInteger(days) || days &lt; 1) throw new Error(...);
+  <b>const client = new pg.Client({ connectionString: config.DATABASE_URL });</b>
+  await client.connect();
+  try {
+    const result = await client.query(
+      `delete from "AuditLog" where at &lt; now() - ($1 || ' days')::interval`, [days]);
+    return result.rowCount ?? 0;
+  } finally { await client.end(); }
+}
+
+// src/audit/prune.ts   &larr; four lines, the thing cron calls
+const deleted = await pruneAuditLog();
+console.log(`audit prune: deleted ${deleted} rows`);</code></pre>
+
+<h3>The bold line is the lesson</h3>
+<p>It connects as <code>DATABASE_URL</code> &mdash; the <b>owner</b> &mdash; and not through the shared <code>prisma</code> from <code>src/db.ts</code>. Since lesson 42 that shared client is <code>tasks_app</code> outside tests, and <code>tasks_app</code> has no DELETE. Measured on your database just now:</p>
+<pre><code>as tasks_app: delete from "AuditLog" where at &lt; now() - interval '3 days'
+<b>app role refused: 42501</b></code></pre>
+<p>So the job needs a different login. Say the rule out loud, because the wrong version of it is how people undo a whole lesson: <b>the powerful login is allowed here because nothing on the internet can reach this code path.</b> Not &ldquo;because it was easier&rdquo;. A stranger can send bytes to a route. Nobody can send bytes to a cron line.</p>
+<div class="word"><b>retention</b> &mdash; the rule that says how long you keep a record before deleting it. A number of days, decided once, applied by a machine.</div>
+
+<h3>Postgres computes the cutoff, not Node</h3>
+<p><code>now() - interval</code> runs inside the database. The same clock that stamped <code>at</code> decides what &ldquo;old&rdquo; means. If Node computed the cutoff and the two machines disagreed by an hour, you would delete an hour you meant to keep &mdash; and you would never notice, because the evidence is the thing that left.</p>
+
+<h2>The default that goes the other way</h2>
+<p>Since <a href="./0027-the-default-that-hides-the-typo.html">lesson 27</a> your rule has been: the variables that decide whether production is safe get <b>no default</b>. There are five of them now. <code>AUDIT_RETENTION_DAYS</code> breaks that rule on purpose.</p>
+<div class="scroll"><table>
+<tr><th></th><th><code>DATABASE_URL</code></th><th><code>AUDIT_RETENTION_DAYS</code></th></tr>
+<tr><td>Missing value means</td><td>nothing works, loudly</td><td><code>undefined</code> in a subtraction</td></tr>
+<tr><td>Cost of a default</td><td>you silently point at the wrong database</td><td>none &mdash; 90 days is a normal answer</td></tr>
+<tr><td>So</td><td>refuse to boot</td><td>default to 90, and <code>min(1)</code></td></tr>
+</table></div>
+<p><code>min(1)</code> is doing more work than it looks. <b>Zero days means &ldquo;older than right now&rdquo;, which is every row in the table.</b> The zod schema refuses it at boot, and the function refuses it again at the top, because the function is exported and a caller can pass anything.</p>
+<p class="takeaway">The rule underneath both columns: <b>a default is right when the default is a sane answer, and wrong when it hides a decision.</b> &ldquo;No defaults&rdquo; was never the rule; it was the shape the rule took for connection strings.</p>
+
+<h2>The tests, and how they avoid eating your log</h2>
+<p>This is the first test in the project that <em>deletes real rows for real</em>. So the fixture dodges your data rather than trusting itself:</p>
+<pre><code>const OLD = new Date(Date.now() - <b>400</b> * 24 * 60 * 60 * 1000);
+...
+const deleted = await pruneAuditLog(<b>365</b>);</code></pre>
+<p>The planted row is 400 days old, the cutoff is 365 days, and your real log starts four days ago. Nothing real is ever in range. Three tests:</p>
+<div class="scroll"><table>
+<tr><th>Test</th><th>Asserts</th></tr>
+<tr><td>deletes the old row, keeps the fresh one</td><td>both halves &mdash; deleting everything would also pass half a test</td></tr>
+<tr><td>a second run deletes nothing</td><td>returns <code>0</code>. The job is safe to run twice.</td></tr>
+<tr><td>refuses 0, -1 and <code>NaN</code></td><td>throws before a connection is opened</td></tr>
+</table></div>
+<p>The second test is the one people skip. A scheduled job runs again whether or not you were watching, so &ldquo;running it twice changes nothing more&rdquo; is part of the contract. You met that idea as <em>idempotency</em> in <a href="./0026-the-request-you-cannot-repeat.html">lesson 26</a>; this is the same word, off the request path.</p>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why does the prune job open its own connection?</p>
+<button>Prisma cannot run a raw delete statement</button>
+<button>The shared client is the restricted login</button>
+<p class="why" hidden>Since lesson 42, <code>src/db.ts</code> hands the app <code>tasks_app</code> outside tests, and <code>tasks_app</code> has no DELETE on <code>"AuditLog"</code>. Measured today: the same statement is refused with <code>42501</code>. Prisma can run raw SQL fine &mdash; the login is the problem, not the client.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why does <code>AUDIT_RETENTION_DAYS</code> get a default?</p>
+<button>Ninety days is a sane answer</button>
+<button>Retention is not a safety setting</button>
+<p class="why" hidden>A default is right when the default is a sane answer, and wrong when it hides a decision. 90 days is a normal retention period, so the default costs nothing. Retention absolutely is a safety setting &mdash; that is why <code>min(1)</code> is there, since 0 days would delete every row.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>Read the two new files, then run it.</strong> <code>src/audit/retention.ts</code> and <code>src/audit/prune.ts</code>.
+<pre><code>npm run typecheck
+npm test
+npm run audit:prune</code></pre>
+<b>Expect clean, 169 pass, and <code>audit prune: deleted 0 rows</code></b> &mdash; your whole log is younger than 90 days, so there is correctly nothing to do.</li>
+
+<li><strong>Watch it actually delete something.</strong> One run, no file editing:
+<pre><code>AUDIT_RETENTION_DAYS=3 npm run audit:prune</code></pre>
+<b>Expect about <code>deleted 1162 rows</code>.</b> <span class="warn">This removes real audit rows and there is no undo.</span> They are your own clicks from three days ago, so the cost is nothing &mdash; but read the number before you press enter, every time, on every machine. Then run <code>npm run log</code> and see the log still works.</li>
+
+<li><strong>Watch the wall still hold.</strong> Prove the app login cannot do what the job just did:
+<pre><code>psql "$APP_DATABASE_URL" -c 'delete from "AuditLog" where at &lt; now();'</code></pre>
+<b>Expect <code>ERROR: permission denied for table AuditLog</code>.</b> The job did not weaken lesson 41. It used a different key.</li>
+
+<li><strong>Put it on the schedule.</strong> This is the step that makes it a job instead of a script. <code>crontab -e</code>, then one line &mdash; 3am daily:
+<pre><code>0 3 * * * cd /Users/jay/learning/full-stack-learning/server && /usr/local/bin/npm run audit:prune >> /tmp/audit-prune.log 2>&amp;1</code></pre>
+Check your npm path with <code>which npm</code> first; cron has almost no <code>PATH</code>. <b>Bring me the line you used</b> &mdash; on a Mac that sleeps, cron skips missed runs, and that is worth a conversation about <code>launchd</code>.</li>
+
+<li><strong>Still owed from lesson 42, and now twice asked.</strong> Rotate the password:
+<pre><code>psql "$DATABASE_URL" -c "ALTER ROLE tasks_app PASSWORD 'something-long-and-random';"</code></pre>
+Then fix <code>APP_DATABASE_URL</code> in <code>.env</code> and run <code>npm test</code>. Bring me the count.</li>
+
+<li><strong>Words, not code.</strong> One sentence: <b>if a regulator asked how long you keep audit records, where in this repo is the answer?</b> Name the file and the line. If the answer is &ldquo;in Jay's head&rdquo;, say so &mdash; that is a real finding and it points at your README.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>One table, two logins, and only one of them can be reached from the internet. The prune job from <a href="./0043-deleting-the-audit-log-on-purpose.html">lesson 43</a> uses the other one.</p>
+
+<h2>Who can reach which key</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+    NET(["the internet"]) --> API["Fastify server<br/>npm start"]
+    API -->|APP_DATABASE_URL| K1["key: tasks_app<br/>SELECT + INSERT"]
+    CRON["cron, 3am<br/>npm run audit:prune"] -->|DATABASE_URL| K2["key: tasks (owner)<br/>everything"]
+    K1 --> T[("AuditLog<br/>7,292 rows")]
+    K2 --> T
+    style K1 fill:#1b3a1b,stroke:#4c9a4c,color:#d7f0d7
+    style K2 fill:#332f22,stroke:#8a7b4c,color:#f0e7d7
+    style NET fill:#3a1b1b,stroke:#9a4c4c,color:#f0d7d7
+</pre>
+<figcaption>The red box has one arrow out of it, and that arrow ends at the weak key. Nothing points from the internet to cron.</figcaption>
+</figure>
+
+<h2>The same statement, the two keys</h2>
+<div class="two">
+<div>
+<h4>as tasks_app &mdash; the server's key</h4>
+<div class="box"><div class="body">
+<div>delete from "AuditLog"</div>
+<div>where at &lt; now() - interval '3 days';</div>
+<div>&nbsp;</div>
+<div><span class="bad">42501</span> <span class="dim">permission denied</span></div>
+<div>&nbsp;</div>
+<div><span class="dim">measured today, on your database</span></div>
+</div></div>
+</div>
+<div>
+<h4>as tasks &mdash; the job's key</h4>
+<div class="box"><div class="body">
+<div>delete from "AuditLog"</div>
+<div>where at &lt; now() - interval '3 days';</div>
+<div>&nbsp;</div>
+<div><span class="ok">DELETE 1162</span></div>
+<div>&nbsp;</div>
+<div><span class="dim">runs from cron, never from a route</span></div>
+</div></div>
+</div>
+</div>
+<p>Same SQL. Same table. The only difference is which connection string opened the socket.</p>
+
+<h2>Your log, and where the line falls</h2>
+<div class="box">
+<div class="cap">measured &mdash; "AuditLog" on 2026-09-11</div>
+<div class="body">
+<div>rows            <span class="acc">7,292</span>      <span class="dim">~1,800 a day</span></div>
+<div>size            <span class="acc">2,960 kB</span></div>
+<div>oldest row      2026-09-07  <span class="dim">four days</span></div>
+<div>&nbsp;</div>
+<div>older than 90d  <span class="ok">0</span>          <span class="dim">the default: today it deletes nothing</span></div>
+<div>older than 3d   <span class="bad">1,162</span>      <span class="dim">what step 2 removes, for real</span></div>
+</div>
+</div>
+
+<h2>The one number that must never be zero</h2>
+<div class="box">
+<div class="cap">AUDIT_RETENTION_DAYS</div>
+<div class="body">
+<div>90   &rarr; at &lt; now() - 90 days   <span class="ok">deletes old rows</span></div>
+<div>1    &rarr; at &lt; now() - 1 day     <span class="ok">deletes old rows</span></div>
+<div>0    &rarr; at &lt; now()            <span class="bad">deletes every row</span></div>
+<div>und. &rarr; at &lt; now() - NaN       <span class="bad">nothing matches, or everything</span></div>
+<div>&nbsp;</div>
+<div><span class="dim">stopped twice: z.min(1) at boot, and a throw at the top of the function</span></div>
+</div>
+</div>
+
+<p class="takeaway">Least privilege is not about the person. It is about the path. The strong key is fine where no stranger can reach the lock.</p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://www.postgresql.org/docs/current/functions-datetime.html">PostgreSQL manual &mdash; Date/Time Functions</a>. Find <code>now()</code> and the <code>interval</code> type. Short skim; the point is that the cutoff arithmetic belongs to the database.</p>
+<p><b>Then this:</b> <a href="https://crontab.guru/#0_3_*_*_*">crontab.guru</a> with the line from step 4 already in it. Change one field and watch the English sentence change. It is the fastest way to stop mis-reading cron forever.</p>
+<p><b>Reference card:</b> <a href="../reference/logging.html">Logging and audit</a>, now with the retention section, and <a href="../reference/environment.html">Environment and config</a> with the sixth variable.</p>
+<p><b>Ask the community:</b> <a href="https://dba.stackexchange.com/questions/tagged/postgresql+partitioning">dba.stackexchange.com, postgresql + partitioning</a>. Good question for them: <em>at what row count should a daily DELETE become a partitioned table you DROP instead?</em> You are nowhere near it, and knowing the number tells you when to look again.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0042-two-database-logins.html">&larr; Back</a>
+<a href="../reference/logging.html">Logging reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 16 — CSRF: who may write</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.5rem 0 2.5rem; }
+.split > div { border: 1px solid var(--rule); border-radius: 6px; padding: 1rem 1.1rem; }
+.split h3 { margin: 0 0 .4rem; font-size: .95rem; }
+.split p { margin: 0; font-size: .84rem; color: var(--muted); line-height: 1.5; }
+.split .tag { font-family: var(--mono); font-size: .66rem; letter-spacing: .12em;
+  text-transform: uppercase; display: block; margin-bottom: .5rem; }
+.read .tag { color: #2f6b3a; }
+.write .tag { color: #93231a; }
+
+.shape { border: 1px solid var(--rule); border-radius: 6px; margin: 0 0 .7rem;
+  padding: .85rem 1rem; }
+.shape .what { font-family: var(--mono); font-size: .76rem; line-height: 1.5;
+  background: var(--code-bg); padding: .45rem .6rem; border-radius: 4px;
+  display: block; margin-bottom: .6rem; overflow-x: auto; white-space: pre; }
+.gates { display: flex; flex-wrap: wrap; gap: .3rem; margin-bottom: .5rem; }
+.gate { font-family: var(--mono); font-size: .66rem; padding: .18rem .45rem;
+  border-radius: 3px; border: 1px solid var(--rule); white-space: nowrap; }
+.gate.no { color: var(--muted); }
+.gate.yes { background: #f1f7f0; border-color: #b6d3ba; color: #2f6b3a; }
+.gate.bad { background: #fdeeec; border-color: #e3b3ac; color: #93231a; }
+.stops { font-size: .84rem; line-height: 1.5; margin: 0; }
+.stops strong { color: var(--ok); }
+.shape.open { border-color: #e3b3ac; background: #fdf7f6; }
+.shape.open .stops strong { color: var(--bad); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .gate.yes { background: #17251a; border-color: #2f6b3a; color: #7fbf8d; }
+  :root:not([data-theme="light"]) .gate.bad { background: #2a1614; border-color: #93231a; color: #e58c80; }
+  :root:not([data-theme="light"]) .shape.open { background: #1d1614; border-color: #93231a; }
+}
+
+.ladder { list-style: none; padding: 0; margin: 1.4rem 0 2rem; counter-reset: r; }
+.ladder li { display: grid; grid-template-columns: 1.5rem 1fr auto; gap: .7rem;
+  align-items: center; padding: .7rem .9rem; border-radius: 5px; margin-bottom: .3rem;
+  border: 1px solid var(--rule); font-size: .85rem; }
+.ladder .n { font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+.ladder code { font-size: .78em; }
+.ladder .out { font-family: var(--mono); font-size: .68rem; letter-spacing: .06em;
+  padding: .2rem .5rem; border-radius: 3px; white-space: nowrap; }
+.ladder .allow .out { background: #f1f7f0; color: #2f6b3a; }
+.ladder .deny .out  { background: #fdeeec; color: #93231a; }
+.ladder .judge { border-style: dashed; }
+.ladder .why { grid-column: 2 / -1; font-size: .76rem; color: var(--muted);
+  margin: .3rem 0 0; line-height: 1.45; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .ladder .allow .out { background: #17251a; color: #7fbf8d; }
+  :root:not([data-theme="light"]) .ladder .deny .out { background: #2a1614; color: #e58c80; }
+}
+.note { border-left: 3px solid var(--accent); padding: .1rem 0 .1rem 1rem;
+  margin: 1.6rem 0; font-size: .88rem; color: var(--muted); }
+@media (max-width: 34rem) { .split { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 16 &middot; Week 7&ndash;8 &middot; API security</p>
+<h1>CSRF: who may write</h1>
+<p class="lede">An attacker's page does not want to read your reply. It wants your browser to send one <code>DELETE</code>, with your cookie, and it does not care what comes back.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>Reading is CORS. Writing is CSRF.</strong> Different attacks, never the same defence.</li>
+<li><code>SameSite=Lax</code> blocks the cross-site form POST. It does <em>not</em> block a state-changing <code>GET</code>.</li>
+<li>New defence: <code>Sec-Fetch-Site</code>. The browser writes it and a page is forbidden to set it.</li>
+<li>Nine lines in <code>src/auth/csrf.ts</code>, one hook. No token, no store, no new dependency.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+sequenceDiagram
+  participant V as victim's browser
+  participant E as evil.com
+  participant A as your API
+  V->>E: visits evil.com
+  E-->>V: a page holding an auto-submitting POST form
+  Note over V: auto-submits. No preflight — forms have<br/>POSTed cross-site since 1995. CORS never sees it.
+  V->>A: POST + the victim's cookie + Sec-Fetch-Site: cross-site
+  A-->>V: 403 — the cookie was fine, the caller was not
+</pre>
+<figcaption>The attacker never reads the answer, so nothing CORS does can help. The only question left is <em>who asked for this write</em> &mdash; and the browser answers it in a header the page cannot forge.</figcaption>
+</figure>
+
+<h2>Why CORS cannot help</h2>
+<p>CORS gates <em>reading a reply</em>. A CSRF attack throws the reply away. And an HTML form has been allowed to POST across sites since 1995, so it gets no preflight &mdash; CORS is never even consulted.</p>
+
+<h3>Why <code>SameSite=Lax</code> is not enough on its own</h3>
+<table>
+<tr><th>Attack shape</th><th>SameSite=Lax</th><th>Sec-Fetch-Site</th></tr>
+<tr><td>Cross-site form <code>POST</code></td><td class="yes">blocked</td><td class="yes">blocked</td></tr>
+<tr><td>Clicked link doing a <code>GET</code> write</td><td>walks through</td><td class="yes">blocked</td></tr>
+<tr><td>Old browser, no header</td><td class="yes">blocked</td><td>allowed &dagger;</td></tr>
+</table>
+<p>Lax blocks unsafe <em>methods</em>. A top-level click is exactly how a user navigates, so <code>GET</code> is let through with the cookie attached. Hence the other rule: <strong>never write in a <code>GET</code></strong>.</p>
+
+<h2>The code</h2>
+<pre><code>// src/auth/csrf.ts — nine lines, no dependency
+const SAFE = new Set(["GET", "HEAD", "OPTIONS"]);
+
+export function allowed(method: string, site?: string, origin?: string) {
+  if (SAFE.has(method)) return true;
+  if (site) return site === "same-origin";
+  if (origin) return ALLOWED_ORIGINS.includes(origin);
+  return true;   // ponytail: not a browser, so it carries no victim's cookie
+}</code></pre>
+
+<pre><code>// src/app.ts — step 4, before anything that touches Postgres
+app.addHook("onRequest", async (req, reply) =&gt; {
+  if (!allowed(req.method, req.headers["sec-fetch-site"], req.headers.origin))
+    return reply.code(403).send({ error: "forbidden" });
+});</code></pre>
+
+<p>403, not 401. The cookie was perfectly valid &mdash; it is the <em>caller</em> that is wrong.</p>
+
+<p class="takeaway">A library encodes the browser of the year it was written. Ask what year its problem was solved in before installing it.</p>
+
+<p>&dagger; <code>@fastify/csrf-protection</code> exists and does the token dance. That pattern is a workaround for a header that has shipped in every major browser since March 2023. We skipped it.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">Why can a malicious page not just set <code>Sec-Fetch-Site</code> itself?</p>
+<button>Because CORS blocks that header first</button>
+<button>Because the browser reserves that name</button>
+<p class="why" hidden><code>Sec-</code> is a forbidden header prefix. Browser code writes it; page JavaScript is not permitted to. That is the entire reason it can be trusted.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><code>npm test</code> &mdash; 93 tests.</li>
+<li><code>curl -X POST -H 'Sec-Fetch-Site: cross-site' localhost:3000/teams</code>. You want 403.</li>
+<li>Grep your routes for a <code>GET</code> that writes anything. There must be none.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Two different attacks. They never share a defence.</p>
+
+<div class="split">
+<div class="read">
+<span class="tag">CORS &mdash; reading</span>
+<h3>&ldquo;Let me see your reply.&rdquo;</h3>
+<p>The attacker wants your <em>data</em>. The browser refuses to hand the body to a page from another origin. Your allow-list decides who gets an exception.</p>
+</div>
+<div class="write">
+<span class="tag">CSRF &mdash; writing</span>
+<h3>&ldquo;Do this thing for me.&rdquo;</h3>
+<p>The attacker wants an <em>effect</em>. They never read the reply, so CORS is irrelevant. Their page just needs your browser to send it, with your cookie.</p>
+</div>
+</div>
+
+<h2>Four shapes, and what actually stops each</h2>
+<p class="lede" style="margin-bottom:1.2rem">Before lesson 16&rsquo;s hook existed.</p>
+
+<div class="shape">
+<span class="what">fetch(url, { method: "DELETE", credentials: "include" })</span>
+<div class="gates">
+<span class="gate bad">preflight: yes</span>
+<span class="gate no">cookie: not sent</span>
+<span class="gate no">server: never sees it</span>
+</div>
+<p class="stops"><strong>The browser stops it.</strong> The preflight comes back with no permission, so the real <code>DELETE</code> is never sent. Your server was not defended &mdash; it was never attacked.</p>
+</div>
+
+<div class="shape">
+<span class="what">&lt;form method="POST" action="&hellip;"&gt; &mdash; auto-submitted</span>
+<div class="gates">
+<span class="gate yes">preflight: none</span>
+<span class="gate no">cookie: withheld</span>
+<span class="gate no">server: 401</span>
+</div>
+<p class="stops"><strong><code>SameSite=Lax</code> stops it.</strong> A form has POSTed across sites since 1995, so there is no preflight and CORS never sees it. One word in one cookie string is the whole defence.</p>
+</div>
+
+<div class="shape">
+<span class="what">Same form, if that cookie ever became SameSite=None</span>
+<div class="gates">
+<span class="gate yes">preflight: none</span>
+<span class="gate bad">cookie: SENT</span>
+<span class="gate no">server: 415</span>
+</div>
+<p class="stops"><strong>Fastify stops it &mdash; by accident.</strong> No form-body parser is installed, so it answers 415. That is a refusal nobody decided on.</p>
+</div>
+
+<div class="shape open">
+<span class="what">&lt;a href&gt; the victim clicks &rarr; a GET that changes data</span>
+<div class="gates">
+<span class="gate yes">preflight: none</span>
+<span class="gate bad">cookie: SENT</span>
+<span class="gate bad">server: 200 OK</span>
+</div>
+<p class="stops"><strong>Nothing stops it.</strong> Lax sends the cookie on a cross-site top-level <code>GET</code>. Only the fact that you have no such route. That rule lives in your head, not your code.</p>
+</div>
+
+<h2>The new hook: <code>allowWrite</code></h2>
+<p class="lede" style="margin-bottom:1rem">First match wins. <code>src/auth/csrf.ts</code>, nine lines.</p>
+
+<ol class="ladder">
+<li class="allow"><span class="n">1</span>
+  <span>Method is <code>GET</code>, <code>HEAD</code> or <code>OPTIONS</code></span>
+  <span class="out">allow</span>
+  <p class="why">Nothing to defend &mdash; <em>as long as no <code>GET</code> writes.</em> This line trusts you forever. It is shape four above, in code.</p>
+</li>
+<li class="allow"><span class="n">2</span>
+  <span><code>Sec-Fetch-Site: same-origin</code></span>
+  <span class="out">allow</span>
+  <p class="why">Our own page. The browser writes this header; <code>Sec-</code> makes it a <strong>forbidden header name</strong>, so a page cannot set it, change it or delete it.</p>
+</li>
+<li class="allow"><span class="n">3</span>
+  <span><code>Origin</code> is in <code>ALLOWED_ORIGINS</code></span>
+  <span class="out">allow</span>
+  <p class="why">The dev front end on <code>:5173</code> is <em>same-site</em>, not same-origin. So is <code>blog.app.example</code>, which is not you. Trust the list, not the word &ldquo;site&rdquo;.</p>
+</li>
+<li class="deny"><span class="n">4</span>
+  <span>There was <em>some</em> <code>Sec-Fetch-Site</code></span>
+  <span class="out">403</span>
+  <p class="why">A browser spoke, and it said not-our-page. <strong>403, not 401</strong> &mdash; the cookie was perfect, the caller was not. A 401 says &ldquo;log in again&rdquo;, which the victim already did.</p>
+</li>
+<li class="allow judge"><span class="n">5</span>
+  <span>Neither header at all</span>
+  <span class="out">allow</span>
+  <p class="why">Not a browser: curl, Postman, a cron job. Only a browser can carry a victim&rsquo;s cookie, so blocking buys nothing. OWASP says block. Dashed border = the one judgement call, marked <code>ponytail:</code>, one line to flip.</p>
+</li>
+</ol>
+
+<div class="note">
+<p>Where it runs: an app-level <code>onRequest</code> hook, step 4 in <code>src/app.ts</code> &mdash; after the rate limiter, <strong>before</strong> anything that touches Postgres. A forged write pays two string compares, not a session query.</p>
+</div>
+
+<hr>
+<p class="nav">Full lesson: <a href="./0016-who-asked-for-this-write.html">Lesson 16 &mdash; Who asked for this write</a> &middot; Reference: <a href="../reference/api-security-basics.html#csrf">CSRF decision table</a></p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Sec-Fetch-Site">MDN, Sec-Fetch-Site</a>.</p>
+<p><b>The long version:</b> <a href="./long/0016-who-asked-for-this-write.html">including where I disagree with OWASP, and why</a>.</p>
+<p>That last <code>return true</code> is a deliberate departure from OWASP. Ask me about it &mdash; it is a one-line switch to fail closed.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0015-headers-for-json-not-pages.html">&larr; Back</a>
+<a href="./0017-the-key-you-did-not-name.html">Next: the key you did not name &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

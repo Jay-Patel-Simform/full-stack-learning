@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 3 — Rows That Survive A Restart</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 03 &middot; Week 1&ndash;2 &middot; API Basics</p>
+<h1>Rows that survive a restart</h1>
+<p class="lede">Your tasks live in an array. Stop the server and they are gone. Today they move into Postgres. One win: restart the API, and the data is still there.</p>
+
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>An array dies with the process. A table lives on disk.</li>
+<li>Three new words: <strong>schema</strong> (the shape), <strong>migration</strong> (the change), <strong>client</strong> (typed code to talk to it).</li>
+<li>Only the store file changes. Your routes barely move &mdash; that is the point of the boundary.</li>
+<li>Postgres is already on this Mac. You install nothing.</li>
+</ul>
+</div>
+
+<h2>What a database gives you</h2>
+<p>An array holds data while the process lives. A database holds data on disk, for many processes at once, and enforces rules you write down once.</p>
+<div class="scroll">
+<table>
+<tr><th>Job</th><th>Array today</th><th>Postgres from today</th></tr>
+<tr><td>Survives restart</td><td>No</td><td>Yes</td></tr>
+<tr><td>Two servers share it</td><td>No</td><td>Yes</td></tr>
+<tr><td>Rule &ldquo;title max 200 chars&rdquo;</td><td>Only in Zod</td><td>Also in the table</td></tr>
+<tr><td>Unique ids</td><td><code>tasks.length + 1</code>, breaks after a delete</td><td><code>autoincrement()</code>, never repeats</td></tr>
+</table>
+</div>
+<p>That third row matters later. Zod guards the door of <em>your</em> API. The database guards the data itself, even from a script you run at 2am. Two walls, not one. This is the same idea as lesson 2: <a href="../0002-schemas-at-the-door.html">put the rule where forgetting is impossible</a>.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  R["Route<br/>tasks.route.ts"] --> S["Store<br/>listTasks, createTask,<br/>updateTask, deleteTask"]
+  S -.-> A["Array in memory<br/>(yesterday)"]
+  S --> P["Prisma client"]
+  P --> DB[("Postgres<br/>table Task")]
+</pre>
+<figcaption>The store is a boundary. Yesterday it hid an array; today it hides Postgres. The route never asked which. Later, auth sits on the same kind of boundary.</figcaption>
+</figure>
+
+<h2>The three new words</h2>
+<div class="scroll">
+<table>
+<tr><th>Word</th><th>Plain meaning</th></tr>
+<tr><td><strong>Schema</strong> (<code>prisma/schema.prisma</code>)</td><td>Your tables, written as a short list. One file, the truth about the shape.</td></tr>
+<tr><td><strong>Migration</strong></td><td>A saved SQL file that changes the database from the old shape to the new one. Prisma writes it for you. You commit it.</td></tr>
+<tr><td><strong>Client</strong></td><td>Generated TypeScript code that matches your schema, so <code>prisma.task.findMany()</code> is typed. If you rename a column, your editor shows the broken lines.</td></tr>
+</table>
+</div>
+<p>Never edit a migration that has already run. Make a new one. <a href="https://www.prisma.io/docs/orm/prisma-migrate/workflows/development-and-production">Prisma: Migrate workflows</a>.</p>
+
+<h2>Step 1 &mdash; make a database in the Postgres you already have</h2>
+<p>Postgres 18 is already installed on this Mac and already running. It costs about 15&nbsp;MB of memory. You install nothing today.</p>
+<p>You only need your own role and your own database, so this project never touches anything else. Run these once, with the password you set when Postgres was installed:</p>
+<pre><code>psql -U postgres -h localhost \
+  -c "CREATE ROLE tasks LOGIN CREATEDB PASSWORD 'tasks';"
+
+psql -U postgres -h localhost \
+  -c "CREATE DATABASE tasks OWNER tasks;"</code></pre>
+<p>A <strong>role</strong> is a database user. <code>CREATEDB</code> is needed because <code>prisma migrate dev</code> makes a short-lived second database (a <em>shadow database</em>) to check your migration before running it for real.</p>
+<p>Then <code>server/.env</code> holds one line:</p>
+<pre><code>DATABASE_URL="postgresql://tasks:tasks@localhost:5432/tasks?schema=public"</code></pre>
+<p>Read the URL as five parts: user, password, host, port, database name. <code>.env</code> is in <code>.gitignore</code>. It never goes to git.</p>
+<div class="aside"><strong>Why not Docker, and why not <code>npx prisma dev</code>?</strong> Docker is week 11&ndash;12, on purpose, as its own lesson. <code>npx prisma dev</code> also works and needs no setup, but it keeps a Node process alive using about 210&nbsp;MB. Your native Postgres does the same job for a tenth of that. Use the machine you have.</div>
+
+<h2>Step 2 — describe the table</h2>
+<p><code>server/prisma/schema.prisma</code>:</p>
+<pre><code>generator client {
+  provider = "prisma-client"
+  output   = "../../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Task {
+  id         Int      @id @default(autoincrement())
+  title      String   @db.VarChar(200)
+  done       Boolean  @default(false)
+  ownerEmail String
+  createdAt  DateTime @default(now())
+}</code></pre>
+<p>Read it as one line per column: name, type, then rules. <code>@id</code> is the primary key. <code>@db.VarChar(200)</code> pushes your Zod <code>max(200)</code> rule down into Postgres too.</p>
+<p>Note what is <em>not</em> here: no <code>url</code>. In Prisma 7 the connection string lives in <code>prisma7.config.ts</code> and is read from <code>.env</code>. Secrets stay out of the schema file you commit.</p>
+
+<h2>Step 3 — make the table</h2>
+<pre><code>npx prisma migrate dev --name init</code></pre>
+<p>This does three things: writes <code>prisma/migrations/&lt;time&gt;_init/migration.sql</code>, runs it against your database, then regenerates the typed client. Open that SQL file and read it. It is only <code>CREATE TABLE</code>. Nothing magic.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  SC["schema.prisma<br/>you edit this"] -- "prisma migrate dev" --> M["migration.sql<br/>saved, committed,<br/>never edited again"]
+  M --> DB[("Postgres<br/>real tables")]
+  SC -- "same command" --> CL["generated client<br/>typed queries"]
+  CL --> DB
+</pre>
+<figcaption>One command, three results: a SQL file, the change applied, and fresh typed code. Read the SQL file &mdash; it is only <code>CREATE TABLE</code>.</figcaption>
+</figure>
+
+<h2>Step 4 &mdash; one client for the app</h2>
+<p>New file <code>src/db.ts</code>:</p>
+<pre><code>import { PrismaPg } from "@prisma/adapter-pg";
+import { PrismaClient } from "./generated/prisma/client.ts";
+
+// Read .env into process.env. Built into Node, so no dotenv package at runtime.
+process.loadEnvFile();
+
+// Prisma 7 talks to Postgres through a driver adapter. `pg` is that driver.
+const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL });
+
+// One client for the whole app. It holds a pool of connections.
+export const prisma = new PrismaClient({ adapter });</code></pre>
+<p>Make it once, export it, import it everywhere. A new client per request would open a new pool of connections per request, and Postgres would run out. <a href="https://www.prisma.io/docs/orm/prisma-client/setup-and-configuration/databases-connections">Prisma: connection management</a>.</p>
+
+<h2>Step 5 — swap the store</h2>
+<p>This is the good part. <code>src/store/task.store.ts</code> keeps the <em>same four function names</em>. Only the insides change. The routes barely notice.</p>
+<pre><code>import type { CreateTaskInput, Task, UpdateTaskInput } from "../../schemas/task.schema.ts";
+import { prisma } from "../../db.ts";
+
+export function listTasks(): Promise&lt;Task[]&gt; {
+  return prisma.task.findMany({ orderBy: { id: "asc" } });
+}
+
+export function createTask(input: CreateTaskInput, ownerEmail: string): Promise&lt;Task&gt; {
+  return prisma.task.create({ data: { ...input, ownerEmail } });
+}
+
+export async function updateTask(id: number, patch: UpdateTaskInput): Promise&lt;Task | undefined&gt; {
+  // updateMany does not throw on a missing id. It just reports 0 rows changed.
+  const data = patch as { title?: string; done?: boolean };
+  const { count } = await prisma.task.updateMany({ where: { id }, data });
+  if (count === 0) return undefined;
+  return (await prisma.task.findUnique({ where: { id } })) ?? undefined;
+}
+
+export async function deleteTask(id: number): Promise&lt;boolean&gt; {
+  const { count } = await prisma.task.deleteMany({ where: { id } });
+  return count &gt; 0;
+}</code></pre>
+<p>Every function now returns a <code>Promise</code>, because a database call goes over a socket. So the routes gain three <code>await</code>s:</p>
+<pre><code>const task = await createTask(body, "jay@example.com");
+const task = await updateTask(id, request.body as UpdateTaskInput);
+if (!(await deleteTask(id))) return reply.code(404).send({ error: "not found" });</code></pre>
+<p>That is the whole change to <code>src/routes/tasks.route.ts</code>. The boring file boundary from lesson 2 just paid for itself: the routes never knew where the data lived.</p>
+<div class="aside"><strong>Why <code>updateMany</code> and <code>deleteMany</code> for one row?</strong> <code>update</code> and <code>delete</code> <em>throw</em> when the id is missing, so you would need try/catch to answer 404. The <code>*Many</code> versions return a count instead. Fewer lines, same answer.</div>
+
+<h2>Now prove it</h2>
+<p>Postgres is already running in the background. So one terminal only: <code>npm run dev</code>. Then:</p>
+<pre><code># 1. make a task
+curl -s -X POST localhost:3000/tasks \
+  -H 'content-type: application/json' -d '{"title":"buy milk"}'
+
+# 2. STOP the server (ctrl-c), start it again, then read
+curl -s localhost:3000/tasks
+
+# 3. look at the actual row, email and all
+psql "$(grep '^DATABASE_URL' .env | cut -d'"' -f2)" \
+  -c 'select id,title,done,"ownerEmail" from "Task";'</code></pre>
+<p>Test 2 is the win: the task is still there. Test 3 is the second lesson: the row in Postgres <em>does</em> hold <code>ownerEmail</code>, but the API reply from test 2 does not. Your <code>TaskPublic</code> response schema is still filtering the way out. Storage and exposure are different questions.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  IN["Incoming JSON"] --> Z{"Zod<br/>guards your API door"}
+  SQL["psql at 2am<br/>a cron job<br/>a migration script"] --> T
+  Z --> T{"Postgres<br/>VarChar(200), NOT NULL"}
+  T --> ROW[("The row on disk")]
+</pre>
+<figcaption>Two walls, not one. Zod only sees traffic that comes through a route. The table rule holds no matter who is typing.</figcaption>
+</figure>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">You already validate <code>title</code> with Zod. Why also set <code>@db.VarChar(200)</code>?</p>
+<button>Because Postgres rejects the value faster than a Zod schema can check it</button>
+<button>Because data also arrives from scripts and jobs that never touch a route</button>
+<p class="why" hidden>Right: Zod guards one door. The table guards the data from every door, including a migration script or a psql session at 2am.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">A migration file has already run on your machine. You need a column change.</p>
+<button>Leave that file alone and create one more migration for the change</button>
+<button>Edit that file so the change stays in one tidy place in history</button>
+<p class="why" hidden>Right: applied migrations are history. Editing one makes your database and the recorded history disagree, and every teammate drifts apart.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why is one exported <code>PrismaClient</code> better than a new one per request?</p>
+<button>Each client opens its own pool, so per request would exhaust connections</button>
+<button>Each client caches every row, so per request would return stale data</button>
+<p class="why" hidden>Right: a client owns a connection pool. Postgres allows a limited number of connections, and pools are meant to be shared and reused.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Your routes needed almost no edits when the array became Postgres. Why?</p>
+<button>Because Prisma generates code that matches the shape your routes wanted</button>
+<button>Because the store file already hid the storage behind four function names</button>
+<p class="why" hidden>Right: the routes only knew <code>createTask</code>, <code>listTasks</code>, <code>updateTask</code>, <code>deleteTask</code>. Swapping what is behind a boundary is cheap. That boundary is where auth will sit too.</p>
+</div>
+
+<h2>Read this</h2>
+<p><strong>Primary source:</strong> <a href="https://www.prisma.io/docs/orm/prisma-migrate/getting-started">Prisma &mdash; Migrate: Getting started</a>, then <a href="https://www.prisma.io/docs/orm/prisma-client/queries/crud">Prisma Client CRUD</a>. Read the CRUD page with your store file open and match each function to its section.</p>
+<p>Also skim, ten minutes only: <a href="https://www.postgresql.org/docs/current/ddl-constraints.html">PostgreSQL &mdash; Constraints</a>. You will use <code>UNIQUE</code> in week 3 to stop two accounts sharing one email.</p>
+
+<h2>Do this before lesson 4</h2>
+<ol>
+<li>Run the three tests above. Confirm the task survives a restart.</li>
+<li>Add <code>@unique</code> to a new <code>slug String</code> field on <code>Task</code>. Run <code>npx prisma migrate dev --name task-slug</code>. Read the generated SQL. Then remove it with another migration.</li>
+<li>Write 5 raw SQL queries by hand in <code>psql</code> against the <code>Task</code> table: count rows, filter by <code>done</code>, order by <code>createdAt</code>, update one row, delete one row. (This was the week 1&ndash;2 practice in <a href="../../PLAN.md">PLAN.md</a>.)</li>
+<li>Break it on purpose: <code>psql</code> an <code>INSERT</code> with a 300-character title. Read the error. That is the wall Zod cannot give you.</li>
+<li>Tell me what <code>prisma.task.findMany()</code> returns for a table with no rows. Guess first, then check.</li>
+</ol>
+
+<p>Stuck, or something felt hand-wavy? <strong>Ask me.</strong> I am your teacher here, not just the person who wrote the page. Say what confused you and I will re-teach it another way, or write a follow-up lesson.</p>
+
+<hr>
+<p class="nav">Back: <a href="../0002-schemas-at-the-door.html">Lesson 2 &mdash; Schemas at the door</a> &middot; Keep for reference: <a href="../../reference/prisma-postgres.html">Prisma + Postgres cheat sheet</a> &middot; <a href="../../reference/api-security-basics.html">API Security Basics</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a> &middot; Sources: <a href="../../RESOURCES.md">RESOURCES.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

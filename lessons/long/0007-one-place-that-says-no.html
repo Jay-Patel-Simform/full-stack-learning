@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 7 — One Place That Says No</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 07 &middot; Week 5&ndash;6 &middot; RBAC</p>
+<h1>One place that says no</h1>
+<p class="lede">Your API knows <em>who</em> is asking. It does not know what they are <em>allowed</em> to do. Today you build the function that decides &mdash; and ten tests that prove Viewer cannot edit and Member cannot delete a team. Straight out of <a href="../../MISSION.md">MISSION.md</a>.</p>
+
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>Gate 1 asks <em>who are you</em> (401). Gate 2 asks <em>may you</em> (403). You only have gate 1.</li>
+<li>Do not scatter <code>if (role === "ADMIN")</code> through forty routes.</li>
+<li>Put the decision in one plain function: <code>can(role, action)</code>.</li>
+<li><strong>Roles are data</strong> (rows). <strong>Permissions are code</strong> (a file in git).</li>
+<li>Unknown role? Answer <em>no</em>. Never crash.</li>
+</ul>
+</div>
+
+<h2>Two gates, not one</h2>
+<p><a href="../0006-a-door-that-stays-open.html">Lesson 6</a> built the first gate. It asks one question: <strong>who are you?</strong> If the cookie is bad, <code>401</code>.</p>
+<p>That gate is now shut and working. And it protects nothing.</p>
+<p>Every logged-in person can do every single thing. Log in as an intern, delete the team. The first gate has no opinion, because "logged in" is not "allowed".</p>
+<div class="scroll">
+<table>
+<tr><th></th><th>Gate 1</th><th>Gate 2</th></tr>
+<tr><td>Name</td><td>Authentication (authn)</td><td>Authorization (authz)</td></tr>
+<tr><td>Question</td><td>Who are you?</td><td>May you do this?</td></tr>
+<tr><td>Says no with</td><td><code>401</code></td><td><code>403</code></td></tr>
+<tr><td>You have it?</td><td>Yes, lesson 6</td><td>No. Today.</td></tr>
+</table>
+</div>
+<p>The two words look alike and mean different things. Say them out loud as <em>who</em> and <em>may</em>, and you will never mix them up again.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  R["Request"] --> G1{"Gate 1<br/>who are you?"}
+  G1 -- "no cookie" --> E1["401"]
+  G1 -- "userId = 7" --> G2{"Gate 2<br/>may you?"}
+  G2 -- "can() says no" --> E2["403"]
+  G2 -- "can() says yes" --> H["Handler"]
+</pre>
+<figcaption>Say them out loud as <em>who</em> and <em>may</em>. Different questions, different numbers, different gates.</figcaption>
+</figure>
+
+<h2>The bad version first</h2>
+<p>Nearly everybody writes this. Look at it, then we will kill it.</p>
+<pre><code>// somewhere in tasks.route.ts
+if (user.role !== "ADMIN" &amp;&amp; user.role !== "OWNER") {
+  return reply.code(403).send({ error: "forbidden" });
+}</code></pre>
+<p>It works. It is also a trap, for three reasons.</p>
+<ol>
+<li><strong>You must remember it.</strong> Forty routes, forty chances to forget. The one you forget is the hole. Same problem as <a href="../0003-rows-that-survive-a-restart.html">lesson 3</a>'s "declare the wall, do not remember it".</li>
+<li><strong>It names the role, not the job.</strong> Next year Admin stops being allowed to invite people. Now you are grepping for <code>"ADMIN"</code> across forty files, hoping you got them all.</li>
+<li><strong>You cannot test it</strong> without a server, a database, a user, a login and a cookie. So nobody tests it.</li>
+</ol>
+
+<h2>Split the decision from the enforcing</h2>
+<p>One idea fixes all three. Pull the <em>decision</em> out into a plain function, and leave only the <em>enforcing</em> in the route.</p>
+<pre><code>if (!can(role, "task:update")) return reply.code(403).send(...);</code></pre>
+<p>Now the route reads like English, the rule lives in one file, and <code>can</code> is a function of two strings &mdash; so a test costs two lines and no database.</p>
+<blockquote>"This takes in an actor, an action and a resource and returns a True/False." &mdash; <a href="https://www.osohq.com/academy/what-is-rbac">Oso, Authorization Academy</a>, on the central authorization function.</blockquote>
+<p>Note what changed in the wording: you no longer ask <em>"is this person an admin?"</em>. You ask <em>"may this person update a task?"</em>. Ask about the job, never about the badge.</p>
+
+<h2>Roles are data. Permissions are code.</h2>
+<p>This is the sentence to keep from today. Two halves.</p>
+<p><strong>A role is data.</strong> "Jay is ADMIN of team 3" is a row in the database. It changes all day &mdash; people join, get promoted, leave. It <em>must</em> be a row.</p>
+<p><strong>A permission is code.</strong> "ADMIN may invite members" is a line in a file. It changes when you decide to ship a change. So it lives in the repo, in git, with a test next to it.</p>
+<p>Keeping them apart buys you something real: <strong>nobody can grant themselves a new power by editing a row</strong>, because the powers are not in rows. The worst a database attacker can do is promote themselves to a role you already designed.</p>
+<div class="aside">
+<p><strong>When does the table move into the database?</strong> Only when your <em>users</em> need to invent their own roles ("create role: Billing Reader"). Oso calls that stage <em>custom roles</em>, and says the map "needs to be dynamic" then &mdash; and not before. Your four fixed roles are stage one. Start small: <a href="https://www.osohq.com/academy/what-is-rbac">"start out with a small number of roles"</a>.</p>
+</div>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  subgraph DATA["Data &mdash; rows in Postgres, change all day"]
+    M["Jay is ADMIN of team 3"]
+  end
+  subgraph CODE["Code &mdash; can.ts, changes by deploy + review"]
+    T["VIEWER  -> task:read<br/>MEMBER  -> + create, update, delete<br/>ADMIN   -> + invite, remove<br/>OWNER   -> + team:delete"]
+  end
+  M -- "role name" --> F["can(role, action)"]
+  T -- "the table" --> F
+  F --> YN["true / false"]
+</pre>
+<figcaption>An attacker who edits rows can only promote themselves to a role you already designed. They cannot invent a new power, because powers are not rows.</figcaption>
+</figure>
+
+<h2>Deny by default</h2>
+<p>One more rule before the code. When your function gets something it does not recognise &mdash; a role it has never heard of, a person with no membership at all &mdash; it must answer <strong>no</strong>. Not <em>maybe</em>, not a crash.</p>
+<blockquote>"Even when no access control rules are explicitly matched, the application cannot remain neutral&hellip; The application must always make a decision, whether implicitly or explicitly, to either deny or permit." &mdash; <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html">OWASP, Authorization Cheat Sheet</a></blockquote>
+<p>A crash is not a decision. A crash is a <code>500</code>, and a <code>500</code> in the wrong place is a door left open. So: <code>undefined</code> role &rarr; <code>false</code>. Junk role &rarr; <code>false</code>.</p>
+
+<h2>The code you now have</h2>
+<p><code>server/src/auth/can.ts</code>. The whole authorization brain of your API, and it touches nothing.</p>
+<pre><code>export const ROLES = ["VIEWER", "MEMBER", "ADMIN", "OWNER"] as const;
+export type Role = (typeof ROLES)[number];
+
+export const ACTIONS = [
+  "task:read", "task:create", "task:update", "task:delete",
+  "project:create", "project:delete",
+  "member:invite", "member:remove",
+  "team:delete",
+] as const;
+export type Action = (typeof ACTIONS)[number];
+
+// "the role below, plus these". Our four roles nest, so say it once.
+const VIEWER = ["task:read"] as const;
+const MEMBER = [...VIEWER, "task:create", "task:update", "task:delete",
+                "project:create"] as const;
+const ADMIN  = [...MEMBER, "project:delete", "member:invite",
+                "member:remove"] as const;
+const OWNER  = [...ADMIN, "team:delete"] as const;
+
+const PERMISSIONS: Record&lt;Role, readonly Action[]&gt; = {
+  VIEWER, MEMBER, ADMIN, OWNER,
+};
+
+export function can(role: Role | undefined, action: Action): boolean {
+  if (role === undefined) return false;
+  return PERMISSIONS[role]?.includes(action) ?? false;
+}</code></pre>
+<p>Three small things worth pausing on.</p>
+<p><strong><code>as const</code> plus <code>typeof</code>.</strong> You write the list of roles once, and TypeScript makes the type from it. No separate <code>type Role = "VIEWER" | ...</code> to keep in sync. Same trick as <code>z.infer</code> in <a href="../0002-schemas-at-the-door.html">lesson 2</a>: one source, type derived.</p>
+<p><strong><code>Record&lt;Role, readonly Action[]&gt;</code>.</strong> This is the wall from lesson 3, in the type system. Add a fifth role to <code>ROLES</code> and the build breaks until you decide what it may do. You cannot ship a role with accidental powers, because you cannot ship a role with <em>no</em> entry.</p>
+<p><strong><code>?? false</code> looks dead.</strong> It is. <code>Record</code> covers every <code>Role</code>, so the lookup cannot miss. It stays because a role read out of Postgres is a <code>string</code> that we <em>promised</em> is a <code>Role</code>. If that promise ever breaks, this line says no instead of throwing. Deny by default means at the type boundary too.</p>
+
+<h2>Ten tests, no database</h2>
+<p><code>server/src/auth/can.test.ts</code>, still <code>node:test</code>, still no framework.</p>
+<pre><code>test("a viewer cannot edit", () =&gt; {
+  assert.equal(can("VIEWER", "task:update"), false);
+});
+
+test("a member cannot delete the team", () =&gt; {
+  assert.equal(can("MEMBER", "team:delete"), false);
+});
+
+test("no role is no permission", () =&gt; {
+  for (const action of ACTIONS) assert.equal(can(undefined, action), false);
+});</code></pre>
+<p>Those first two are literally lines from your mission, now machine-checked. Two more are worth stealing for any table you ever write:</p>
+<pre><code>test("every action is granted to somebody", () =&gt; {
+  // An action no role can do is dead code -- and a route that checks
+  // it would be locked shut forever. Catches a typo in the table.
+  for (const action of ACTIONS)
+    assert.ok(ROLES.some((role) =&gt; can(role, action)), `no role can ${action}`);
+});
+
+test("more senior roles never lose a power", () =&gt; {
+  // ROLES is ordered least to most powerful, so each role must allow
+  // everything the one before it allowed. Catches a bad edit years later.
+});</code></pre>
+<p>That last one is a <strong>property test</strong>: it does not check one fact, it checks a shape that must hold for every role and every action. Nine actions times four roles, in one test you wrote once.</p>
+<pre><code>cd server &amp;&amp; npm test
+# -&gt; # tests 18
+#    # pass 18</code></pre>
+<p>Eighteen: your 8 session tests from lesson 6, plus 10 new. It ran in about a second, because none of the new ones start a server.</p>
+
+<h2>What this shape cannot say</h2>
+<p>Your mission has a third rule: <em>"Admin cannot remove Owner"</em>. Try to write it in the table above.</p>
+<p>You cannot. The table only knows about the person <strong>asking</strong>. That rule needs the role of the person being <strong>removed</strong> &mdash; the resource. Same with "you may edit a task you own": that needs the task's <code>ownerId</code>.</p>
+<p>Which is why the mission says <code>can(user, action, resource)</code>, with three arguments. Today's two-argument version is the first gate and it stays; the resource rules layer on top of it. Lesson 9.</p>
+<p>Notice you have already met a resource rule, by accident. <code>where: { id, ownerId }</code> in <code>task.store.ts</code> &mdash; the IDOR fix from lesson 6 &mdash; <em>is</em> an ownership check, hidden inside a query. Lesson 9 pulls it out where you can see it and test it.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  A["can(role, action)<br/>today"] --> Q1["Viewer cannot edit? &check;"]
+  A --> Q2["Member cannot delete team? &check;"]
+  A --> Q3["Admin cannot remove Owner? &cross;<br/>needs the TARGET's role"]
+  A --> Q4["May I edit THIS task? &cross;<br/>needs the task's ownerId"]
+  Q3 --> N["can(user, action, resource)<br/>lesson 9"]
+  Q4 --> N
+</pre>
+<figcaption>Two arguments only see the person asking. The third argument is the thing being touched. That is the whole gap.</figcaption>
+</figure>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Your session gate returns 401. Why is a second gate needed at all?</p>
+<button>Because a session id can be stolen, and the second gate re-checks the cookie</button>
+<button>Because knowing who is asking says nothing about what they may do</button>
+<p class="why" hidden>Right: authn is <em>who</em>, authz is <em>may</em>. A logged-in intern is still logged in.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why is <code>can(role, "member:invite")</code> better than <code>isAdmin(user)</code>?</p>
+<button>The rule moves when a role changes, so one line changes instead of forty</button>
+<button>The role moves when a rule changes, so no line changes in any route</button>
+<p class="why" hidden>Right: name the job, not the badge. Routes ask for a power; the table decides who holds it.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why do permissions live in code while roles live in the database?</p>
+<button>Rows are read far more often than code, so the lookup would be much slower</button>
+<button>Rows change all day, but a new power should need a review and a deploy</button>
+<p class="why" hidden>Right: and nobody grants themselves a power by editing a row, because powers are not rows.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">A role string from the database is not in your table. What must happen?</p>
+<button>The function returns false, because an unmatched rule is still a decision</button>
+<button>The function throws an error, because bad data must never pass silently</button>
+<p class="why" hidden>Right: deny by default. A throw is a 500, and a 500 in the wrong place opens the door.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Which mission rule does a role&rarr;action table fail to express?</p>
+<button>Viewer cannot edit a task, because editing depends on which task it is</button>
+<button>Admin cannot remove Owner, because that depends on the target's role</button>
+<p class="why" hidden>Right: the table only sees the asker. Resource rules need the third argument.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Lesson 6 fixed an IDOR with <code>where: { id, ownerId }</code>. What was that, really?</p>
+<button>An authorization check, written inside a query instead of in one gate</button>
+<button>An authentication check, since the owner id came from the session cookie</button>
+<p class="why" hidden>Right: it decided <em>may you</em>. It just did it in a place you cannot test on its own.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Front end hides the Delete button from Viewers. What did that buy you?</p>
+<button>One of the two required checks, since the other is the session cookie</button>
+<button>Nothing, security-wise. It is politeness. curl never sees your button</button>
+<p class="why" hidden>Right: OWASP &mdash; checks "must be performed server-side". Hiding is UX, not a gate.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Adding a fifth role to <code>ROLES</code> breaks the build. Why is that good?</p>
+<button>A role with no entry cannot ship, so it cannot ship with accidental powers</button>
+<button>A role with no entry cannot ship, so the database enum stays in step with it</button>
+<p class="why" hidden>Right: same move as the <code>NOT NULL</code> wall in lesson 3. Let the tool remember for you.</p>
+</div>
+
+<h2>Read this</h2>
+<p><strong>Primary source:</strong> <a href="https://www.osohq.com/academy/what-is-rbac">Oso Authorization Academy &mdash; Role-Based Access Control</a>. Free, no signup, and the best plain-English walk through the four stages of RBAC. Read the first two stages (Organizational Roles, Cross-Organization Roles) &mdash; stage two is exactly what you build in lesson 8. Skim stages three and four so you recognise them later.</p>
+<p>Then <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html">OWASP &mdash; Authorization Cheat Sheet</a>. Short. It is the checklist your week 7&ndash;8 self-attack will grade you against.</p>
+
+<h2>Do this before lesson 8</h2>
+<ol>
+<li>Read <code>server/src/auth/can.ts</code> top to bottom. Then run <code>cd server &amp;&amp; npm test</code>. 18 pass.</li>
+<li>Break it on purpose: delete <code>"task:read"</code> from <code>VIEWER</code>. Run the tests. Note <em>which</em> tests fail and which stay green. Put it back.</li>
+<li>Break it the other way: add <code>"team:delete"</code> to <code>MEMBER</code>. Which test catches it? Put it back.</li>
+<li>Add a fifth role <code>"BILLING"</code> to <code>ROLES</code> and nothing else. Run <code>npm run typecheck</code> (new script, added today). Read the error. That is the wall doing its job. Remove it.</li>
+<li>Write one new test yourself: <em>an admin cannot delete the team</em>. Two lines. Run it.</li>
+<li>Now try to write <em>"an Admin cannot remove an Owner"</em> as a test of <code>can</code>. You will get stuck. Write down, in one sentence, exactly what information the function is missing. Bring me that sentence.</li>
+<li>Guess first, then tell me: nothing in the API calls <code>can()</code> yet. What is still missing before a route <em>can</em> call it? (Hint: <code>request.userId</code> exists. What does not?)</li>
+</ol>
+
+<p>Stuck, or something felt hand-wavy? <strong>Ask me.</strong> I am your teacher here. Say what confused you and I will re-teach it another way.</p>
+
+<hr>
+<p class="nav">Back: <a href="../0006-a-door-that-stays-open.html">Lesson 6 &mdash; A door that stays open</a> &middot; Keep for reference: <a href="../../reference/rbac-permissions.html">Roles &amp; permissions cheat sheet</a> &middot; <a href="../../reference/api-security-basics.html">API security basics</a> &middot; <a href="../../reference/sessions-and-cookies.html">Sessions &amp; cookies</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a> &middot; Sources: <a href="../../RESOURCES.md">RESOURCES.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

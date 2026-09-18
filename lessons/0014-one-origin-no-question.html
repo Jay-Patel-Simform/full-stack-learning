@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 14 — Avoiding cross-origin entirely</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin: 2rem 0; }
+@media (max-width: 720px) { .two { grid-template-columns: 1fr; } }
+.card { border: 1px solid #d8d4cc; border-radius: 6px; padding: 1rem 1.2rem; }
+.card h3 { margin-top: 0; font-size: 1rem; letter-spacing: .04em; text-transform: uppercase; }
+.card.two-o { background: #fdf6f2; border-color: #e2c3b3; }
+.card.one-o { background: #f4f8f3; border-color: #b9cfb4; }
+.hop { font-family: ui-monospace, Menlo, monospace; font-size: .8rem; margin: .35rem 0; padding-left: 1.1em; text-indent: -1.1em; }
+.hop.no::before { content: "\2715\00a0"; color: #a4462c; }
+.hop.yes::before { content: "\2713\00a0"; color: #4a7c46; }
+.hop.dot::before { content: "\2192\00a0"; color: #8a8478; }
+.cost { border-left: 3px solid #c9a227; background: #fdfaf0; padding: .8rem 1rem; margin: 1.5rem 0; }
+.cost strong { color: #7a5c00; }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 14 &middot; Week 7&ndash;8 &middot; API security</p>
+<h1>Avoiding cross-origin entirely</h1>
+<p class="lede">There is a third way to arrange your app, and it deletes the whole of lesson 13's configuration.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>Put the API on the <em>same origin</em> as the page, behind a path like <code>/api</code>.</li>
+<li>Same origin means: no <code>Origin</code> header, no preflight, no allowlist, no cookie question.</li>
+<li>You <em>delete</em> configuration instead of writing it. That is why most teams ship this.</li>
+<li>The cost: one nginx file, and <code>request.ip</code> becomes the proxy until you fix it.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  U["browser<br/>https://app.com"] --> N["nginx<br/>one origin"]
+  N -- "/" --> S["static React build"]
+  N -- "/api/*" --> A["Fastify :3000"]
+  N -.-> NOTE["same scheme, host, port<br/>= same origin<br/>= CORS never involved"]
+</pre>
+<figcaption>One public origin, two things behind it. The browser cannot tell that <code>/api</code> is a different program, so none of its cross-origin machinery ever switches on.</figcaption>
+</figure>
+
+<h2>The three arrangements</h2>
+<table>
+<tr><th>Arrangement</th><th>CORS?</th><th>SameSite=Lax works?</th></tr>
+<tr><td>Different ports / domains</td><td>needed, allowlist</td><td>depends on the domains</td></tr>
+<tr><td>Subdomain split (<code>app.</code> / <code>api.</code>)</td><td>needed, allowlist</td><td class="yes">yes &mdash; same <em>site</em></td></tr>
+<tr><td>Same origin, <code>/api</code> path</td><td class="yes">never involved</td><td class="yes">yes, trivially</td></tr>
+</table>
+
+<p>The middle row is the one people miss: subdomains are cross-<em>origin</em> (so CORS is on) but same-<em>site</em> (so the cookie behaves). Lesson 13's two words, doing real work.</p>
+
+<h2>The nginx file</h2>
+<pre><code>server {
+  listen 443 ssl;
+  server_name app.com;
+
+  location /api/ {
+    proxy_pass http://127.0.0.1:3000/;   # trailing slash strips /api
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+
+  location / {
+    root /var/www/app;
+    try_files $uri /index.html;          # SPA fallback
+  }
+}</code></pre>
+
+<h2>The cost, said plainly</h2>
+<p>Every request now arrives from <code>127.0.0.1</code>. Lesson 12's IP floor is counting nginx, not your users &mdash; so <em>one</em> key for everybody. The fix is <code>trustProxy</code> in Fastify, switched on <strong>only</strong> once nginx is the thing writing that header.</p>
+
+<p class="takeaway">Same family as lesson 11: a rate limit is only as good as its key, and a proxy changes the key underneath you.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="0">
+<p class="q">Why is <code>trustProxy</code> dangerous to enable too early?</p>
+<button>Any caller can then forge their address</button>
+<button>Fastify cannot parse the header format</button>
+<p class="why" hidden><code>x-forwarded-for</code> is just a header. If nothing you control overwrites it, an attacker sets it to a new value per request and your per-IP limit counts to one forever.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li>Read <code>deploy/nginx.conf</code>. It is short and you will read it again at deploy.</li>
+<li>Make development match production: put Vite's dev proxy on <code>/api</code>, so you never debug a CORS problem that will not exist in production.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Same page, same API, same cookie. The only difference is the URL you fetch.</p>
+
+<div class="two">
+  <div class="card two-o">
+    <h3>Two origins</h3>
+    <p class="hop dot">page: <code>https://app.example</code></p>
+    <p class="hop dot">api: <code>https://api.app.example</code></p>
+    <p class="hop dot"><code>fetch("https://api.app.example/auth/me")</code></p>
+    <hr>
+    <p class="hop no">browser adds <code>Origin:</code></p>
+    <p class="hop no">preflight <code>OPTIONS</code> on writes</p>
+    <p class="hop no">server must send allow header</p>
+    <p class="hop no"><code>ALLOWED_ORIGINS</code> must be right</p>
+    <p class="hop no">front end needs an API base URL</p>
+    <p class="hop yes"><code>SameSite=Lax</code> unchanged</p>
+  </div>
+
+  <div class="card one-o">
+    <h3>One origin</h3>
+    <p class="hop dot">page: <code>https://app.example</code></p>
+    <p class="hop dot">api: <code>https://app.example/api</code></p>
+    <p class="hop dot"><code>fetch("/api/auth/me")</code></p>
+    <hr>
+    <p class="hop yes">no <code>Origin</code> header</p>
+    <p class="hop yes">no preflight</p>
+    <p class="hop yes">no allow header</p>
+    <p class="hop yes"><code>ALLOWED_ORIGINS</code> can be empty</p>
+    <p class="hop yes">relative URL, no base URL anywhere</p>
+    <p class="hop yes"><code>SameSite=Lax</code> unchanged</p>
+  </div>
+</div>
+
+<p class="takeaway">Both columns have the same cookie row. That is the half of the homework that had no knob &mdash; <code>SameSite</code> never had to change.</p>
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  U["Browser<br/>https://app.example"]
+  N["nginx :443<br/>the only public door"]
+  S["Static files<br/>/var/www/app"]
+  F["Fastify<br/>127.0.0.1:3000"]
+  U -- "GET /" --> N
+  U -- "GET /api/auth/me" --> N
+  N -- "location /" --> S
+  N -- "location /api/  (trailing slash strips it)" --> F
+</pre>
+<figcaption>One origin the browser can see. Two programs it cannot.</figcaption>
+</figure>
+
+<div class="cost">
+<p><strong>The two costs.</strong> Same-origin is not free.</p>
+<p><strong>1. <code>request.ip</code> becomes <code>127.0.0.1</code>.</strong> Every user shares one rate-limit bucket. Fix in week 11&ndash;12: <code>Fastify({ trustProxy: true })</code>, and only ever behind a proxy you control.</p>
+<p><strong>2. The preflight is gone.</strong> A cross-origin write needed an <code>OPTIONS</code> a hostile page could not get. Now there is nothing to ask for &mdash; so <code>SameSite=Lax</code> is doing CSRF defence alone.</p>
+</div>
+
+<hr>
+<p class="nav">Full lesson: <a href="./0014-one-origin-no-question.html">Lesson 14 &mdash; One origin, no question</a> &middot; The config: <a href="../deploy/nginx.conf">deploy/nginx.conf</a></p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_pass">nginx, proxy_pass</a> &mdash; specifically what the trailing slash does.</p>
+<p><b>The long version:</b> <a href="./long/0014-one-origin-no-question.html">line-by-line nginx, and when a subdomain is right</a>.</p>
+<p>Ask me before you deploy. The <code>trustProxy</code> switch is the one to get right on the day.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0013-same-site-is-not-same-origin.html">&larr; Back</a>
+<a href="./0015-headers-for-json-not-pages.html">Next: headers for JSON &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

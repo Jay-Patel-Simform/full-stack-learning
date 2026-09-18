@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 29 &mdash; Finishing a refactor: one reader</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.track { border: 1px solid var(--rule); border-radius: 4px; margin: 1.5rem 0;
+    font-family: var(--mono); font-size: 0.74rem; overflow: hidden; }
+  .track .row { display: grid; grid-template-columns: 7.5rem 1fr 1fr;
+    border-top: 1px solid var(--rule); }
+  .track .row:first-child { border-top: 0; }
+  .track .row > * { padding: 0.5rem 0.7rem; min-width: 0; }
+  .track .t { color: var(--muted); border-right: 1px solid var(--rule);
+    background: var(--code-bg); font-size: 0.68rem; }
+  .track .snap { border-right: 1px solid var(--rule); }
+  .track .hd { background: var(--code-bg); font-size: 0.68rem;
+    text-transform: uppercase; letter-spacing: 0.09em; color: var(--muted); }
+  .drift { color: var(--bad); font-weight: 600; }
+  .same { color: var(--muted); }
+  .cook { font-family: var(--mono); font-size: 0.7rem; margin: 1.4rem 0;
+    border-left: 3px solid var(--rule); padding-left: 0.9rem; }
+  .cook div { padding: 0.22rem 0; white-space: nowrap; overflow-x: auto; }
+  .cook .lbl { display: inline-block; width: 6.5rem; color: var(--muted); }
+  .flag-on { color: var(--bad); font-weight: 600; background: var(--code-bg); }
+  .flag-off { color: var(--ok); }
+  .browser { border: 1px dashed var(--bad); border-radius: 4px; padding: 0.7rem 0.9rem;
+    margin: 1.1rem 0; font-size: 0.82rem; }
+  .ladder { font-family: var(--mono); font-size: 0.74rem; margin: 1.5rem 0;
+    border-left: 3px solid var(--rule); padding-left: 0.9rem; }
+  .ladder div { padding: 0.3rem 0; }
+  .ladder .stop { color: var(--bad); font-weight: 600; }
+  .ladder .never { color: var(--muted); text-decoration: line-through; }
+  .ladder .arrow { color: var(--muted); }
+  figcaption { font-size: 0.8rem; color: var(--muted); margin-top: 0.6rem;
+    border-left: 3px solid var(--rule); padding-left: 0.8rem; }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 29 &middot; Week 11 &middot; Config</p>
+<h1>Finishing a refactor: one reader</h1>
+<p class="lede">You chose to postpone Docker to the end of the course. Good &mdash; because <a href="./0027-the-default-that-hides-the-typo.html">lesson 27</a> is not finished, and a container is the worst place to discover that. Six lines never started using the config you built. Five of them are harmless today and <b>lie about what the program does</b>. One is in the function that logs people out.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong><code>sessionCookie()</code> reads <code>config.NODE_ENV</code>. <code>clearCookie()</code>, thirteen lines below it, reads <code>process.env.NODE_ENV</code>.</strong> Two readers, one fact.</li>
+<li><strong>Measured: the flags disagree.</strong> The set-cookie has no <code>Secure</code>, the clear-cookie has <code>Secure</code>. A browser on plain <code>http</code> <em>throws the clear-cookie away</em>, so logout deletes nothing.</li>
+<li><strong>The four <code>??</code> fallbacks can never fire.</strong> Proven below: <code>config.ts</code> calls <code>process.exit(1)</code> first, so line 18 of <code>app.ts</code> is never reached with a missing value.</li>
+<li><strong><code>db.ts</code> has 10 lines that <code>config.ts</code> already does</strong> &mdash; including a second <code>loadEnvFile()</code> and a second <code>DATABASE_URL</code> check.</li>
+<li><strong>Your own <code>server/CLAUDE.md</code> already forbids all of this.</strong> The rule is written down. The code breaks it in six places.</li>
+</ul>
+</div>
+
+<h2>The word pair</h2>
+<div class="word"><b>snapshot</b> &mdash; a copy of a value, taken once. <code>config</code> is a snapshot: <code>config.ts</code> read the environment at import time and never looks again.</div>
+<div class="word"><b>live read</b> &mdash; going back to the source every time you need the value. <code>process.env.NODE_ENV</code> is a live read.</div>
+<p class="takeaway">A snapshot and a live read of the same fact <b>can disagree</b>, because <code>process.env</code> is a plain mutable object and anyone in the process can write to it. Once two readers exist, no amount of validation makes them agree. You do not test them into agreement &mdash; you <b>delete one reader</b>.</p>
+
+<h2>Measured, on your code, just now</h2>
+<p>Real <code>config.ts</code>, real <code>session.ts</code>, nothing faked. The script sets <code>NODE_ENV=production</code> <em>after</em> import &mdash; exactly what a test helper or a library can do:</p>
+<pre><code>boot   process.env.NODE_ENV = "development"
+boot   config.NODE_ENV      = "development"
+
+after  process.env.NODE_ENV = 'production' (config untouched):
+       config.NODE_ENV      = <b>"development"</b>
+       process.env.NODE_ENV = <b>"production"</b>
+
+set-cookie   : session=FAKEID; HttpOnly; SameSite=Lax; Path=/; Expires=Fri, 01 Jan 2027 00:00:00 GMT
+clear-cookie : session=;       HttpOnly; SameSite=Lax; Path=/; Max-Age=0<b>; Secure</b>
+
+set   has Secure? false
+clear has Secure? true
+<b>FLAGS MATCH? false</b></code></pre>
+
+<div class="aside"><b>Why a flag mismatch is a logout that fails.</b> The comment above that line in your own file already says it: &ldquo;the flags must match the cookie being cleared, <code>Secure</code> included, or the browser treats this as a different cookie and the session one survives.&rdquo; And it is worse than that on plain <code>http</code>. A site served over <code>http</code> <b>may not set a <code>Secure</code> cookie at all</b> &mdash; the browser drops the whole <code>Set-Cookie</code> header. So <code>POST /logout</code> answers <code>200</code>, the server row is deleted, and the browser still holds a cookie. The user sees &ldquo;logged out&rdquo;. The next request sends the dead id and gets <code>401</code>. It <em>looks</em> fine. It is fine <b>by luck</b>, not by design &mdash; and the one thing you cannot rely on is that the next bug in this shape will also be lucky.</p></div>
+
+<p class="takeaway">Be clear about the size of this: on your machine today, <b>nothing writes to <code>process.env</code>, so the bug is not live.</b> That is the honest version. But the reason it is not live is that no code happens to mutate one global object. That is not a guarantee. It is an accident you can remove in one word.</p>
+
+<h2>The four <code>??</code> can never fire</h2>
+<p>These look like safety. They are not reachable. Booted with <code>ALLOWED_ORIGINS</code> genuinely absent, from a directory with no <code>.env</code>:</p>
+<pre><code>$ env -i DATABASE_URL=... NODE_ENV=development TRUST_PROXY=false tsx src/server.ts
+Bad environment:
+<b>&#10006; Invalid input: expected string, received undefined
+  &rarr; at ALLOWED_ORIGINS</b>
+$ echo $?
+1</code></pre>
+<p>The process is <b>dead before <code>app.ts</code> is imported</b>. And when it does boot, every one of the four is already a real value:</p>
+<pre><code>ALLOWED_ORIGINS: ["http://localhost:5173"]  <- an ARRAY, not a string
+PORT:            3000  number
+HOST:            "127.0.0.1"  string
+LOG_LEVEL:       "silent"
+
+can any of these be null/undefined?
+  ALLOWED_ORIGINS: no  -> the ?? can never fire
+  PORT:            no  -> the ?? can never fire
+  HOST:            no  -> the ?? can never fire
+  LOG_LEVEL:       no  -> the ?? can never fire</code></pre>
+<div class="word"><b>dead code</b> &mdash; code that can never run, whatever the input. Harmless to the computer. Expensive for the next reader, who believes it.</div>
+<p>Look at the first one closely. <code>config.ALLOWED_ORIGINS ?? "http://localhost:5173"</code> says <em>&ldquo;if this is missing, allow localhost&rdquo;</em>. That sentence is false twice over: it cannot be missing, and if it somehow were, a <code>string</code> is the wrong <b>shape</b> &mdash; the real value is a <code>string[]</code>. TypeScript accepts it, because both shapes are legal for the CORS <code>origin</code> option. Same trap as <a href="./0028-the-reply-that-says-nothing.html">lesson 28</a>: <b>the compiler checked that your claim is possible, not that it is true.</b></p>
+<p>And <code>Number(config.PORT ?? 3000)</code> is doing zod&rsquo;s job a second time. <code>z.coerce.number()</code> already returned a <code>number</code>. <code>Number(3000)</code> is <code>3000</code>.</p>
+
+<h2>The six edits &mdash; type them yourself</h2>
+<p>All six are deletions or one-word swaps. I applied every one of them to your files, ran <code>tsc</code> and the suite, then put your files back byte-for-byte. <b>Expect a clean <code>tsc</code> and 141 passing.</b></p>
+
+<h3>1. <code>server/src/app.ts</code> &mdash; two lines</h3>
+<pre><code>- const ALLOWED_ORIGINS = config.ALLOWED_ORIGINS <b>?? "http://localhost:5173"</b>;
++ const ALLOWED_ORIGINS = config.ALLOWED_ORIGINS;
+
+-     logger: { level: config.LOG_LEVEL <b>?? "info"</b> },
++     logger: { level: config.LOG_LEVEL },</code></pre>
+<div class="aside"><b>Do not touch the other two <code>??</code> in this file.</b> <code>request.routeOptions.url ?? "(no route)"</code> (line 174) and <code>(err.statusCode ?? 500)</code> (line 189) are reading values Fastify fills in, which genuinely can be absent. <code>??</code> is not the problem. <b>A second default for a value that already has one</b> is the problem.</div>
+
+<h3>2. <code>server/src/server.ts</code> &mdash; two lines</h3>
+<pre><code>  await app.listen({
+-     port: <b>Number(</b>config.PORT<b> ?? 3000)</b>,
+-     host: config.HOST<b> ?? "127.0.0.1"</b>,
++     port: config.PORT,
++     host: config.HOST,
+  });</code></pre>
+<p>Keep the comment above it. The comment explains <em>why</em> the default is loopback, and that reason still holds &mdash; it just lives in <code>config.ts</code> now, where a reader can find every default in one place.</p>
+
+<h3>3. <code>server/src/db.ts</code> &mdash; delete ten lines</h3>
+<pre><code>  import { config } from "./config.ts";
+
+<b>- // ? Read .env into process.env. Built into Node, so no dotenv package at runtime.
+- // ! Throws when the file is missing, and in production there is no file - the
+- // ! variables come from the environment. Missing file is fine; missing URL is not.
+- try {
+-   process.loadEnvFile();
+- } catch {
+-   // ? no .env here, so process.env is already the whole story
+- }
+- if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is not set");
+-</b>
+  // ? Prisma 7 talks to Postgres through a driver adapter. `pg` is that driver.
+  const adapter = new PrismaPg({ connectionString: config.DATABASE_URL });</code></pre>
+<p>Both jobs already happened. <code>config.ts</code> calls <code>loadEnvFile()</code>, and <code>DATABASE_URL: z.url()</code> is a <em>stronger</em> check than <code>if (!...)</code> &mdash; it rejects <code>DATABASE_URL="hello"</code>, which the <code>if</code> accepts.</p>
+<div class="aside"><b>This one is a load-order claim, so I measured it rather than trusting it.</b> Is <code>config.ts</code>&rsquo;s <code>loadEnvFile()</code> guaranteed to run before <code>db.ts</code> needs it? Yes: a module&rsquo;s <code>import</code> statements all finish before <em>any</em> of its own body runs, and <code>db.ts</code> imports <code>config.ts</code>. Deleted, <code>tsc</code> clean, <b>141 tests still pass</b> &mdash; and those tests hit the real database, so the connection string arrived.</div>
+
+<h3>4. <code>server/src/auth/session.ts</code> line 79 &mdash; the real one</h3>
+<pre><code>  export function clearCookie(): string {
+    // ! The flags must match the cookie being cleared, Secure included, or the
+    // ! browser treats this as a different cookie and the session one survives.
+-   const secure = <b>process.env</b>.NODE_ENV === "production" ? "; Secure" : "";
++   const secure = <b>config</b>.NODE_ENV === "production" ? "; Secure" : "";
+    return `${COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0${secure}`;
+  }</code></pre>
+<p>One word. It is the only one of the six that changes what the program can do.</p>
+
+<h3>5. A test that would have caught it</h3>
+<p>Add to the bottom of <code>server/src/auth/session.test.ts</code>, and add <code>clearCookie</code> to the import at the top:</p>
+<pre><code>// ! Both cookie helpers must read NODE_ENV from the same place. If one reads
+// ! config and the other reads process.env, they can disagree inside one
+// ! process - and a clear-cookie whose flags do not match is a logout that
+// ! leaves the session cookie alive.
+test("the clear cookie carries the same flags as the cookie it clears", () =&gt; {
+  // A live read of process.env would see this. The config snapshot cannot.
+  const real = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+  try {
+    const set = sessionCookie("anything", new Date());
+    const clear = clearCookie();
+
+    assert.equal(/Secure/.test(set), /Secure/.test(clear));
+  } finally {
+    // ! Put it back, or every test after this one runs in a different world.
+    process.env.NODE_ENV = real;
+  }
+});</code></pre>
+<p>Measured both ways, on your suite:</p>
+<pre><code>with the fix     -> # tests 142   # pass <b>142</b>   # fail 0
+without the fix  -> <b>not ok 36 - the clear cookie carries the same flags as the cookie it clears</b>
+                    # tests 142   # pass 141   # fail <b>1</b></code></pre>
+<p>That is what makes it a real test and not decoration: it <b>fails on the broken code</b>. A test you never saw fail is a test you have no reason to trust.</p>
+<div class="aside"><b>The <code>try/finally</code> is the interesting part.</b> This test writes to a global, and every test after it shares that global. <code>node:test</code> runs the tests in one file in one process, in order. Without the restore, the test <em>fixes itself</em> and quietly changes the world for test 37. This is the same argument as the whole lesson, one level down: a mutable global with two readers.</div>
+
+<h3>6. <code>server/.env.example</code> &mdash; a new file</h3>
+<p>Your <code>.gitignore</code> holds <code>.env</code>, which is right. The cost is that nobody &mdash; including you in March &mdash; can tell what the app needs. The example file is the <b>names with no secrets</b>:</p>
+<pre><code># Copy to .env and fill in. The first four have NO default: no value, no boot.
+# Values here are placeholders, never real secrets.
+
+# Required. Must parse as a URL.
+DATABASE_URL=postgres://tasks:CHANGEME@localhost:5432/tasks
+# Required. development | test | production
+NODE_ENV=development
+# Required. Comma separated, no spaces needed.
+ALLOWED_ORIGINS=http://localhost:5173
+# Required. true/1/yes/on or false/0/no/off. Only true behind a proxy you control.
+TRUST_PROXY=false
+
+# Optional - config.ts has a default for each of these three.
+# PORT=3000
+# HOST=127.0.0.1
+# LOG_LEVEL=info</code></pre>
+<div class="word"><b><code>.env.example</code></b> &mdash; a committed file listing every variable by name, with fake values. It is documentation that cannot drift, because the app refuses to boot when it is wrong.</div>
+<p>Note what the comment structure does: the required four and the optional three are <b>visually separate</b>. That split is the whole idea of lesson 27, now readable by someone who never saw <code>config.ts</code>.</p>
+
+<h2>Your own rule book already said so</h2>
+<p>From <code>server/CLAUDE.md</code>, written before any of this:</p>
+<pre><code>Read env through `config` from `src/config.ts`. <b>Never `process.env`</b> in a
+route, store, or hook - a typo there is silent, in the schema it refuses to boot.</code></pre>
+<p class="takeaway">The rule was already correct and already written down. Six places still broke it, <code>tsc</code> was clean, and 141 tests passed. <b>A written rule is not enforcement.</b> The two things that <em>are</em> enforcement, in order of strength: making the wrong thing impossible (<code>config.ts</code> refusing to boot), and a test that fails (the one you just added). Prose is third, and a distant third.</p>
+
+<h2>Single source of truth, stated once</h2>
+<div class="word"><b>single source of truth</b> &mdash; for any one fact, exactly one place in the program that knows it. Everywhere else asks that place.</div>
+<div class="vs">
+<div class="no">
+<h4>two sources</h4>
+<pre><code>config.NODE_ENV      // snapshot
+process.env.NODE_ENV // live
+
+config.PORT          // zod default 3000
+?? 3000              // and again here</code></pre>
+<p>Now &ldquo;what port does this run on?&rdquo; has two answers, and you must read both files to know which one wins.</p>
+</div>
+<div class="yes">
+<h4>one source</h4>
+<pre><code>config.NODE_ENV
+config.PORT</code></pre>
+<p>One answer, in one file, checked at boot. Change the default in <code>config.ts</code> and every reader changes with it.</p>
+</div>
+</div>
+
+<h2>Why this had to come before the container</h2>
+<table>
+<tr><th>In a container</th><th>What the leftovers do there</th></tr>
+<tr><td>Every variable arrives as a real environment variable. There is no <code>.env</code> file.</td><td><code>db.ts</code>&rsquo;s <code>loadEnvFile()</code> throws and is swallowed &mdash; fine, but it is now pure noise in a place you will be reading during an outage.</td></tr>
+<tr><td>A missing variable is the <b>most common</b> deploy mistake &mdash; one forgotten <code>-e</code> flag.</td><td>A <code>??</code> fallback is exactly the thing that turns &ldquo;refuses to boot&rdquo; into &ldquo;boots wrong and serves traffic&rdquo;. Lesson 27 removed the defaults; these four put them back.</td></tr>
+<tr><td>Traffic arrives over <b>https</b>, so <code>Secure</code> cookies finally matter.</td><td>The <code>clearCookie</code> mismatch stops being lucky. This is the first environment where the two readers can differ and the difference is visible.</td></tr>
+<tr><td>You will hand the image an env list you wrote by hand.</td><td>Without <code>.env.example</code> you write that list from memory, against a schema in a file you are not looking at.</td></tr>
+</table>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">Why can <code>config.ALLOWED_ORIGINS ?? "..."</code> never use the fallback?</p>
+<button>Because zod gives it a default value</button>
+<button>Because a missing value exits the process</button>
+<p class="why" hidden><code>ALLOWED_ORIGINS</code> has <b>no</b> <code>.default()</code> &mdash; that was the whole point of lesson 27. When it is absent, <code>safeParse</code> fails and <code>config.ts</code> calls <code>process.exit(1)</code>. Measured above: <code>&#10006; Invalid input: expected string, received undefined</code>, exit code <code>1</code>. So <code>app.ts</code> line 18 only ever runs in a process where the value is already present. The other answer describes <code>PORT</code>, <code>HOST</code> and <code>LOG_LEVEL</code>, whose <code>??</code> is unreachable for that different reason &mdash; both are dead, for two different reasons, which is worth knowing apart.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Is the <code>clearCookie</code> bug happening in your app today?</p>
+<button>No, but only because nothing mutates it</button>
+<button>Yes, every logout leaves the cookie</button>
+<p class="why" hidden>Not live. Nothing in your app writes to <code>process.env</code>, so both lines read the same value and the flags match. Being precise about this matters more than making the bug sound scary: the thing wrong with the code is not a failing logout, it is that <b>the correctness depends on a fact nobody wrote down and nothing checks</b> &mdash; that no code anywhere in the process mutates one global object. The test you added is what turns that unwritten assumption into a checked one, and note that the test has to <em>do</em> the mutation to expose it.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">All six lines pass <code>tsc</code> and 141 tests. What does that tell you?</p>
+<button>They are safe, so leave them alone</button>
+<button>Neither tool can see this kind of wrong</button>
+<p class="why" hidden>Types check <em>shape</em>: <code>string[] | string</code> is a legal CORS origin, so <code>??</code> compiles. Tests check <em>behaviour you thought to write down</em>, and nobody had written &ldquo;these two functions read the same variable&rdquo;. Dead code and duplicated defaults are both invisible to both tools by their nature &mdash; the program behaves identically with and without them. That is exactly why an unfinished refactor is dangerous rather than merely untidy: <b>there is no green light that will ever turn red.</b> It is found by reading, and then locked down by a test that did not exist before.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>Read before you edit.</strong> <code>cd server &amp;&amp; grep -rn "process\.env" src/ --include="*.ts" | grep -v generated</code>. <b>Nine hits.</b> Four of them are comments, so ignore those. Of the five real ones, three are <b>correct</b>: <code>config.ts:39</code> (this is the one file that <em>should</em> read <code>process.env</code>), <code>config.ts</code>&rsquo;s own <code>loadEnvFile</code> block, and <code>headers.test.ts:45</code> (a test asserting we are not in production). <b>Two are wrong: <code>db.ts:14</code> and <code>session.ts:79</code>.</b> Find them yourself before scrolling back up.</li>
+<li><strong>Make the six edits above.</strong> Then <code>npm run typecheck &amp;&amp; npm test</code>. <b>Expect clean, and 141 passing.</b> If a test fails, stop and tell me which one before changing anything else.</li>
+<li><strong>Add the test, and watch it fail first.</strong> Add it with <code>session.ts</code> still saying <code>process.env</code>. <b>Expect <code>not ok</code> and <code># fail 1</code>.</b> Then make the one-word swap. <b>Expect 142 passing.</b> Doing it in this order is the point &mdash; a test you have never seen fail proves nothing.</li>
+<li><strong>Write <code>server/.env.example</code></strong>, then prove it is honest: <code>diff &lt;(grep -oE "^[A-Z_]+" .env | sort) &lt;(grep -oE "^[A-Z_]+" .env.example | sort)</code>. <b>Expect no output.</b> Same four names on both sides, no secrets on the committed one. (<code>-oE "^[A-Z_]+"</code> and not <code>"^[A-Z_]*"</code> &mdash; the <code>*</code> version matches an empty string on every comment line and fills your diff with blanks. Measured.)</li>
+<li><strong>Break it on purpose, once.</strong> <code>mv .env .env.bak &amp;&amp; npm start</code>. Read the error. <b>Expect four complaints and exit 1</b>, not a server on port 3000. Then <code>mv .env.bak .env</code>. This is the behaviour you are protecting; see it work at least once.</li>
+<li><strong>Fix your own docs.</strong> <code>server/CLAUDE.md</code> says under Environment that these variables have working defaults, which lesson 27 made false. Correct that paragraph. Docs that contradict the code are worse than no docs &mdash; and they are yours to keep true.</li>
+<li><strong>Still open from lesson 26, third time asked.</strong> <code>title: z.string().min(1)</code> accepts <code>"   "</code>. Make it <code>.trim().min(1)</code>. It fixes <code>PATCH</code> too, because <code>UpdateTask</code> reuses <code>CreateTask.shape.title</code>. Add a test. <b>Expect 143 passing.</b> If you would rather I did this one with you, say so &mdash; that is a fine answer.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Three pictures. The drift, the mismatch it causes, and the four lines that can never run.</p>
+
+<h2>1. One process, two answers</h2>
+<p>Both columns are reading <code>NODE_ENV</code>. Time runs down.</p>
+
+<figure>
+<div class="track">
+  <div class="row"><div class="t hd">when</div><div class="snap hd">config.NODE_ENV <span class="same">(snapshot)</span></div><div class="hd">process.env.NODE_ENV <span class="same">(live)</span></div></div>
+  <div class="row"><div class="t">import config.ts</div><div class="snap">reads once &rarr; <b>"development"</b></div><div>"development"</div></div>
+  <div class="row"><div class="t">app boots</div><div class="snap">"development"</div><div>"development"</div></div>
+  <div class="row"><div class="t">something writes<br>process.env</div><div class="snap">"development" <span class="same">&larr; cannot see it</span></div><div class="drift">"production"</div></div>
+  <div class="row"><div class="t">sessionCookie()</div><div class="snap">reads here &rarr; no Secure</div><div class="same">&mdash;</div></div>
+  <div class="row"><div class="t">clearCookie()</div><div class="same">&mdash;</div><div class="drift">reads here &rarr; Secure</div></div>
+</div>
+<figcaption>The snapshot is taken at import and never re-read. That is not a bug &mdash; it is the point of <code>config.ts</code>. The bug is that a <em>second</em> reader exists at all.</figcaption>
+</figure>
+
+<h2>2. The mismatch, on the wire</h2>
+<p>Two <code>Set-Cookie</code> headers that are supposed to describe the same cookie:</p>
+
+<figure>
+<div class="cook">
+<div><span class="lbl">login sends</span>session=abc123; HttpOnly; SameSite=Lax; Path=/; Expires=Fri, 01 Jan 2027&hellip; <span class="flag-off">[no Secure]</span></div>
+<div><span class="lbl">logout sends</span>session=;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; HttpOnly; SameSite=Lax; Path=/; Max-Age=0<span class="flag-on">; Secure</span></div>
+</div>
+<figcaption>Measured, not drawn. The only difference is the last six characters.</figcaption>
+</figure>
+
+<p>A cookie is identified by <b>name + domain + path</b>. Change a flag and you are not clearing the same cookie &mdash; you are describing a new one. And on plain <code>http</code> it is worse than that:</p>
+
+<div class="browser">
+<b>The browser, on <code>http://localhost</code>:</b><br>
+&ldquo;This <code>Set-Cookie</code> asks for <code>Secure</code>. I am not on a secure origin.<br>
+<b>I am dropping the whole header.</b>&rdquo;
+</div>
+
+<figure>
+<pre><code>POST /logout        -> <b>200 OK</b>          <- looks like success
+server              -> session row DELETED  <- really happened
+browser cookie jar  -> <b>session=abc123</b>    <- still there</code></pre>
+<figcaption>Nothing errors. The user sees &ldquo;logged out&rdquo;. The stale cookie gets a <code>401</code> on the next request, so it even <em>behaves</em> right &mdash; which is exactly why nobody finds this by clicking.</figcaption>
+</figure>
+
+<h2>3. The four lines that can never run</h2>
+<p>What actually happens when <code>ALLOWED_ORIGINS</code> is missing:</p>
+
+<figure>
+<div class="ladder">
+<div>node src/server.ts</div>
+<div><span class="arrow">&nbsp;&nbsp;&rarr;</span> import app.ts</div>
+<div><span class="arrow">&nbsp;&nbsp;&nbsp;&nbsp;&rarr;</span> import config.ts</div>
+<div><span class="arrow">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&rarr;</span> Env.safeParse(process.env) &rarr; fails</div>
+<div><span class="stop">&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&rarr; process.exit(1)&nbsp;&nbsp;&#9632; the process is dead here</span></div>
+<div class="never">&nbsp;&nbsp;&nbsp;&nbsp;app.ts line 18: config.ALLOWED_ORIGINS ?? "http://localhost:5173"</div>
+<div class="never">&nbsp;&nbsp;&nbsp;&nbsp;app.ts line 27: config.LOG_LEVEL ?? "info"</div>
+<div class="never">&nbsp;&nbsp;server.ts line 23: Number(config.PORT ?? 3000)</div>
+<div class="never">&nbsp;&nbsp;server.ts line 24: config.HOST ?? "127.0.0.1"</div>
+</div>
+<figcaption>The four fallbacks sit <em>below</em> the exit. Unreachable when the value is missing, and unnecessary when it is present &mdash; because then it already has a value. There is no third case.</figcaption>
+</figure>
+
+<h2>The two shapes, side by side</h2>
+<div class="vs">
+<div class="no">
+<h4>the leftover</h4>
+<pre><code>// config.ts already refuses
+// to boot without this.
+config.ALLOWED_ORIGINS
+  ?? "http://localhost:5173"
+
+// reads: "falls back to
+// localhost if unset"
+// truth:  never runs, and
+//         wrong SHAPE
+//         (string vs string[])</code></pre>
+</div>
+<div class="yes">
+<h4>finished</h4>
+<pre><code>config.ALLOWED_ORIGINS
+
+// reads: "the value"
+// truth: the value</code></pre>
+</div>
+</div>
+
+<p class="takeaway">All four fallbacks pass <code>tsc</code>. All 141 tests pass with them and without them. <b>Dead code has no failing state</b> &mdash; that is what makes an unfinished refactor different from an ordinary bug. You find it by grepping, then you stop it coming back with a test.</p>
+
+<p class="nav"><a href="./0029-the-logout-that-keeps-the-session.html">&larr; Lesson 29</a> &middot; <a href="../reference/environment.html">Environment reference</a> &middot; <a href="./index.html">All lessons</a></p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie#secure">MDN &mdash; <code>Set-Cookie</code>, the <code>Secure</code> attribute</a>. Short. Read the note that an insecure (<code>http:</code>) site <b>cannot set</b> a <code>Secure</code> cookie. That single sentence is why a flag mismatch is a failed logout and not a cosmetic difference.</p>
+<p><b>Also:</b> <a href="https://nodejs.org/api/process.html#processloadenvfilepath">Node docs &mdash; <code>process.loadEnvFile()</code></a>. One screen. Note it <em>throws</em> when the file is missing, which is why both call sites wrap it in <code>try</code> &mdash; and why having two call sites is one too many.</p>
+<p><b>Reference card:</b> <a href="../reference/environment.html">Environment and config</a> &mdash; updated today with the two-readers rule, the <code>.env.example</code> block, and the leftovers checklist.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/node/">r/node</a> &mdash; search for &ldquo;env validation&rdquo;. You will find people who use <code>envalid</code> or <code>t3-env</code> instead of a hand-written zod schema. Read one thread and decide whether either buys you anything your 49 lines of <code>config.ts</code> do not. You have kept a no-new-dependency streak for fourteen lessons now; this is a good place to test whether that is still the right call, or just a habit.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0028-the-reply-that-says-nothing.html">&larr; Back</a>
+<a href="../reference/environment.html">Environment reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

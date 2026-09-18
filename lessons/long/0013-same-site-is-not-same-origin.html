@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 13 — Same-site Is Not Same-origin</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 13 &middot; Week 7&ndash;8 &middot; API security &mdash; third one</p>
+<h1>Same-site is not same-origin</h1>
+<p class="lede">In week 9&ndash;10 your React app starts calling this API. It will be on a different port. Today you find out what the browser does about that &mdash; and why the fix everybody copies off Stack Overflow hands your users' sessions to strangers.</p>
+
+<div class="aside">
+<p><strong>Still owed from lesson 12.</strong> The body-size limit is not in <code>src/app.ts</code> yet. It is still one option on <code>Fastify({ ... })</code>. Do it this week; it is the smallest win left in week 7&ndash;8.</p>
+</div>
+
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>A CORS error does <em>not</em> mean your server said no. Your server answered in full; the browser binned the reply.</li>
+<li>Same-<strong>origin</strong> counts the port. Same-<strong>site</strong> does not. Two different words, two different jobs.</li>
+<li>Anything that could change data gets a preflight <code>OPTIONS</code> first.</li>
+<li><code>origin: true</code> reflects whatever origin asked. With <code>credentials: true</code> that hands your sessions away.</li>
+<li>Write an exact allowlist. CORS is never your access control.</li>
+</ul>
+</div>
+
+<h2>The thing that is about to happen to you</h2>
+<p>Your front end runs on <code>http://localhost:5173</code>. Your API runs on <code>http://localhost:3000</code>. You write the fetch call, and the browser prints this:</p>
+<pre><code>Access to fetch at 'http://localhost:3000/auth/me' from origin
+'http://localhost:5173' has been blocked by CORS policy: No
+'Access-Control-Allow-Origin' header is present on the requested resource.</code></pre>
+<p>Read that error slowly, because it says the opposite of what people think it says. <strong>Your server answered.</strong> The request arrived, the handler ran, the reply came back. The <em>browser</em> then threw the reply in the bin before your JavaScript could see it.</p>
+<p class="takeaway">CORS is not a lock on your server. It is the browser refusing to hand one page the contents of another site's replies. CORS is how you <em>open</em> that door a crack.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant JS as Your page JS<br/>:5173
+  participant BR as The browser
+  participant API as Your API<br/>:3000
+  JS->>BR: fetch("http://localhost:3000/auth/me")
+  BR->>API: GET /auth/me + Origin: http://localhost:5173
+  API->>API: route runs, handler runs
+  API-->>BR: 200 + the real data
+  BR->>BR: no Access-Control-Allow-Origin?
+  BR--xJS: reply thrown away
+  Note over JS,API: The server never said no. curl gets the same reply, happily.
+</pre>
+<figcaption>Read the arrows top to bottom. Your code ran. Your data came back. The browser is the one that refused &mdash; on behalf of the user, not of you.</figcaption>
+</figure>
+
+<h2>Two words that look like one word</h2>
+<p>You now need two definitions that differ, and the difference is the whole lesson.</p>
+<div class="scroll">
+<table>
+<tr><th></th><th>Same-<strong>origin</strong></th><th>Same-<strong>site</strong></th></tr>
+<tr><th>Made of</th><td>scheme + host + <strong>port</strong></td><td>scheme + registrable domain</td></tr>
+<tr><th>Used by</th><td>CORS, the fetch rules</td><td><code>SameSite</code> cookies</td></tr>
+<tr><th><code>:5173</code> vs <code>:3000</code></th><td>different &mdash; CORS applies</td><td><strong>same</strong> &mdash; the cookie is sent</td></tr>
+<tr><th><code>app.co</code> vs <code>api.app.co</code></th><td>different</td><td>same</td></tr>
+<tr><th><code>evil.com</code> vs <code>app.co</code></th><td>different</td><td>different</td></tr>
+</table>
+</div>
+<p>So your <code>SameSite=Lax</code> cookie from <a href="../0006-a-door-that-stays-open.html">lesson 6</a> keeps working in local development, because a port is not a site. It is not doing nothing &mdash; it is still the thing stopping <code>evil.com</code> from riding your session. But it is not what is blocking your fetch. CORS is, and CORS counts the port.</p>
+
+<div class="quiz" data-answer="1">
+<p class="q">The browser blocked the reply. What did your Fastify server do?</p>
+<button>Refused the request before any of your route code could run at all</button>
+<button>Ran the handler and replied in full, exactly as it would for curl</button>
+<p class="why" hidden>Right, and this is the whole mental model. <code>curl localhost:3000/health</code> works today with no CORS setup, because curl is not a browser and has no other site to protect. Every CORS header is advice <em>to a browser</em>. A server-side attacker ignores all of it &mdash; which is why CORS is never your access control. <a href="../0007-one-place-that-says-no.html">Lesson 7</a> is your access control.</p>
+</div>
+
+<h2>The preflight</h2>
+<p>Simple reads go straight out and get judged on the way back. But anything that could change data &mdash; a <code>DELETE</code>, or a <code>POST</code> with <code>Content-Type: application/json</code> &mdash; gets asked about first. The browser sends an <code>OPTIONS</code> request of its own:</p>
+<pre><code>OPTIONS /teams/1/tasks
+Origin: http://localhost:5173
+Access-Control-Request-Method: POST
+Access-Control-Request-Headers: content-type</code></pre>
+<p>It is the browser asking <em>&ldquo;before I let this page delete something on you, do you know who it is?&rdquo;</em> Your reply lists the origins, methods and headers you accept. If your answer does not cover the real request, the real request is never sent. This is why a broken CORS setup often shows an <code>OPTIONS</code> in your server log and no <code>POST</code>.</p>
+
+<h2>The line that gives your sessions away</h2>
+<p>Here is the fix people paste. Show the bad version first, as usual:</p>
+<pre><code>await app.register(cors, { origin: true, credentials: true });</code></pre>
+<p><code>origin: true</code> does not mean &ldquo;allow everyone&rdquo;. The spec forbids the wildcard <code>*</code> together with credentials, so the plugin does the next thing: it <strong>reflects whatever <code>Origin</code> header arrived</strong>. Every origin is now on the allowlist, including one nobody has registered yet.</p>
+<p>Now add <code>credentials: true</code>, which tells the browser to send your session cookie on cross-origin calls. Put the two together and read it as an attacker would:</p>
+<ol>
+<li>A logged-in user opens <code>evil.example</code> in another tab.</li>
+<li>Its JavaScript calls <code>fetch("https://your.api/teams/1/tasks", { credentials: "include" })</code>.</li>
+<li>The cookie goes along. Your server answers 200 with the team's data.</li>
+<li>Your server echoes <code>Access-Control-Allow-Origin: https://evil.example</code>, because that is what reflection means.</li>
+<li>The browser sees its own origin in the header, so it hands the page the data. It is now on someone else's server.</li>
+</ol>
+<p><code>SameSite=Lax</code> saves you from most of this today &mdash; but the day you move the front end to a real domain and set <code>SameSite=None</code> for it, this becomes a full account-data leak with no other guard behind it. Write the allowlist now, while it costs nothing.</p>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why is <code>origin: "*"</code> the safer of the two bad options here?</p>
+<button>The browser itself refuses to send cookies to a wildcard origin ever</button>
+<button>The wildcard is checked against a list the Fastify plugin keeps for you</button>
+<p class="why" hidden>Right. The wildcard is a public API's answer: anyone may read this, and it is fine, because no credentials will ever ride along &mdash; the browser enforces that pairing. Reflection breaks the pairing while looking almost the same in the config file. That is what makes it the dangerous one: it is the version that <em>works</em> when you test it.</p>
+</div>
+
+
+<figure class="fig">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant U as Logged-in user
+  participant E as evil.example
+  participant API as Your API
+  U->>E: opens the tab
+  E->>API: fetch(..., credentials: "include")
+  Note over E,API: SameSite=Lax may block the cookie today. SameSite=None for a real domain does not.
+  API-->>E: 200 + the team's data
+  API-->>E: Access-Control-Allow-Origin: https://evil.example
+  Note over U,E: origin: true reflected it. The browser sees a match and hands the page the data.
+</pre>
+<figcaption><code>origin: true</code> is not &ldquo;allow everyone&rdquo; &mdash; it is &ldquo;allow whoever asked&rdquo;. Paired with <code>credentials: true</code> that is an account-data leak that <em>works perfectly</em> when you test it.</figcaption>
+</figure>
+
+<h2>What you wrote</h2>
+<p>In <code>src/app.ts</code>, above <code>buildApp()</code>:</p>
+<pre><code>const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? "http://localhost:5173")
+  .split(",")
+  .map((o) =&gt; o.trim())
+  .filter(Boolean);</code></pre>
+<p>And after the rate limiter:</p>
+<pre><code>await app.register(cors, {
+  origin: ALLOWED_ORIGINS,
+  credentials: true,
+  methods: ["GET", "POST", "PATCH", "DELETE"],
+});</code></pre>
+<p>An array of exact strings. Not a regular expression &mdash; a regex without anchors matched <code>localhost:5173.evil.example</code> in real, shipped code more than once, and there is a test below that proves your version does not. The environment variable is there so the deploy in week 11&ndash;12 changes one string, not one line of source.</p>
+<p>This is your <strong>second</strong> dependency, <code>@fastify/cors</code> (172 KB), and it earns its place by the rule you already own from <a href="../0012-the-floor-under-everything.html">lesson 12</a>: the CORS protocol is a fixed spec with preflights, <code>Vary</code> headers and cache rules, and exactly one decision left in it &mdash; <em>which origins</em>. You made that decision. The plugin does the typing.</p>
+
+<h2>Five tests, and what they are for</h2>
+<p><code>src/routes/cors.test.ts</code>, 75 tests total now. Same rule as last time: <em>test what you decided, not what you installed.</em></p>
+<ul>
+<li>An allowed origin comes back echoed, with <code>allow-credentials: true</code>.</li>
+<li>A stranger's origin gets <strong>200 and no allow header</strong>. Read that test twice. It is the shape of the whole lesson: the server does not say no, it just stays quiet, and the browser does the refusing.</li>
+<li><code>http://localhost:5173.evil.example</code> gets nothing. That is the anchoring bug, nailed down.</li>
+<li>The preflight for <code>POST /auth/login</code> is answered.</li>
+<li><code>PUT</code> is never offered, because it is not in your list.</li>
+</ul>
+
+<h2>What this does NOT fix</h2>
+<div class="scroll">
+<table>
+<tr><th>Worry</th><th>Does CORS help?</th><th>What actually handles it</th></tr>
+<tr><td>curl / a script / another server hitting your API</td><td>No. Not at all.</td><td><code>requireAuth</code> + <code>can()</code>, lessons 7&ndash;9</td></tr>
+<tr><td>CSRF &mdash; a hostile page making your browser POST</td><td>Partly, via preflight</td><td><code>SameSite</code> on the cookie, lesson 6</td></tr>
+<tr><td>XSS &mdash; hostile JS on <em>your own</em> page</td><td>No. It is same-origin.</td><td><code>HttpOnly</code>, and headers &mdash; lesson 14</td></tr>
+<tr><td>Flooding</td><td>No</td><td>Lessons 11 and 12</td></tr>
+</table>
+</div>
+
+<h2>Read this</h2>
+<p>Primary source: <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS">MDN &mdash; Cross-Origin Resource Sharing</a>. Read &ldquo;Preflight requests&rdquo; and &ldquo;Requests with credentials&rdquo;. It is the clearest writing on this anywhere, and it states the wildcard-plus-credentials rule outright.</p>
+<p>Then <a href="https://web.dev/articles/same-site-same-origin">web.dev &mdash; Understanding &ldquo;same-site&rdquo; and &ldquo;same-origin&rdquo;</a>. Short, with the diagrams for the table above.</p>
+<p>And the plugin: <a href="https://github.com/fastify/fastify-cors">@fastify/cors</a>. Read the <code>origin</code> option's four accepted shapes and decide, for yourself, why you took the array.</p>
+
+<h2>Do this before lesson 14</h2>
+<ol>
+<li>Run <code>cd server &amp;&amp; npm test</code>. 75 pass.</li>
+<li>Prove the server does not care. With the app running:
+<pre><code>curl -si -H 'Origin: https://evil.example' localhost:3000/health | head -8
+curl -si -H 'Origin: http://localhost:5173' localhost:3000/health | head -8</code></pre>
+Both are 200. Only one has an <code>access-control-allow-origin</code> header. That difference is the entire feature.</li>
+<li>See the preflight in your own log:
+<pre><code>curl -si -X OPTIONS localhost:3000/auth/login \
+  -H 'Origin: http://localhost:5173' \
+  -H 'Access-Control-Request-Method: POST' | head -12</code></pre></li>
+<li>Break it on purpose. Change <code>origin: ALLOWED_ORIGINS</code> to <code>origin: true</code> and run the tests. Two fail. Look at <em>which</em> two &mdash; they are the reflection attack, written down as an assertion. Put it back.</li>
+<li>Finally close the body-size hole from lesson 12. One option on <code>Fastify({ ... })</code>. Tell me the number you picked and why.</li>
+</ol>
+<p>Then two questions to bring me:</p>
+<ol>
+<li>You still owe me the Redis answer from lessons 11 and 12 &mdash; that debt is now three lessons old, so bring it next time even if the answer is short. The new one: your front end is served by nginx at <code>https://app.example</code> and the API is at <code>https://api.app.example</code>. Those are same-<em>site</em> but not same-<em>origin</em>. Which of your two settings &mdash; the CORS allowlist, or <code>SameSite=Lax</code> &mdash; has to change, and which one does not? There is a third option that removes the question entirely, and it is what most teams ship. Find it.</li>
+<li>Opinion, for the community: ask <a href="https://www.reddit.com/r/node/">r/node</a> or the <a href="https://discord.gg/fastify">Fastify Discord</a> whether people put their API on a subdomain or behind a path on the same origin, and what it cost them. This is a real fork in your week 9&ndash;12 road and the answers will be strong.</li>
+</ol>
+
+<div class="aside">
+<p>Stuck, or something felt hand-wavy? Ask me. I am your teacher here &mdash; say what confused you and I will re-teach it another way. The sentence worth being able to say out loud: <em>CORS does not protect my server, it protects other people's users from my server's replies.</em> If that sounds backwards, ask me and we will go again.</p>
+</div>
+
+<hr>
+<p class="nav">Back: <a href="../0012-the-floor-under-everything.html">Lesson 12 &mdash; The floor under everything</a> &middot; Keep for reference: <a href="../../reference/api-security-basics.html">API security basics</a> &middot; <a href="../../reference/sessions-and-cookies.html">Sessions &amp; cookies</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a> &middot; Sources: <a href="../../RESOURCES.md">RESOURCES.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

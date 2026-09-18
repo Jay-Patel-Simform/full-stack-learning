@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 18 &mdash; The Route Nobody Audited</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 18 &middot; Week 7&ndash;8 &middot; API security &mdash; eighth one</p>
+<h1>The route nobody audited</h1>
+<p class="lede">Six lessons have hardened <code>POST /auth/login</code>. One message for two failures, a per-account backoff, a CSRF check, strict bodies. <code>POST /auth/register</code> sits four lines above it in the same file and got <strong>none</strong> of it. Today you audit one route against rules you already wrote &mdash; and you find two real bugs, one of which I only found by measuring.</p>
+
+<h2>Your homework, marked</h2>
+<div class="scroll">
+<table>
+<tr><th>The question</th><th>You said</th><th>Mark</th></tr>
+<tr><td>Name the file and line that refuses <code>{"userId":4,"role":"OWNER"}</code> from an <code>ADMIN</code>, and why it could never be a schema&rsquo;s job.</td><td>&mdash;</td><td>Not said.</td></tr>
+</table>
+</div>
+<p><strong>The answer:</strong> <code>server/src/auth/can.ts</code>, line 62 &mdash; <code>if (target !== undefined &amp;&amp; rank(role) &lt;= rank(target)) return false;</code>. It could never be a schema&rsquo;s job because a schema sees <em>one</em> noun: the body. This rule needs <strong>two</strong>: the role of the caller and the role in the payload. <code>"OWNER"</code> is a perfectly valid <code>Role</code>. Whether <em>this</em> caller may write it is a comparison between two values, and a schema only ever holds one of them.</p>
+<div class="aside">
+<p><strong>The one-question experiment failed, so I am dropping questions.</strong> Lesson 16 had two, lesson 17 had exactly one, and both came back blank. Length was not the problem. What <em>did</em> get done was lesson 11&rsquo;s and 12&rsquo;s &ldquo;break it on purpose and read the number&rdquo;. So from here, homework is a <strong>command with an expected output</strong>, not a question with an expected answer. You run it, the terminal marks it, and I only get involved when your number disagrees with mine.</p>
+</div>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>User enumeration</strong>: any reply that tells a stranger whether an email has an account here.</li>
+<li>Three channels can leak it: the <strong>status code</strong>, the <strong>message</strong>, and the <strong>clock</strong>. Your login is clean on all three &mdash; measured, 237 ms vs 236 ms.</li>
+<li>Your <code>register</code> leaks it perfectly: <code>409</code> means taken, <code>201</code> means free. A public signup form <em>cannot</em> hide this.</li>
+<li>So it does not hide it &mdash; it charges for it. Five free probes, then the same backoff login has had since lesson 11.</li>
+<li>Found while measuring: <code>Jay@x.com</code> and <code>jay@x.com</code> were <strong>two accounts</strong>. Register in one case, log in in the other, and you get a permanent <code>401</code>.</li>
+<li>Fixed at the door: <code>z.string().trim().toLowerCase()</code> in <code>auth.schema.ts</code>, plus a hand-written migration for the rows already saved.</li>
+<li><strong>No new dependency.</strong> Three lessons running.</li>
+<li><code>npm test</code> = <strong>109</strong>, was 101. Eight new, in <code>src/routes/enumeration.test.ts</code>.</li>
+</ul>
+</div>
+
+<h2>Audit it against your own rules</h2>
+<p>You have written six security rules into this codebase. Here is <code>register</code>, before today, marked against every one of them. This is the whole lesson in one table.</p>
+<div class="scroll">
+<table>
+<tr><th>Your rule</th><th>From</th><th>Does <code>register</code> obey it?</th></tr>
+<tr><td>One reply for two different noes</td><td>Lesson 6</td><td><strong>No.</strong> <code>409 "email already registered"</code> is a straight yes/no about a stranger&rsquo;s account.</td></tr>
+<tr><td>Rate-limit the thing the attacker has only one of</td><td>Lesson 11</td><td><strong>No.</strong> Nothing counted register attempts at all. Unlimited probes.</td></tr>
+<tr><td>The cheap check goes in front of the expensive work</td><td>Lesson 12</td><td><strong>No.</strong> Every request paid a 250 ms scrypt hash before finding out the email was taken.</td></tr>
+<tr><td>Writes are guarded by <code>Sec-Fetch-Site</code></td><td>Lesson 16</td><td><strong>Yes</strong> &mdash; and it cost nothing. The hook is app-level, so it covered this route the day you wrote it.</td></tr>
+<tr><td>Bodies reject a key you did not name</td><td>Lesson 17</td><td><strong>Yes</strong> &mdash; same reason. One place, every body.</td></tr>
+<tr><td>One address is one account</td><td>&mdash; nobody wrote this one</td><td><strong>No.</strong> And the bug is bigger than security. See below.</td></tr>
+</table>
+</div>
+<p>Read the <em>Yes</em> rows again. Both of them are yeses because the rule lives in <strong>one app-level hook</strong> instead of in each handler. That is the fifth or sixth time this workspace has cashed in &ldquo;a rule with no exceptions does not belong in each caller&rdquo; &mdash; but this is the first time you can see the payoff on a route you were not thinking about when you wrote the rule. <strong>The two rules I put in handlers are the two that got skipped.</strong></p>
+
+<h2>The three channels</h2>
+<p>&ldquo;Can a stranger learn whether <code>jay@work.com</code> has an account?&rdquo; is one question with three separate answers, because a reply carries three separate signals.</p>
+<figure class="fig">
+<pre class="mermaid">flowchart TB
+  A["POST /auth/register<br/>{email}"] --> B{"email in User?"}
+  B -- yes --> C["409<br/>'email already registered'<br/>250 ms"]
+  B -- no --> D["201<br/>{id, email}<br/>242 ms"]
+  C --> E["Same clock.<br/>Different code.<br/>Oracle."]
+  D --> E</pre>
+<figcaption>Measured on your machine. The timing defence you built in lesson 5 works perfectly here &mdash; and is useless, because the status code answers the question outright.</figcaption>
+</figure>
+<p><a href="https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/03-Identity_Management_Testing/04-Testing_for_Account_Enumeration_and_Guessable_User_Account">OWASP&rsquo;s testing guide calls this <strong>WSTG-IDNT-04, Testing for Account Enumeration</strong></a>, and lists exactly these channels: <em>&ldquo;different error message&hellip; different HTTP status code&hellip; different response time&rdquo;</em>. Your login closes all three, and it is worth seeing <em>which line</em> closes each:</p>
+<div class="scroll">
+<table>
+<tr><th>Channel</th><th>What closes it on <code>login</code></th><th>Measured</th></tr>
+<tr><td>Message</td><td>One string, <code>"invalid email or password"</code>, for both no-such-user and wrong-password</td><td>Byte-identical bodies</td></tr>
+<tr><td>Status code</td><td><code>401</code> either way &mdash; and the throttle is keyed on the <em>typed</em> email, so an unknown address flips to <code>429</code> on the sixth try just like a real one</td><td>Lesson 11&rsquo;s test asserts this</td></tr>
+<tr><td>Clock</td><td><code>DUMMY_HASH</code> in <code>auth/password.ts</code>. With no user row you still run scrypt, against a hash of nothing</td><td><strong>237 ms vs 236 ms</strong></td></tr>
+</table>
+</div>
+<p>That third one is the interesting defence, so look at it properly:</p>
+<pre><code>const user = await findUserByEmail(email);
+
+// ! Always hash, even with no user, so both paths take the same time.
+const ok = await verifyPassword(password, user?.passwordHash ?? DUMMY_HASH);</code></pre>
+<p>The obvious code is <code>if (!user) return reply.code(401)...</code>. It is one line shorter, it is what most tutorials write, and it answers in <strong>2 ms instead of 237</strong>. That 235 ms gap is a machine-readable answer to &ldquo;does this account exist?&rdquo;, repeatable from any network, with no login attempt ever succeeding. You avoided it in lesson 5. Nothing else you have written is defended against a clock.</p>
+<div class="quiz" data-answer="1">
+<p class="q">Your <code>register</code> spends 250 ms hashing a password before it discovers the email is taken. Fixing the wasted work would mean checking the email first. What does that change?</p>
+<button>Nothing security-wise. It is a pure speed win, so do it.</button>
+<button>It opens a timing oracle: taken emails would answer fast, free ones slow.</button>
+<p class="why" hidden><strong>It opens a timing oracle.</strong> Check-then-hash means a taken email returns in about 2 ms and a free one in 250 ms &mdash; so even if you deleted the <code>409</code> and answered <code>201</code> to everybody, the clock would give the answer back. The wasted hash is <em>load-bearing</em>. This is the exact inverse of lesson 12&rsquo;s &ldquo;the cheap check goes in front of the expensive work&rdquo;: there the cheap check leaked <em>less</em> than the expensive one, so putting it first was free. Here it leaks <em>more</em>. Same shape, opposite answer &mdash; which is why the rule was never &ldquo;always reorder&rdquo;.</p>
+</div>
+
+<h2>The decision: what should register answer?</h2>
+<p>You cannot close the status-code channel and keep an instant signup form. Those are the same fact stated twice. So there are two honest designs, and only two.</p>
+<div class="scroll">
+<table>
+<tr><th></th><th>A &mdash; Answer the same thing always</th><th>B &mdash; Keep the <code>409</code>, make it cost</th></tr>
+<tr><td>The reply</td><td><code>202 "check your email"</code> whether the address was free or taken</td><td><code>201</code> or <code>409</code>, as today</td></tr>
+<tr><td>Leak</td><td>None. The two cases are indistinguishable.</td><td>Full. One request, one bit of truth.</td></tr>
+<tr><td>Needs</td><td>An email sender, a token table, and an account that is not usable until the link is clicked</td><td>Nine lines. Everything already exists.</td></tr>
+<tr><td>Costs you</td><td>Every signup now depends on mail delivery. A stranger can also spam a real person&rsquo;s inbox by &ldquo;registering&rdquo; them.</td><td>An attacker with 10&nbsp;000 emails and patience still gets a list.</td></tr>
+</table>
+</div>
+<p><strong>Take B today, and A in week 13&ndash;14</strong> when the invite emails land (BullMQ is already in the plan for that week). Two reasons. Design A is not optional there anyway &mdash; the moment you email invites, unverified accounts have to exist. And doing A now would mean building a mail pipeline in an auth lesson, which buries the actual idea under infrastructure.</p>
+<p>Be clear-eyed about what B buys, because it is less than it looks. It does not stop enumeration; it makes it <strong>slow and loud</strong>. Five probes per email are free forever. What dies is the <em>bulk</em> attack: checking a leaked list of 100&nbsp;000 addresses against your signup form. And &mdash; this is the part that matters more &mdash; the <code>429</code>s land in your logs, so the attempt becomes something you can see. <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html#authentication-and-error-messages">OWASP is equally blunt about it</a>: registration and forgot-password flows are where enumeration usually survives, even in apps whose login is careful.</p>
+
+<h2>Found while measuring: two rows, one person</h2>
+<p>I wrote a script to time the four replies for the table above. It registered <code>Mixed1788@e.com</code>, then logged in with <code>mixed1788@e.com</code>. Here is what came back:</p>
+<pre><code>register Mixed       { ms: 231, code: 201, body: '{"id":720,"email":"Mixed1788@e.com"}' }
+login lowercased     { ms: 250, code: 401, body: '{"error":"invalid email or password"}' }
+login exact case     { ms: 238, code: 200, body: '{"id":720,"email":"Mixed1788@e.com"}' }
+register dup lower   { ms: 233, code: 201, body: '{"id":721,"email":"mixed1788@e.com"}' }</code></pre>
+<p>Read the last line twice. <strong>Id 720 and id 721 are the same human being.</strong> And a user who signs up with a capital letter &mdash; which iOS does for you, in the keyboard, by default &mdash; gets a <code>401</code> forever if they later type their address in lower case. They will report that as &ldquo;your site lost my password&rdquo;.</p>
+<p>Now the part I want you to be annoyed by. This test has been passing since lesson 11:</p>
+<pre><code>test("case does not open a side door", async () => {
+  const upper = `UPPER-${stamp}@example.com`;
+  for (let i = 0; i &lt; 6; i++) await login({ email: upper.toLowerCase(), password: "wrong" });
+  assert.equal((await login({ email: upper, password: "wrong" })).statusCode, 429);
+});</code></pre>
+<p>It passed because the <em>throttle key</em> was lower-cased in the handler: <code>const key = email.toLowerCase()</code>. The <em>database lookup</em> two lines below it used the raw string. One normalised, one not, and a green test standing on top saying case is handled. <strong>Half a normalisation is worse than none</strong> &mdash; with none, you find the bug the first time you type a capital letter; with half, a passing test tells you not to look.</p>
+<p>The fix is not another <code>.toLowerCase()</code> next to the query. Count the places a raw address can enter: login, register, and every route you write after this one. The address has exactly one door, and lesson 2 built it &mdash; the zod schema:</p>
+<pre><code>// ! Normalise BEFORE the format check, or a pasted "  Jay@x.com " is a 400.
+// ! Order matters: each step in a zod chain sees the output of the one to its
+// ! left, so .trim() after .email() trims a string that already passed.
+const emailField = z.string().trim().toLowerCase();
+
+export const Register = z.object({
+  email: emailField.pipe(z.email().max(254)),
+  password: z.string().min(8).max(256),
+});</code></pre>
+<p>The comment is a real trap I walked into while writing this. <code>z.email().trim().toLowerCase()</code> <em>type-checks and looks right</em>, and it rejects <code>"  Jay@x.com "</code> with a 400 &mdash; because <a href="https://zod.dev/api">zod runs the chain left to right</a>, so <code>.email()</code> judged the string before <code>.trim()</code> ever touched it. Transforms are not preprocessing. To clean a value <em>then</em> validate it, the validation goes on the right, behind <code>.pipe()</code>.</p>
+<p>With the door fixed, the handler gets simpler, and it says why it is allowed to be:</p>
+<pre><code>// ? Already trimmed and lower-cased -- by Login in schemas/auth.schema.ts,
+// ? which is the only way a body reaches this handler.
+const key = email;</code></pre>
+<p>That is the third use of the rule from lesson 17: <strong>a promise kept in another file is written down, with the file named.</strong> Otherwise the next person deletes the normalisation and this line is silently wrong.</p>
+
+<h2>The rows already in your database</h2>
+<p>Code fixes the future. <code>Jay@x.com</code> is still sitting in Postgres, and it is now unreachable &mdash; the door lower-cases the login attempt, and no row matches. This is lesson 10&rsquo;s hand-written migration again, and it is data-only:</p>
+<pre><code>-- prisma/migrations/20260907062418_lowercase_emails/migration.sql
+
+-- Two rows that differ only in case are two accounts for one person. Only a
+-- human can say which one is real, so refuse to guess: the UPDATE below hits
+-- the @unique on email and this whole migration rolls back.
+-- Find them first with:
+--   SELECT lower(email), count(*) FROM "User" GROUP BY 1 HAVING count(*) &gt; 1;
+UPDATE "User" SET email = lower(email) WHERE email &lt;&gt; lower(email);</code></pre>
+<p><strong>Letting it fail is the design, not laziness.</strong> A migration that resolved duplicates for you &mdash; keeping the oldest, say &mdash; would silently delete a person&rsquo;s account and their tasks along with it. A migration that stops and shows you the collision costs you a query and a decision, once. Your database had one duplicate pair when I ran it, both created by my own timing script, so I deleted those four rows before applying it. Yours is clean; a real one might not be.</p>
+
+<h2>The tests</h2>
+<p>Eight new, all enforcement, in <code>src/routes/enumeration.test.ts</code>. Every one asks the same question: <em>can the caller tell whether the account exists?</em> Two of them are worth pointing at.</p>
+<pre><code>test("a real email and a made-up one get the same 401 and the same words", async () => {
+  const real = await login(known);
+  const ghost = await login(`ghost-${stamp}@example.com`);
+  assert.equal(real.statusCode, ghost.statusCode);
+  assert.equal(real.body, ghost.body);     // &lt;-- byte-for-byte, not "similar"
+});</code></pre>
+<p>And the timing one, which is written the awkward way <strong>on purpose</strong>:</p>
+<pre><code>assert.ok(real &gt; 100, `a login should cost a hash, took ${Math.round(real)}ms`);
+assert.ok(ghost &gt; 100, `a missing user must cost one too, took ${Math.round(ghost)}ms`);</code></pre>
+<p>The tempting assertion is <code>Math.abs(real - ghost) &lt; 50</code>. Do not write it. Your laptop under load will make two identical code paths differ by 200 ms and fail the build for no reason &mdash; and a flaky security test gets deleted within a month, which leaves you with no test at all. What it <em>cannot</em> do is make scrypt free. So assert the thing that only breaks when the code breaks: <strong>both paths paid for a hash.</strong> A test is only worth writing if the only way to fail it is the bug.</p>
+
+<h2>What this does not fix</h2>
+<div class="scroll">
+<table>
+<tr><th>Still open</th><th>Why</th><th>When</th></tr>
+<tr><td>Enumeration itself</td><td>Five free probes per address, forever. B slows the bulk attack; only design A closes the channel.</td><td>Week 13&ndash;14, with the invite mailer</td></tr>
+<tr><td>The counter is still a <code>Map</code></td><td>Restart it and every probe budget resets. Two processes behind nginx = ten free tries.</td><td>Week 11&ndash;12, Redis. Fourth lesson on this list.</td></tr>
+<tr><td>Registration spam</td><td>Nothing stops 10&nbsp;000 <em>fresh</em> addresses from making 10&nbsp;000 real accounts. The per-email key cannot see that; only the global per-IP limit from lesson 12 touches it, at 100/min.</td><td>Needs email verification &mdash; the same week as A</td></tr>
+<tr><td>Unicode look-alikes</td><td><code>jаy@x.com</code> with a Cyrillic <code>а</code> lower-cases to itself and is a different row. Real phishing technique, and <code>toLowerCase()</code> is not a normaliser.</td><td>Deliberately out of scope. Note it and move on.</td></tr>
+<tr><td>Forgot-password</td><td>Does not exist yet. When you write it, it is the third enumeration surface, and it will want design A from day one.</td><td>Write the reply before the route</td></tr>
+</table>
+</div>
+<div class="quiz" data-answer="0">
+<p class="q">You add <code>POST /teams/:teamId/members</code> next week. It answers <code>404</code> when the user id does not exist. Which rule from today applies?</p>
+<button>A reply about somebody else&rsquo;s existence is an oracle, whatever it is about.</button>
+<button>None. Enumeration is about email addresses at the front door.</button>
+<p class="why" hidden><strong>It is the same bug with a different noun.</strong> A <code>404</code> for &ldquo;no such user&rdquo; and a <code>409</code> for &ldquo;already a member&rdquo; let any team admin map your entire user table by id. The question is never &ldquo;is this about email?&rdquo; &mdash; it is <em>&ldquo;does this reply describe a thing the caller was not already allowed to see?&rdquo;</em> That is why lesson 9&rsquo;s gate loads the target and answers <code>403</code> for both the wrong role and a total stranger. Same reply, two different noes, one more time.</p>
+</div>
+
+<h2>Read this</h2>
+<p><strong>Primary source:</strong> <a href="https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/03-Identity_Management_Testing/04-Testing_for_Account_Enumeration_and_Guessable_User_Account">OWASP WSTG-IDNT-04 &mdash; Testing for Account Enumeration</a>. Ten minutes. It is written as an <em>attacker&rsquo;s</em> checklist, which is the useful part: it tells you the four places to poke, and register and forgot-password are two of them. Read it with your own <code>auth.route.ts</code> open beside it.</p>
+
+<h2>Do this</h2>
+<p>No questions this time. Three commands, and the terminal marks your work.</p>
+<p><strong>1. Apply it and confirm the number.</strong></p>
+<pre><code>cd ~/learning/full-stack-learning/server
+npx prisma migrate dev     # applies 20260907062418_lowercase_emails
+npm test</code></pre>
+<pre><code># tests 109
+# pass 109
+# fail 0</code></pre>
+<p><strong>2. Break the normalisation and read <em>which</em> tests fail.</strong> In <code>src/schemas/auth.schema.ts</code>, cut <code>.toLowerCase()</code> out of <code>emailField</code>, then <code>npm test</code>. I ran it, so here is the exact output to match:</p>
+<pre><code>not ok 41 - case does not open a side door
+not ok 56 - the case you typed does not make a second account
+not ok 57 - register in one case, log in in another
+not ok 58 - a pasted address with spaces around it is the same address
+# tests 109
+# pass 105
+# fail 4</code></pre>
+<p>Test <strong>41</strong> is the one to notice. That is lesson 11&rsquo;s throttle test, written six weeks before this schema existed, and it now fails because of a line in a different file. You just moved a guarantee from a handler into a schema and an old test proved the move was real. Put the line back.</p>
+<p><strong>3. Enumerate your own signup, by hand.</strong> With <code>npm run dev</code> running:</p>
+<pre><code>for i in 1 2 3 4 5 6; do
+  curl -s -o /dev/null -w "%{http_code} " -X POST localhost:3000/auth/register \
+    -H 'content-type: application/json' \
+    -H 'sec-fetch-site: same-origin' \
+    -d '{"email":"YOUR_REGISTERED_EMAIL","password":"whatever-8-chars"}'
+done; echo</code></pre>
+<pre><code>409 409 409 409 409 429</code></pre>
+<p>Six requests, five bits of information, then a wall. Now change the email to one nobody has registered and run it again. The first reply is <code>201</code>, and the difference between those two first replies is the leak this lesson could not close. Seeing it is the point.</p>
+
+<div class="takeaway">
+<p><strong>The one sentence.</strong> A rule I put in one hook protected a route I was not thinking about; a rule I put in a handler protected only that handler &mdash; and my newest route inherited every rule of the first kind and none of the second.</p>
+</div>
+
+<div class="aside">
+<p><strong>One for the community</strong>, because it is a judgement call and I have seen senior people land on both sides. Ask <a href="https://security.stackexchange.com/">Security StackExchange</a> or <a href="https://www.reddit.com/r/node/">r/node</a>: <em>&ldquo;For a small B2B API, is hiding account existence at signup worth the cost of an email-verification round trip &mdash; given that the login form is already careful and the customer list is basically public?&rdquo;</em> Design A is the textbook answer. Whether it is the right answer for a tool with forty corporate users is exactly the kind of thing a cheat sheet cannot tell you, and a practitioner can.</p>
+<p>Something unclear? Ask me &mdash; I am your teacher here, and I will re-teach it another way. The pair of words to keep: <strong>hide it or charge for it.</strong> Those are the only two moves against an oracle, and knowing which one you picked is more useful than either.</p>
+</div>
+
+<hr>
+<p class="nav">Back: <a href="../0017-the-key-you-did-not-name.html">Lesson 17 &mdash; The key you did not name</a> &middot; Keep for reference: <a href="../../reference/api-security-basics.html#enumeration">Enumeration channels</a> &middot; <a href="../../reference/api-security-basics.html">API security basics</a> &middot; The code: <a href="../../server/src/schemas/auth.schema.ts">auth.schema.ts</a>, <a href="../../server/src/routes/auth.route.ts">auth.route.ts</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

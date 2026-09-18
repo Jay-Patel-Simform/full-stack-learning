@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 10 — Team-scoped routes</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 10 &middot; Week 5&ndash;6 &middot; RBAC</p>
+<h1>Team-scoped routes</h1>
+<p class="lede">Four permissions have no route behind them, and the reason is one missing piece of the URL.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><code>PATCH /tasks/5</code> has no team in it, so the gate has no role to look up.</li>
+<li>Put the scope in the URL: <code>PATCH /teams/7/tasks/5</code>.</li>
+<li>Adding a required column to a table with rows needs three steps: <strong>expand, backfill, contract</strong>.</li>
+<li><code>where: { ownerId }</code> was a hidden permission. <code>where: { teamId }</code> is a fence. Different jobs.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  subgraph before["PATCH /tasks/5"]
+    B1["gate: getRole(?, user)"] --> B2["no teamId<br/>nothing to look up"]
+  end
+  subgraph after["PATCH /teams/7/tasks/5"]
+    A1["gate: getRole(7, user)"] --> A2["MEMBER"] --> A3["can(MEMBER, task:update)"] --> A4["yes"]
+  end
+</pre>
+<figcaption>A permission needs a scope. If the scope is not in the request, the gate cannot ask its question &mdash; so the scope goes in the URL.</figcaption>
+</figure>
+
+<h2>The idea</h2>
+<p>The gate's first move is <code>getRole(teamId, userId)</code>. If the request never said which team, there is no role, so there is no decision. That is why those four permissions were unreachable.</p>
+<p>Fixing it means <code>Task</code> needs a <code>teamId</code>. And Postgres will refuse to add a required column to a table that already has rows &mdash; correctly, because it has no value to put there.</p>
+
+<h3>Expand, backfill, contract</h3>
+<pre><code>-- 1. expand: add it, nullable. Nothing breaks.
+ALTER TABLE "Task" ADD COLUMN "teamId" INTEGER;
+
+-- 2. backfill: give the old rows a real value.
+UPDATE "Task" SET "teamId" = 1 WHERE "teamId" IS NULL;
+
+-- 3. contract: NOW put the wall up.
+ALTER TABLE "Task" ALTER COLUMN "teamId" SET NOT NULL;
+ALTER TABLE "Task" ADD CONSTRAINT ... FOREIGN KEY ("teamId") ...;</code></pre>
+
+<p>Three steps, no lost rows, no downtime. This is the answer to "how do I add a column to a live table" for the rest of your career.</p>
+
+<h2>Two <code>where</code> clauses that look identical</h2>
+<table>
+<tr><th></th><th>where: { ownerId }</th><th>where: { teamId }</th></tr>
+<tr><td>Job</td><td>deciding who may</td><td>choosing which rows</td></tr>
+<tr><td>Name</td><td>permission</td><td>scoping</td></tr>
+<tr><td>Lives in</td><td>the gate, now</td><td>the store query</td></tr>
+<tr><td>If you forget it</td><td>silent security hole</td><td>wrong list on screen</td></tr>
+</table>
+
+<p><code>where: { id, ownerId }</code> is now <em>out</em> of <code>task.store.ts</code>. The gate decides. The query only scopes.</p>
+
+<p class="takeaway">A permission needs a scope, so the scope goes in the URL.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="0">
+<p class="q">Why add the column as nullable first?</p>
+<button>Existing rows have no value to store</button>
+<button>Prisma cannot create constraints directly</button>
+<p class="why" hidden><code>NOT NULL</code> is a promise about every row, including the ones already there. You have to give them a value before you can make the promise.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><code>npm test</code> &mdash; 50 tests.</li>
+<li>Read <code>prisma/migrations/*_task_team/migration.sql</code>. You wrote it by hand with <code>--create-only</code>.</li>
+<li>Ask for a task from a team you are not in. You want 403, not an empty list.</li>
+</ol>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://www.prisma.io/docs/orm/prisma-migrate/workflows/customizing-migrations">Prisma, customizing migrations</a>.</p>
+<p><b>The long version:</b> <a href="./long/0010-a-task-belongs-to-a-team.html">the whole migration, line by line</a>.</p>
+<p>The permission vs scoping table is the bit to re-read if this lesson feels shaky. Ask me to drill you on it.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0009-the-third-argument.html">&larr; Back</a>
+<a href="./0011-five-tries-then-wait.html">Next: five tries, then wait &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

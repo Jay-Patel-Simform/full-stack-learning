@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 6 — Sessions and cookies</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 06 &middot; Week 3&ndash;4 &middot; Auth</p>
+<h1>Sessions and cookies</h1>
+<p class="lede">Lesson 5 checked a password <em>once</em>. Today the API remembers who you are on every request after that.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>HTTP forgets. Every request arrives as a stranger.</li>
+<li>Give the browser a random <strong>session id</strong> in a cookie. The browser re-sends it for free.</li>
+<li>Store only <code>sha256(id)</code>. Steal the table, get nothing usable.</li>
+<li>Delete the row and the person is logged out <em>now</em>. A plain JWT cannot do that.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+sequenceDiagram
+  participant B as Browser
+  participant A as API
+  participant D as Postgres
+  B->>A: POST /auth/login (email, password)
+  A->>D: verify hash, INSERT Session(sha256(id))
+  A-->>B: Set-Cookie: sid=RANDOM32; HttpOnly; Secure; SameSite=Lax
+  Note over B: browser stores it, re-sends it automatically
+  B->>A: GET /tasks (cookie rides along)
+  A->>D: SELECT Session WHERE hash = sha256(cookie)
+  D-->>A: userId 1, not expired
+  A-->>B: your tasks
+</pre>
+<figcaption>The cookie is a coat-check ticket. The ticket is random and means nothing on its own &mdash; the value is the row in your table, which you can delete at any moment.</figcaption>
+</figure>
+
+<h2>The idea</h2>
+<p>HTTP has no memory. Request two knows nothing about request one. So after a successful login you have to hand the browser something it will show you again next time.</p>
+<p>Two choices exist. A <strong>session</strong>: a random id, with the real facts in your database. Or a <strong>JWT</strong>: the facts themselves, signed, held by the client.</p>
+
+<div class="vs">
+<div class="yes">
+<h4>Session &mdash; chosen</h4>
+<pre><code>cookie: sid=Xk9...   (random)
+DB row: { hash, userId, expiresAt }
+
+logout  -> DELETE the row
+         -> dead immediately</code></pre>
+</div>
+<div class="no">
+<h4>Plain JWT</h4>
+<pre><code>cookie: eyJhbGci...  (the facts)
+DB row: none
+
+logout  -> ask nicely
+         -> valid until it expires</code></pre>
+</div>
+</div>
+
+<p>We picked sessions because <strong>revocation</strong> is the whole point. "Log this person out now" has to be a real button.</p>
+
+<div class="word"><b>HttpOnly</b> &mdash; JavaScript cannot read the cookie. Stops a script on your page stealing the session.</div>
+<div class="word"><b>Secure</b> &mdash; HTTPS only, never plain HTTP.</div>
+<div class="word"><b>SameSite=Lax</b> &mdash; the browser will not attach it to a cross-site <code>POST</code>. Comes back in lesson 16.</div>
+
+<h2>The code</h2>
+<pre><code>// src/auth/session.ts
+const id = randomBytes(32).toString("base64url");   // give this to the browser
+const hash = createHash("sha256").update(id).digest("hex"); // store this
+await prisma.session.create({ data: { hash, userId, expiresAt } });
+
+// src/auth/require-auth.ts — one hook, every task route
+export async function requireAuth(request, reply) {
+  const user = await sessionUser(request.cookies.sid);
+  if (!user) return reply.code(401).send({ error: "not logged in" });
+  request.user = user;
+}</code></pre>
+
+<p class="takeaway">Hand out a ticket, keep the facts. Then logging someone out is one <code>DELETE</code>.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="0">
+<p class="q">Why store <code>sha256(id)</code> instead of the id itself?</p>
+<button>A stolen table gives no usable tickets</button>
+<button>A shorter value indexes faster in Postgres</button>
+<p class="why" hidden>Same reasoning as the password hash. If someone reads your <code>Session</code> table they get hashes, and a hash cannot be sent as a cookie.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li>Log in with <code>curl -c jar.txt</code>. Then <code>curl -b jar.txt localhost:3000/tasks</code>.</li>
+<li>Delete the session row in <code>psql</code>. Retry. You want a 401.</li>
+<li>Send a made-up cookie value. Also a 401, and no crash.</li>
+</ol>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html">OWASP Session Management Cheat Sheet</a>.</p>
+<p><b>Reference card:</b> <a href="../reference/sessions-and-cookies.html">Sessions and cookies cheat sheet</a>.</p>
+<p><b>The long version:</b> <a href="./long/0006-a-door-that-stays-open.html">all four cookie flags in detail</a>.</p>
+<p>The session-vs-JWT argument is worth arguing with me about. Try it.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0005-passwords-you-cannot-read-back.html">&larr; Back</a>
+<a href="./0007-one-place-that-says-no.html">Next: one place that says no &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

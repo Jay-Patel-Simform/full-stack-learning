@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference — Roles &amp; Permissions</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<p class="kicker">Reference &middot; RBAC</p>
+<h1>Roles &amp; permissions</h1>
+<p class="lede">The permission table for the Team Task Tracker, and the rules around it. Print this and keep it next to the code.</p>
+
+<h2>The two words</h2>
+<div class="scroll">
+<table>
+<tr><th>Word</th><th>Question</th><th>Fails with</th><th>Where it lives</th></tr>
+<tr><td>Authentication</td><td>Who are you?</td><td><code>401</code></td><td><code>src/auth/require-auth.ts</code></td></tr>
+<tr><td>Authorization</td><td>May you do this?</td><td><code>403</code></td><td><code>src/auth/can.ts</code></td></tr>
+</table>
+</div>
+<p><strong>401</strong> = come back with a name. <strong>404</strong> = you may not know this row exists (use it instead of 403 when the id itself is a secret). <strong>403</strong> = I know exactly who you are, and no.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  R["Request<br/>DELETE /teams/7/members/3"] --> A1["onRequest<br/>requireAuth"]
+  A1 -- "no session" --> E401["401"]
+  A1 --> V["validation<br/>params become numbers"]
+  V --> A2["preHandler<br/>requirePermission(action, load?)"]
+  A2 --> GR["getRole(7, me)"]
+  A2 --> LD["load(request)<br/>-> targetRole"]
+  GR --> CAN["can(role, action, resource)"]
+  LD --> CAN
+  CAN -- "false" --> E403["403"]
+  CAN -- "true" --> H["handler"]
+  H --> SC["store: where { id, teamId }"]
+  SC -- "0 rows" --> E404["404"]
+  SC --> OK["200"]
+</pre>
+<figcaption>The whole pipeline on one line. Three refusals, three codes: 401 is about the cookie, 403 about the person, 404 about the row.</figcaption>
+</figure>
+
+<h2>Roles are data. Permissions are code.</h2>
+<ul>
+<li>A <strong>role</strong> is a row: this person, this team, this role. It changes at runtime.</li>
+<li>A <strong>permission</strong> is a line in <code>can.ts</code>. It changes only when you deploy.</li>
+<li>So nobody grants themselves a new power by editing a row &mdash; the powers are not in rows.</li>
+<li>Move the map into the database only when <em>users</em> must build their own roles. <a href="https://www.osohq.com/academy/what-is-rbac">Oso</a>: "the map from a role to a list of permissions needs to be dynamic" &mdash; at that point, not before.</li>
+</ul>
+
+<h2>The table</h2>
+<div class="scroll">
+<table>
+<tr><th>Action</th><th>Viewer</th><th>Member</th><th>Admin</th><th>Owner</th></tr>
+<tr><td><code>task:read</code></td><td>yes</td><td>yes</td><td>yes</td><td>yes</td></tr>
+<tr><td><code>task:create</code></td><td>&mdash;</td><td>yes</td><td>yes</td><td>yes</td></tr>
+<tr><td><code>task:update</code></td><td>&mdash;</td><td>yes</td><td>yes</td><td>yes</td></tr>
+<tr><td><code>task:delete</code></td><td>&mdash;</td><td>yes</td><td>yes</td><td>yes</td></tr>
+<tr><td><code>project:create</code></td><td>&mdash;</td><td>yes</td><td>yes</td><td>yes</td></tr>
+<tr><td><code>project:delete</code></td><td>&mdash;</td><td>&mdash;</td><td>yes</td><td>yes</td></tr>
+<tr><td><code>member:invite</code></td><td>&mdash;</td><td>&mdash;</td><td>yes</td><td>yes</td></tr>
+<tr><td><code>member:remove</code></td><td>&mdash;</td><td>&mdash;</td><td>yes</td><td>yes</td></tr>
+<tr><td><code>team:delete</code></td><td>&mdash;</td><td>&mdash;</td><td>&mdash;</td><td>yes</td></tr>
+<tr><td><em>no role</em></td><td colspan="4">nothing at all</td></tr>
+</table>
+</div>
+
+<h2>The shape</h2>
+<pre><code>import type { Role } from "../generated/prisma/enums.ts";   // the Postgres enum
+export const ROLES = ["VIEWER", "MEMBER", "ADMIN", "OWNER"] as const satisfies readonly Role[];
+export type Action = (typeof ACTIONS)[number];
+
+export type Resource = { targetRole?: Role | undefined };   // the thing acted on
+const rank = (role: Role): number =&gt; ROLES.indexOf(role);   // derived, never retyped
+
+export function can(role: Role | undefined, action: Action, resource?: Resource): boolean {
+  if (role === undefined) return false;                     // 1. deny by default
+  if (!(PERMISSIONS[role]?.includes(action) ?? false)) return false;  // 2. the table
+
+  const target = resource?.targetRole;                      // 3. the rank rule
+  if (target !== undefined &amp;&amp; rank(role) &lt;= rank(target)) return false;
+
+  return true;
+}</code></pre>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  IN["can(role, action, resource)"] --> D1{"role defined?"}
+  D1 -- "no" --> F1["false &mdash; deny by default"]
+  D1 -- "yes" --> D2{"PERMISSIONS[role]<br/>includes action?"}
+  D2 -- "no" --> F2["false &mdash; the table"]
+  D2 -- "yes" --> D3{"resource.targetRole set?"}
+  D3 -- "no" --> T1["true"]
+  D3 -- "yes" --> D4{"rank(role) &gt; rank(target)?"}
+  D4 -- "no" --> F3["false &mdash; the rank rule"]
+  D4 -- "yes" --> T2["true"]
+</pre>
+<figcaption>Three questions, always in this order. The rank rule can only subtract; it never grants anything the table refused.</figcaption>
+</figure>
+
+<h2>Six rules</h2>
+<ol>
+<li><strong>Deny by default.</strong> Unknown role, missing action, no membership &rarr; <code>false</code>. Never <code>true</code>, never a throw.</li>
+<li><strong>One function.</strong> No <code>if (role === "ADMIN")</code> anywhere else. A scattered check is a check somebody forgets.</li>
+<li><strong>Check on every request.</strong> OWASP: "permission should be validated correctly on every request, regardless of&hellip; source".</li>
+<li><strong>Server side only.</strong> Hiding a button is not security. The front end may hide; the server must refuse.</li>
+<li><strong>Every rule gets a test.</strong> It is a pure function &mdash; a test costs two lines.</li>
+<li><strong>Fetch the target in the gate, never the handler.</strong> A handler only runs after the gate said yes, so a check there is a gate you can forget.</li>
+</ol>
+
+<h2>Naming</h2>
+<ul>
+<li><code>resource:verb</code>, lower case, always. <code>task:delete</code>, not <code>deleteTask</code> or <code>DELETE_TASK</code>.</li>
+<li>Name the <em>action</em>, never the role. <code>can(role, "member:invite")</code>, never <code>isAdmin(user)</code>. When Admin loses inviting next year, you change one line, not forty.</li>
+<li>Roles are <code>SCREAMING_CASE</code> because they will become a Postgres enum.</li>
+</ul>
+
+<h2>Where the role lives</h2>
+<p>Not on <code>User</code>. One column holds one answer, and a person has a different role in each team. The role belongs to the <strong>pair</strong>, so it is a join row.</p>
+<pre><code>enum Role { VIEWER MEMBER ADMIN OWNER }   // -&gt; CREATE TYPE "Role" AS ENUM (...)
+
+model Membership {
+  role   Role @default(MEMBER)
+  team   Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  teamId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId Int
+  @@id([teamId, userId])        // one membership per person per team
+}</code></pre>
+<div class="scroll">
+<table>
+<tr><th>Piece</th><th>What it buys</th></tr>
+<tr><td><code>enum Role</code></td><td>Postgres refuses a typo: <code>invalid input value for enum Role: "ADMINN"</code>.</td></tr>
+<tr><td><code>@@id([teamId, userId])</code></td><td>Composite primary key. A duplicate membership cannot exist &mdash; the route turns the refusal into <code>409</code>.</td></tr>
+<tr><td><code>onDelete: Cascade</code></td><td>No orphan role in a deleted team, or for a deleted user.</td></tr>
+<tr><td>Explicit join model</td><td>Prisma: use it whenever the join carries a field of its own.</td></tr>
+<tr><td>Import the enum type</td><td>One source of truth for the names. A new role breaks the build until <code>PERMISSIONS</code> covers it.</td></tr>
+</table>
+</div>
+<p>Creating a team makes the creator <code>OWNER</code> in the same transaction. A team with no owner is a team nobody can delete or invite into.</p>
+
+<h2>Enforcing it in a route</h2>
+<pre><code>export function requirePermission(action: Action) {
+  return async function gate(request, reply) {
+    const { teamId } = request.params as { teamId: number };
+    const role = await getRole(teamId, request.userId!);
+    if (!can(role, action)) return reply.code(403).send({ error: "forbidden" });
+    request.role = role;
+  };
+}
+
+// in the route: the job, never the role
+preHandler: requirePermission("member:invite")</code></pre>
+<div class="scroll">
+<table>
+<tr><th>Fastify hook</th><th>Runs</th><th>Params are</th><th>Use for</th></tr>
+<tr><td><code>onRequest</code></td><td>before validation</td><td>raw text</td><td>authn &mdash; the session cookie</td></tr>
+<tr><td><em>validation</em></td><td>&mdash;</td><td>zod coerces</td><td>&mdash;</td></tr>
+<tr><td><code>preHandler</code></td><td>after validation</td><td>real numbers</td><td>authz &mdash; needs <code>teamId</code></td></tr>
+</table>
+</div>
+<p><strong>Reply codes.</strong> <code>401</code> = I do not know you. <code>403</code> = I know you, and no. Give the <em>same</em> <code>403</code> to a wrong role and to a total stranger &mdash; a <code>404</code> would confirm the team exists, and ids can be walked.</p>
+<p><strong>Testing the enforcing.</strong> Unit tests prove the decision; route tests prove the enforcing. Assert the status <em>and</em> the state &mdash; a <code>403</code> after the row was already deleted still reads as a pass.</p>
+
+<h2>The third argument</h2>
+<p>A role&rarr;action table only knows about the person <em>asking</em>. Some rules depend on the <strong>thing being acted on</strong>. Pass it as a third argument, and keep the table as the first question.</p>
+<p class="takeaway">You may only act on somebody <strong>strictly below</strong> you. Equal rank is a no.</p>
+<div class="scroll">
+<table>
+<tr><th>actor</th><th>target</th><th>answer</th><th>why</th></tr>
+<tr><td>ADMIN</td><td>OWNER</td><td>no</td><td>target is above</td></tr>
+<tr><td>ADMIN</td><td>ADMIN</td><td>no</td><td>equal is not below</td></tr>
+<tr><td>ADMIN</td><td>MEMBER</td><td>yes</td><td>target is below</td></tr>
+<tr><td>OWNER</td><td>ADMIN</td><td>yes</td><td>target is below</td></tr>
+<tr><td>VIEWER</td><td>VIEWER</td><td>no</td><td>the table refused first</td></tr>
+<tr><td>ADMIN</td><td><em>none</em></td><td>table only</td><td>no target, rank rule sits out</td></tr>
+</table>
+</div>
+<p><strong>The gate does the fetching.</strong> A <code>Load</code> function says where the target lives, and the factory takes it as an optional second argument.</p>
+<pre><code>export type Load = (request: FastifyRequest) =&gt; Promise&lt;Resource&gt;;
+
+// target named in the URL       DELETE /teams/:teamId/members/:userId
+export const targetMember: Load = async (request) =&gt; {
+  const { teamId, userId } = request.params as { teamId: number; userId: number };
+  return { targetRole: await getRole(teamId, userId) };
+};
+
+// target named in the body      POST /teams/:teamId/members { role }
+export const grantedRole: Load = async (request) =&gt; {
+  const { role } = request.body as { role: Role };
+  return { targetRole: role };
+};
+
+preHandler: requirePermission("member:remove", targetMember)
+preHandler: requirePermission("member:invite", grantedRole)</code></pre>
+<div class="scroll">
+<table>
+<tr><th>Decision</th><th>Reason</th></tr>
+<tr><td><code>rank</code> derived from <code>ROLES</code></td><td>No second list to drift. The order of <code>ROLES</code> is now load-bearing &mdash; test it.</td></tr>
+<tr><td>Third argument optional</td><td>Every old <code>can(role, action)</code> call answers exactly as before. Prove it with a loop test.</td></tr>
+<tr><td>Junk target loses</td><td><code>indexOf</code> gives <code>-1</code>. Deny-by-default protects against an unreadable <em>actor</em>; an unreadable <em>target</em> must not lock out a real owner.</td></tr>
+<tr><td>Rank can only subtract</td><td>The table is question one. The rank rule never grants anything.</td></tr>
+<tr><td>Body loaders need <code>preHandler</code></td><td>In <code>onRequest</code> the body is not parsed yet.</td></tr>
+</table>
+</div>
+<p><strong>Still not expressible:</strong> "you may edit a task you own." That is a fact about a <em>row</em>, not a role. Oso's stage three. It is no longer hiding in the store &mdash; lesson 10 took it out. If you ever want it back, it is a new field on <code>Resource</code> and a new comparison in <code>can()</code>, never a <code>where</code> clause.</p>
+
+<h2>Scope: the fact before the fact</h2>
+<p>A role is held <em>in a team</em>, so a permission question with no team in it
+has no answer. That is why every guarded URL names one.</p>
+<pre><code>PATCH /tasks/5                 &larr; no scope, no role, no answer
+PATCH /teams/7/tasks/5         &larr; the gate can look up a role</code></pre>
+<p>The gate reads <code>:teamId</code> from the params, so the scope must be in the
+URL, not the body. A body can be changed after routing; a path cannot.</p>
+<div class="scroll">
+<table>
+<tr><th>Layer</th><th>Question</th><th>Wrong answer</th></tr>
+<tr><td>Gate</td><td>May a MEMBER of team 7 update tasks?</td><td>403</td></tr>
+<tr><td>Store</td><td>Is task 999 one of team 7's rows?</td><td>404</td></tr>
+</table>
+</div>
+<p>Both refusals, two different codes, on purpose. 403 is about the person.
+404 is about the row. Answering 403 for the second one would tell an attacker
+that the id exists somewhere else &mdash; which is the leak IDOR is made of.</p>
+
+<h2>Telling the UI, without moving the decision</h2>
+<p>A front end has to draw a screen before the user clicks anything, so it needs
+to know roughly what this person may do. Send it the answer; never send it the
+policy.</p>
+<pre><code>// server: three words, on top of the table that already exists
+export const allowedActions = (role: Role): readonly Action[] =&gt; PERMISSIONS[role] ?? [];
+
+GET /teams  &rarr;  [{ id, name, role: "VIEWER", can: ["task:read"] }]
+
+// client: labels only, no table of its own
+BUTTONS.filter(([action]) =&gt; team.can.includes(action))</code></pre>
+<div class="scroll">
+<table>
+<tr><th></th><th>the hint (<code>can</code>)</th><th>the gate (<code>can()</code>)</th></tr>
+<tr><td>Runs</td><td>once, when the screen draws</td><td>on every write</td></tr>
+<tr><td>Knows the target</td><td>no &mdash; a list has no third argument</td><td>yes, the loader fetches it</td></tr>
+<tr><td>May be cached</td><td>yes (30 s is fine)</td><td>never</td></tr>
+<tr><td>Ends in</td><td>pixels</td><td>a status code</td></tr>
+<tr><td>If it is wrong</td><td>a button that gets refused</td><td>a breach</td></tr>
+</table>
+</div>
+<ul>
+<li><strong>Hide, do not disable.</strong> A greyed-out <em>Delete team</em> still tells a Viewer the power exists here.</li>
+<li><strong>The list is approximate even when fresh.</strong> An Admin's <code>can</code> holds <code>member:remove</code>, and removing the Owner is still a 403 &mdash; the rank rule needs a target.</li>
+<li><strong>A list-shaped route needs no gate</strong> if the <code>where</code> clause is the scope: <code>where: { userId }</code> cannot return a row you may not see. An outsider gets <code>[]</code> and a <code>200</code>, never a 403.</li>
+</ul>
+
+<h2>Which refusal &mdash; 403 or 404</h2>
+<div class="scroll">
+<table>
+<tr><th></th><th><code>403 forbidden</code></th><th><code>404 not found</code></th></tr>
+<tr><td>About</td><td>you &mdash; your role in this team</td><td>the row &mdash; <code>where: { id, teamId }</code></td></tr>
+<tr><td>Decided in</td><td><code>requirePermission()</code>, a <code>preHandler</code></td><td>the handler, after the store returns nothing</td></tr>
+<tr><td>Order</td><td>first &mdash; so it always wins</td><td>only reachable once the gate said yes</td></tr>
+<tr><td>Covers</td><td>wrong role <em>and</em> not a member</td><td>another team's row <em>and</em> no such row</td></tr>
+<tr><td>Tells the asker</td><td>nothing about which teams exist</td><td>nothing about which ids exist</td></tr>
+</table>
+</div>
+<pre><code>PATCH /teams/431/tasks/357     own team, own task            200
+PATCH /teams/174/tasks/357     team I own, task is elsewhere 404
+PATCH /teams/174/tasks/999999  team I own, no such task      404
+PATCH /teams/432/tasks/357     team where I am a Viewer      403
+PATCH /teams/11/tasks/1        team I am not in at all       403</code></pre>
+<ul>
+<li><strong>Ambiguity is the feature.</strong> Two situations sharing one status code is what stops a caller enumerating team ids or task ids.</li>
+<li><strong>The error line on screen must not out-explain the server.</strong> "That task belongs to another team" hands back exactly what the 404 blurred.</li>
+<li><strong>A list route only says 403.</strong> No row to miss: an empty team is <code>200 []</code>.</li>
+<li><strong>The cache key mirrors the URL</strong> &mdash; <code>["teams", teamId, "tasks"]</code>. Drop the scope from the key and one team renders another's rows with no request made and no refusal possible.</li>
+</ul>
+
+<h2>Glossary</h2>
+<div class="scroll">
+<table>
+<tr><th>Term</th><th>Plain words</th></tr>
+<tr><td>RBAC</td><td>Role-Based Access Control. Powers come from your role.</td></tr>
+<tr><td>ABAC</td><td>Attribute-Based. Powers come from facts (time, department, amount).</td></tr>
+<tr><td>ReBAC</td><td>Relationship-Based. Powers come from links ("owner of", "parent folder of").</td></tr>
+<tr><td>Least privilege</td><td>Give the smallest set of powers that still lets the job get done.</td></tr>
+<tr><td>Privilege creep</td><td>Powers pile up over years and nobody takes them away.</td></tr>
+<tr><td>IDOR / BOLA</td><td>Swap an id in the URL and read someone else's row. Number 1 on the <a href="https://owasp.org/www-project-api-security/">OWASP API Top 10</a>.</td></tr>
+<tr><td>Decision vs enforcement</td><td><code>can()</code> decides. The route enforces. Keep them apart.</td></tr>
+<tr><td>Join row</td><td>A row about two things. <code>Membership</code> joins a user to a team and carries the role.</td></tr>
+<tr><td>Composite primary key</td><td>The key is two columns together: <code>@@id([teamId, userId])</code>.</td></tr>
+<tr><td>Scoped role</td><td>A role that only counts inside one team. Oso's stage two, <em>cross-organization roles</em>.</td></tr>
+<tr><td>Rank rule</td><td>You may only act on somebody strictly below you on the role ladder.</td></tr>
+<tr><td>Subject / operation / object</td><td>NIST's three parts of an access decision. <code>can(role, action, resource)</code>.</td></tr>
+<tr><td>Loader</td><td>The small function that fetches the target so the gate can judge it.</td></tr>
+<tr><td>401 vs 403</td><td>I do not know you / I know you and no. Authn vs authz.</td></tr>
+<tr><td>Scope</td><td>The <em>where</em> of a permission. Which team the role is held in.</td></tr>
+<tr><td>Scoping (a query)</td><td>Narrowing which rows a permitted action can see. Not a permission.</td></tr>
+<tr><td>403 vs 404</td><td>Forbidden is about you and is decided first; not found is about the row and covers "elsewhere" as well as "nowhere".</td></tr>
+<tr><td>Hint vs gate</td><td>The <code>can</code> list draws buttons; <code>can()</code> in the gate decides. Only the second one is security.</td></tr>
+<tr><td>Expand / backfill / contract</td><td>Add nullable, fill it, then lock it. How a required column lands on a table with rows.</td></tr>
+
+</table>
+</div>
+
+<footer>
+<p>Sources: <a href="https://owasp.org/Top10/A01_2021-Broken_Access_Control/">OWASP Top 10 &mdash; A01 Broken Access Control</a> &middot; <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html">OWASP Authorization Cheat Sheet</a> &middot; <a href="https://www.osohq.com/academy/what-is-rbac">Oso Authorization Academy &mdash; RBAC</a> &middot; <a href="https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/many-to-many-relations">Prisma &mdash; Many-to-many relations</a> &middot; <a href="https://www.postgresql.org/docs/current/datatype-enum.html">PostgreSQL &mdash; Enumerated types</a> &middot; <a href="https://fastify.dev/docs/latest/Reference/Hooks/">Fastify &mdash; Hooks</a> &middot; <a href="https://csrc.nist.gov/glossary/term/access_control_policy">NIST &mdash; Access control policy</a> &middot; <a href="https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html">OWASP &mdash; IDOR Prevention</a>.</p>
+<p class="nav"><a href="../lessons/0007-one-place-that-says-no.html">Lesson 7</a> &middot; <a href="../lessons/0008-a-role-is-a-row.html">Lesson 8</a> &middot; <a href="../lessons/0009-the-third-argument.html">Lesson 9</a> &middot; <a href="../lessons/0010-a-task-belongs-to-a-team.html">Lesson 10</a> &middot; <a href="../lessons/0023-the-button-you-can-still-press.html">Lesson 23</a> &middot; <a href="../lessons/0024-two-ways-to-say-no.html">Lesson 24</a> &middot; <a href="./api-security-basics.html">API security basics</a> &middot; <a href="./sessions-and-cookies.html">Sessions &amp; cookies</a> &middot; <a href="./password-hashing.html">Password hashing</a> &middot; <a href="./prisma-postgres.html">Prisma + Postgres</a></p>
+</footer>
+
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

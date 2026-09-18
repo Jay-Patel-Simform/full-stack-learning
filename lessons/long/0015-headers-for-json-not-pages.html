@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 15 &mdash; Headers For JSON, Not Pages</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 15 &middot; Week 7&ndash;8 &middot; API security &mdash; fifth one</p>
+<h1>Headers for JSON, not pages</h1>
+<p class="lede">You install Helmet and get thirteen headers. Your API sends JSON. Only four of the thirteen mean anything, one of them is set wrong for you, and one can lock your own laptop out of <code>http://localhost</code> for a year.</p>
+
+<div class="aside">
+<p><strong>Old debt, paid by me.</strong> The Redis question is five lessons old, so I am answering it instead of asking again. Two instances behind one nginx = two separate in&#8209;memory counters. Your login backoff gives an attacker <em>ten</em> free tries instead of five, and your 100&#8209;per&#8209;minute IP floor becomes 200. Both are now written into <a href="../../PLAN.md">PLAN.md</a> as week 11&ndash;12 tasks with a fix each: pass <code>@fastify/rate-limit</code> its <code>redis</code> option, and move <code>throttle.ts</code>&rsquo;s Map to one shared store. That thread is closed. The CSRF walk-through from lesson 14 is still yours.</p>
+</div>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>Third dependency: <code>@fastify/helmet@13.1.1</code>. New rule &mdash; <strong>take the library, then turn it down.</strong></li>
+<li>Helmet&rsquo;s thirteen defaults are written for an HTML <em>page</em>. You serve JSON.</li>
+<li>Four earn their place: <code>nosniff</code>, a CSP of <code>default-src 'none'</code>, <code>X-Frame-Options: DENY</code>, and HSTS <em>in production only</em>.</li>
+<li><code>Cache-Control: no-store</code> is the one that matters most and no plugin sets it. Six lines by hand.</li>
+<li><code>npm test</code> = 82. Seven new tests, all in <code>src/routes/headers.test.ts</code>.</li>
+</ul>
+</div>
+
+<h2>Your third library decision, and it is a new shape</h2>
+<p>You now own two rules about dependencies. This lesson adds the third, and the three together are the whole skill:</p>
+<div class="scroll">
+<table>
+<tr><th>Lesson</th><th>Library</th><th>Rule</th></tr>
+<tr><td><a href="../0011-five-tries-then-wait.html">11</a></td><td><code>@fastify/rate-limit</code>, rejected</td><td>Reject it when its <strong>default is the wrong decision</strong>. Its key was <code>request.ip</code>; a login must key on the account.</td></tr>
+<tr><td><a href="../0012-the-floor-under-everything.html">12</a>, <a href="../0013-same-site-is-not-same-origin.html">13</a></td><td><code>@fastify/rate-limit</code>, <code>@fastify/cors</code>, taken</td><td>Take it when the problem has <strong>no decisions left in it</strong>.</td></tr>
+<tr><td><strong>15</strong></td><td><code>@fastify/helmet</code>, taken and turned down</td><td><strong>Take it, then switch off what it assumed.</strong> Helmet assumed you serve pages. The header <em>strings</em> are worth having; the <em>assumption</em> is not.</td></tr>
+</table>
+</div>
+<p>Why take it at all, if you switch most of it off? Because the value in Helmet is not the logic &mdash; there is barely any. It is the exact spellings, the version history of headers browsers have since dropped, and thirteen names you would otherwise have to keep in your head. <a href="https://helmetjs.github.io/">Helmet</a> is a list, maintained by people who read the specs. Take the list. Make your own decisions on it.</p>
+<p class="takeaway">A library can be right about the facts and wrong about your situation. Those are two separate judgements.</p>
+
+<h2>The bad version first</h2>
+<pre><code>await app.register(helmet);   // &lt;- what everybody ships</code></pre>
+<p>It works. Nothing breaks. Now read what it actually sent you (<a href="https://helmetjs.github.io/">helmet&rsquo;s own defaults page</a>), and mark each row against a JSON API:</p>
+<div class="scroll">
+<table>
+<tr><th>Header Helmet sets</th><th>Default value</th><th>Worth it for JSON?</th></tr>
+<tr><td><code>X-Content-Type-Options</code></td><td><code>nosniff</code></td><td><strong>Yes.</strong> The single most useful one here.</td></tr>
+<tr><td><code>Content-Security-Policy</code></td><td><code>default-src 'self'; script-src 'self'; &hellip;</code></td><td><strong>Wrong for you.</strong> It permits loading from yourself. Your API should permit <em>nothing</em>.</td></tr>
+<tr><td><code>X-Frame-Options</code></td><td><code>SAMEORIGIN</code></td><td><strong>Wrong for you.</strong> You frame nothing, ever. <code>DENY</code>.</td></tr>
+<tr><td><code>Strict-Transport-Security</code></td><td><code>max-age=31536000; includeSubDomains</code></td><td><strong>Yes in production. Dangerous on localhost.</strong> See below.</td></tr>
+<tr><td><code>Cross-Origin-Resource-Policy</code></td><td><code>same-origin</code></td><td>Yes, quietly. Stops <code>&lt;script src="&hellip;/tasks"&gt;</code> tricks.</td></tr>
+<tr><td><code>Referrer-Policy</code></td><td><code>no-referrer</code></td><td>Harmless. Keep it.</td></tr>
+<tr><td><code>X-Powered-By</code></td><td>removed</td><td>No-op. Fastify never sent one.</td></tr>
+<tr><td><code>Cross-Origin-Opener-Policy</code></td><td><code>same-origin</code></td><td>No. It is about <code>window.opener</code> between pages.</td></tr>
+<tr><td><code>Origin-Agent-Cluster</code></td><td><code>?1</code></td><td>No. A process-isolation hint for pages.</td></tr>
+<tr><td><code>X-DNS-Prefetch-Control</code></td><td><code>off</code></td><td>No. About links on a page.</td></tr>
+<tr><td><code>X-Download-Options</code></td><td><code>noopen</code></td><td>No. Old Internet Explorer.</td></tr>
+<tr><td><code>X-Permitted-Cross-Domain-Policies</code></td><td><code>none</code></td><td>No. Adobe Flash.</td></tr>
+<tr><td><code>X-XSS-Protection</code></td><td><code>0</code></td><td>No. <code>0</code> disables a broken old filter. Nothing to disable.</td></tr>
+</table>
+</div>
+<p>Four yeses, two wrong values, seven that do nothing. Ship the defaults and 60% of every response you send is bytes for a browser feature you do not use &mdash; and the two rows that do matter are set for somebody else&rsquo;s app.</p>
+<p class="takeaway">Count the rows that apply to <em>your</em> kind of response. Same counting move as lessons 9, 10 and 11 &mdash; it keeps finding things.</p>
+
+<h2>The dangerous row, said plainly</h2>
+<p><code>Strict-Transport-Security</code> tells a browser: <strong>never speak plain <code>http</code> to this host again, for the next year.</strong> The browser writes that down and obeys it before it makes a request &mdash; your server is not consulted.</p>
+<p>Send it from <code>localhost:3000</code> and your browser pins <code>localhost</code> to HTTPS. Every other project you run on <code>localhost</code>, in any port, now fails to load. You cannot fix it by deleting the header, because the browser has already stopped asking. You clear it by hand in the browser&rsquo;s internal settings, per browser, and <code>includeSubDomains</code> widens the blast radius further.</p>
+<p>So: on in production, where TLS is real. Off everywhere else. That is what the <code>NODE_ENV</code> check in the code below is for, and it is the only environment check in the whole registration.</p>
+
+<h2>The code</h2>
+<p>In <code>server/src/app.ts</code>, after the CORS block:</p>
+<pre><code>await app.register(helmet, {
+  // A JSON API should be allowed to load nothing at all.
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: { "default-src": ["'none'"], "frame-ancestors": ["'none'"] },
+  },
+  xFrameOptions: { action: "deny" },          // helmet says sameorigin; we frame nothing
+  hsts: process.env.NODE_ENV === "production"
+    ? { maxAge: 31_536_000, includeSubDomains: true }
+    : false,                                   // never from localhost
+  // Off: these only mean something to a page, and we do not serve pages.
+  crossOriginOpenerPolicy: false,
+  originAgentCluster: false,
+  xDnsPrefetchControl: false,
+  xDownloadOptions: false,
+  xPermittedCrossDomainPolicies: false,
+  // Kept: nosniff, referrer-policy, cross-origin-resource-policy.
+});</code></pre>
+<p><code>useDefaults: false</code> is the important word. Without it your two directives are <em>added to</em> Helmet&rsquo;s page policy, and <code>default-src</code> stays <code>'self'</code>. With it, the policy is exactly the two things you wrote.</p>
+<p>Read the result out loud: <code>default-src 'none'; frame-ancestors 'none'</code>. No scripts, no images, no fonts, no frames, no anything &mdash; and nobody may put this reply inside a frame. That is a correct description of a JSON endpoint.</p>
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  A["A hostile page links a victim to<br/>https://api.app.example/teams/1/tasks"] --> B["Browser loads it as a top-level page"]
+  B --> C{"Content-Type<br/>application/json"}
+  C -- "no nosniff" --> D["Old browser sniffs the bytes,<br/>decides it looks like HTML,<br/>runs script inside your data"]
+  C -- "nosniff" --> E["Treated as JSON. Nothing runs."]
+  E --> F{"CSP default-src 'none'"}
+  F --> G["Even if something DID render,<br/>no script, image or frame may load"]
+  style D fill:#f8d7d5,stroke:#93231a,color:#3a1512
+  style E fill:#d9ecdd,stroke:#2f6b3a,color:#14301b
+  style G fill:#d9ecdd,stroke:#2f6b3a,color:#14301b
+</pre>
+<figcaption>Two independent layers for one attack. <code>nosniff</code> stops the guess. CSP makes the guess useless if it happens anyway. Neither one trusts the other to work.</figcaption>
+</figure>
+
+<div class="quiz" data-answer="1">
+<p class="q">You keep Helmet&rsquo;s CSP default of <code>default-src 'self'</code> on your JSON API. What is wrong with it?</p>
+<button>It blocks your React front end from calling the API</button>
+<button>It permits loads your API should never permit</button>
+<button>It stops the browser guessing your content type</button>
+<p class="why" hidden>CSP restricts what a <em>rendered page</em> may load. It never affects a <code>fetch()</code> from someone else&rsquo;s page &mdash; that is CORS, from <a href="../0013-same-site-is-not-same-origin.html">lesson 13</a>. <code>'self'</code> is simply a weaker answer than <code>'none'</code> for a response that should render nothing. Content-type guessing is <code>nosniff</code>, a different header.</p>
+</div>
+
+<h2>The one no plugin sets</h2>
+<p>Helmet does not touch caching. <a href="https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html">OWASP&rsquo;s REST cheat sheet</a> names it anyway: <em>&ldquo;Providing <code>no-store</code> indicates that any caches of any kind (private or shared) should not store the response.&rdquo;</em></p>
+<p>Every route in this API answers with somebody&rsquo;s private data, behind a session cookie. There is no per-route decision to make, so it is global:</p>
+<pre><code>app.addHook("onSend", async (_req, reply) =&gt; {
+  reply.header("cache-control", "no-store");
+});</code></pre>
+<p>Why <code>onSend</code> and not <code>onRequest</code>? <code>onSend</code> is the last hook before bytes leave, so it runs for <em>every</em> reply &mdash; your 200s, your 400s from zod, your 403s from <code>can()</code>, your 429s from the limiter. A header set at request time can still be overwritten by a handler. This one cannot.</p>
+<p>Without it, a shared cache &mdash; a corporate proxy, a CDN you add in week 11&ndash;12, the browser&rsquo;s own back-button store &mdash; is allowed to keep one user&rsquo;s <code>/teams/1/tasks</code> and hand it to the next person who asks. Your <code>can()</code> checks are perfect and never consulted.</p>
+<p class="takeaway">Access control you never reach is access control you do not have. Same family as lesson 12&rsquo;s hook-order bug.</p>
+
+<div class="quiz" data-answer="2">
+<p class="q">Why is <code>Cache-Control: no-store</code> set in an <code>onSend</code> hook rather than in each route?</p>
+<button>Routes cannot set response headers in Fastify</button>
+<button>It makes the header cheaper for the server to send</button>
+<button>It also covers replies no handler ever ran for</button>
+<p class="why" hidden>A 429 from the rate limiter, a 400 from zod validation and a 404 never reach your handler at all. Per-route code cannot cover them. One <code>onSend</code> hook covers every reply the app produces, which is exactly the guarantee you want from a rule with no exceptions.</p>
+</div>
+
+<h2>The tests</h2>
+<p>Seven new tests in <code>server/src/routes/headers.test.ts</code>. Same rule as <code>cors.test.ts</code>: <strong>test what you decided, not what you installed.</strong> Every assertion matches a line you wrote in <code>app.ts</code>.</p>
+<pre><code>assert.equal(
+  res.headers["content-security-policy"],
+  "default-src 'none';frame-ancestors 'none'",
+);
+assert.equal(res.headers["x-frame-options"], "DENY");        // not SAMEORIGIN
+assert.equal(res.headers["strict-transport-security"], undefined);  // not in dev
+</code></pre>
+<p>The last one is a guard, not a check of Helmet. If it ever fails on your laptop, something has started sending HSTS from <code>localhost</code>, and you want to know that before your browser does.</p>
+<p>The seventh test asks for <code>/nope</code> and asserts <code>nosniff</code> and <code>no-store</code> on the <strong>404</strong>. Error replies are where header middleware usually gets skipped. One assertion, and you never wonder.</p>
+
+<h2>What this does NOT fix</h2>
+<div class="scroll">
+<table>
+<tr><th>Worry</th><th>Do these headers help?</th><th>What actually handles it</th></tr>
+<tr><td>Somebody calling your API with curl</td><td><strong>No.</strong> Headers are advice to a browser, like CORS.</td><td><code>requireAuth</code> + <code>can()</code>, lessons 7&ndash;9</td></tr>
+<tr><td>CSRF on your writes</td><td><strong>No.</strong> Nothing here reads the <code>Origin</code> of a write.</td><td><code>SameSite=Lax</code>, plus an <code>Origin</code> check &mdash; lesson 16</td></tr>
+<tr><td>XSS in your React front end</td><td>No. That page needs <em>its own</em> CSP, served by nginx.</td><td>A second CSP, week 9&ndash;10. Different app, different policy.</td></tr>
+<tr><td>Your JSON leaking through a log or an error</td><td>No.</td><td>Serializer schemas, <a href="../0002-schemas-at-the-door.html">lesson 2</a></td></tr>
+<tr><td>HSTS before you have HTTPS</td><td>No &mdash; it is <em>off</em> until deploy, on purpose.</td><td>Week 11&ndash;12, at the same time as the certificate</td></tr>
+</table>
+</div>
+<p>Read row three. This lesson protected your <em>API&rsquo;s</em> responses. Your front end is a separate program with a separate policy, and its CSP is the one that stops real XSS. Do not walk away thinking you have shipped a CSP. You have shipped the easy one.</p>
+
+<h2>Read this</h2>
+<p>Primary source: <a href="https://cheatsheetseries.owasp.org/cheatsheets/HTTP_Headers_Cheat_Sheet.html">OWASP &mdash; HTTP Security Response Headers Cheat Sheet</a>. One header per section, each with a recommended value and a plain reason. Read the <code>Strict-Transport-Security</code> and <code>X-Content-Type-Options</code> sections properly; skim the rest.</p>
+<p>Then <a href="https://helmetjs.github.io/">helmet&rsquo;s defaults list</a> &mdash; the thirteen rows in the table above, from the source &mdash; and <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CSP">MDN &mdash; Content Security Policy</a>, first section only.</p>
+
+<h2>Do this before lesson 16</h2>
+<ol>
+<li>Run <code>cd server &amp;&amp; npm test</code>. Expect <strong>82</strong>. Then <code>npm run typecheck</code>.</li>
+<li>See them with your eyes. Start the app and:
+<pre><code>curl -si localhost:3000/health | head -20</code></pre>
+Count the headers. Then find the two that are <em>not</em> from Helmet.</li>
+<li>Break it on purpose. In <code>app.ts</code>, change <code>useDefaults: false</code> to <code>true</code>, run <code>npm test</code>, and read the failure message. That message is the difference between Helmet&rsquo;s policy and yours, printed for free.</li>
+<li>Break it the other way. Comment out the <code>onSend</code> hook and run the tests. Two fail, and one of them is the 404 test. Put it back.</li>
+<li>Prove HSTS is off:
+<pre><code>curl -si localhost:3000/health | grep -i strict-transport</code></pre>
+Nothing. Good. Do not make it say something on localhost.</li>
+</ol>
+<p>Then the questions:</p>
+<ol>
+<li>Still owed from lesson 14, and lesson 16 is built on your answer: you go same-origin, so there are no preflights. A page at <code>evil.example</code> runs <code>fetch("https://app.example/api/teams/1", { method: "DELETE", credentials: "include" })</code>. What does the browser send, what does your server do, and what &mdash; exactly &mdash; stops it? Name the one thing.</li>
+<li>New one. Your nginx from <a href="../0014-one-origin-no-question.html">lesson 14</a> serves the React app and proxies <code>/api</code>. Both come from <code>https://app.example</code>, so the browser sees <strong>one</strong> origin. Your API says <code>default-src 'none'</code>. Does that CSP apply to your React page? Answer yes or no, and say what decides it &mdash; there is a precise answer and it is not about origins.</li>
+</ol>
+<p>Community: ask <a href="https://www.reddit.com/r/webdev/">r/webdev</a> or the <a href="https://discord.gg/fastify">Fastify Discord</a> whether they bother sending CSP on a JSON-only API at all. Plenty of good engineers say it is theatre. Their reasons are worth more than the answer.</p>
+
+<div class="aside">
+<p>Something unclear? Ask me &mdash; I am your teacher here, and I will re-teach it another way. The sentence to be able to say out loud: <em>Helmet is a list of correct header strings written for pages; I took the list and made the decisions myself.</em></p>
+</div>
+
+<hr>
+<p class="nav">Back: <a href="../0014-one-origin-no-question.html">Lesson 14 &mdash; One origin, no question</a> &middot; Keep for reference: <a href="../../reference/api-security-basics.html#headers">Security headers table</a> &middot; <a href="../../reference/api-security-basics.html">API security basics</a> &middot; The code: <a href="../../server/src/app.ts">server/src/app.ts</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

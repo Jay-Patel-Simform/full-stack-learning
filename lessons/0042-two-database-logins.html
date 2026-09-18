@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 42 &mdash; Two database logins</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 42 &middot; Week 13 &middot; Polish and prove it</p>
+<h1>Two database logins</h1>
+<p class="lede">You ran the SQL from <a href="./0041-the-role-that-can-erase-the-evidence.html">lesson 41</a>. The role <code>tasks_app</code> exists in your database right now &mdash; I checked. But nothing uses it yet. Today it goes into the code: one new config value, one line in <code>src/db.ts</code>, and four tests that ask the database to refuse. Your suite goes <b>162 &rarr; 166</b>. I wrote and ran every command below against your real machine.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>One app, two logins.</strong> <code>DATABASE_URL</code> is the owner and runs migrations, seeds and tests. <code>APP_DATABASE_URL</code> is <code>tasks_app</code> and runs the server.</li>
+<li><strong>The choice lives in <code>src/db.ts</code>, in one line</strong> &mdash; <code>NODE_ENV === "test"</code> picks the owner, everything else picks the restricted login.</li>
+<li><strong>Measured: a shell variable beats <code>.env</code>.</strong> <code>process.loadEnvFile()</code> does not overwrite a value that is already set. So <code>NODE_ENV=test npm test</code> really works.</li>
+<li><strong>Measured: the new login connects.</strong> With the server running, <code>pg_stat_activity</code> shows <code>tasks_app</code>, and a 401 still lands in the audit log.</li>
+<li><strong>Measured: the wall is silent, not loud.</strong> <code>tasks_app</code> running <code>GRANT DELETE</code> on itself is not an error. It is a <code>WARNING</code> and nothing changes.</li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<pre><code>server: npm test          <b>166 passing</b>   (was 162)
+server: npm run typecheck clean
+web:    npm test          9 passing
+psql:   \dp "AuditLog"    <b>tasks_app=ar/tasks</b></code></pre>
+<p>You did step 5 of lesson 41. <code>tasks_app</code> is in <code>pg_roles</code>, it holds <code>a</code> (INSERT) and <code>r</code> (SELECT) on <code>AuditLog</code>, and the default privileges for future tables are set. That part is done and correct.</p>
+
+<h2>The shape of the change</h2>
+<p>Here is the whole thing. Three files, twelve lines.</p>
+<pre><code>// .env
+DATABASE_URL="postgres://tasks:tasks@localhost:5432/tasks"
+<b>APP_DATABASE_URL="postgres://tasks_app:tasks_app@localhost:5432/tasks"</b>
+
+// src/config.ts
+  DATABASE_URL: z.url(),
+<b>  APP_DATABASE_URL: z.url(),</b>
+
+// src/db.ts
+<b>const connectionString =
+  config.NODE_ENV === "test" ? config.DATABASE_URL : config.APP_DATABASE_URL;</b>
+const adapter = new PrismaPg({ connectionString });
+
+// package.json
+"test": "<b>NODE_ENV=test</b> LOG_LEVEL=silent tsx --test \"src/**/*.test.ts\""</code></pre>
+<p>Read the ternary again. It is the one design decision in this lesson, and it is worth a sentence: <b>the login is chosen by the job, not by the file.</b> Serving a request is one job. Running the test suite is a different job. They are allowed different powers.</p>
+<div class="word"><b>connection string</b> &mdash; the URL that says which login, which password, which host and which database. <code>postgres://user:password@host:port/database</code>.</div>
+
+<h2>Why tests keep the owner</h2>
+<p>Lesson 41 measured this: five lines in your tests call <code>prisma.auditLog.deleteMany</code> to tidy up, and zero route handlers do. If tests ran as <code>tasks_app</code>, those five cleanups would fail with <code>42501</code> and you would rewrite them for no gain.</p>
+<div class="scroll"><table>
+<tr><th>Job</th><th>Login</th><th>Why</th></tr>
+<tr><td><code>npm run dev</code> / <code>npm start</code></td><td><code>tasks_app</code></td><td>this is the one the internet can reach</td></tr>
+<tr><td><code>npx prisma migrate dev</code></td><td><code>tasks</code></td><td>CREATE and ALTER belong to the owner</td></tr>
+<tr><td><code>npm test</code></td><td><code>tasks</code></td><td>cleanup deletes audit rows; a test is not a web request</td></tr>
+</table></div>
+<p class="takeaway">A rule worth keeping: <b>least privilege applies to the exposed path, not to your terminal.</b> Locking down your own laptop commands buys nothing and costs you an hour a week. Lock down the thing a stranger can send bytes to.</p>
+
+<h2>The one thing I was not sure would work</h2>
+<p>The test script now sets <code>NODE_ENV=test</code> in the shell. But <code>src/config.ts</code> calls <code>process.loadEnvFile()</code>, and your <code>.env</code> file says <code>NODE_ENV=development</code>. Which one wins? I did not know, so I checked instead of guessing:</p>
+<pre><code>printf 'FOO=fromfile\n' > .env
+FOO=fromshell node -e 'process.loadEnvFile(); console.log(process.env.FOO)'
+<b>fromshell</b></code></pre>
+<p><b>The shell wins.</b> <code>loadEnvFile()</code> fills in variables that are missing; it never overwrites one that is already there. This is also why <code>LOG_LEVEL=silent</code> in your test script has been working since lesson 6 &mdash; you just never had a reason to ask why.</p>
+
+<h2>The test that proves the refusal</h2>
+<p>A privilege with no test is a rule nobody enforces. New file, <code>src/db.test.ts</code>. It is the first test file in this project that <em>does not</em> import <code>prisma</code>, and the reason is the whole point:</p>
+<pre><code>// tests run as the OWNER, so the shared client would prove nothing
+const client = new pg.Client({ connectionString: config.APP_DATABASE_URL });</code></pre>
+<p>It opens one connection as the restricted login and asks the database four questions. <code>pg</code> is already a dependency &mdash; Prisma's adapter uses it &mdash; so nothing new was installed.</p>
+<div class="scroll"><table>
+<tr><th>Test</th><th>Expected</th><th>Got</th></tr>
+<tr><td>INSERT an audit row</td><td>allowed</td><td class="yes">id returned, then <code>ROLLBACK</code></td></tr>
+<tr><td>SELECT count from the log</td><td>allowed</td><td class="yes">6,664</td></tr>
+<tr><td>DELETE / UPDATE / TRUNCATE the log</td><td>refused</td><td class="yes"><code>42501</code> &times; 3</td></tr>
+<tr><td>CREATE TABLE</td><td>refused</td><td class="yes"><code>42501</code></td></tr>
+</table></div>
+<div class="word"><b>42501</b> &mdash; the Postgres error code for &ldquo;insufficient privilege&rdquo;. The test asserts this <b>code</b>, never the English message. A message is text that can change between versions; a code is a contract.</div>
+<p>Two details in that file are deliberate, and both are habits worth copying. The INSERT test wraps itself in <code>BEGIN</code> / <code>ROLLBACK</code>, because a test that protects the audit log must not leave a row in it. And the refusal helper returns the error instead of using <code>assert.rejects</code>, so the assertion can be about the code and nothing else.</p>
+
+<h2>I checked that the new test can fail</h2>
+<p>Same check you did in lesson 41, step 0, and it is now the standard for every test I hand you. I changed one word in <code>src/db.test.ts</code> &mdash; <code>APP_DATABASE_URL</code> to <code>DATABASE_URL</code>, so the test connects as the owner instead:</p>
+<pre><code>as tasks_app  <b>166 pass, 0 fail</b>
+as tasks      <b>164 pass, 2 fail</b>   &lt;- the owner is allowed to do both things</code></pre>
+<p>Two failures, and they are exactly the two refusal tests. That is what load-bearing means: give the app a login that is too powerful, and the suite goes red.</p>
+
+<h2>Hint versus gate &mdash; I have asked three times, so here it is</h2>
+<p>You have skipped this homework three times, so I will teach it instead, using today's code where it is easiest to see.</p>
+<div class="scroll"><table>
+<tr><th></th><th>Hint</th><th>Gate</th></tr>
+<tr><td>What it does</td><td>tells someone what is allowed</td><td>makes the other thing impossible</td></tr>
+<tr><td>Who obeys it</td><td>whoever reads it and agrees</td><td>everyone, including a bug</td></tr>
+<tr><td>Today's example</td><td>the line in <code>server/CLAUDE.md</code>: &ldquo;never delete audit rows&rdquo;</td><td><code>REVOKE DELETE</code> in the database</td></tr>
+<tr><td>Earlier example</td><td>a greyed-out Delete button in the UI</td><td><code>requirePermission("task:delete")</code> on the route</td></tr>
+</table></div>
+<p>Hints are not useless. A greyed-out button is kind, and a comment is how the next person learns the reason. But <b>a hint is advice and a gate is physics</b>. Every hint needs a gate behind it, and the gate belongs as far down the stack as you can push it &mdash; UI, then route, then database. Today you pushed one all the way down.</p>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why does <code>npm test</code> still use the owner login?</p>
+<button>Prisma cannot connect as a second role</button>
+<button>Test cleanup deletes rows the app cannot</button>
+<p class="why" hidden>Five lines in your tests call <code>prisma.auditLog.deleteMany</code> to tidy up after themselves. The app role is not allowed to do that, on purpose. Tests run from your terminal, not from the internet, so they keep the owner. Prisma connects as any role you give it &mdash; <code>src/db.test.ts</code> proves that.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">What happens when <code>tasks_app</code> tries to grant itself DELETE?</p>
+<button>A warning, and nothing is granted</button>
+<button>An error, and nothing is granted</button>
+<p class="why" hidden>Measured on your database: <code>WARNING: no privileges were granted for "AuditLog"</code>. Not an error. A role can only grant what it owns or holds, and <code>tasks_app</code> owns nothing. This is the hole lesson 41 found with the owner role, and this is why a second role closes it.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>Look at the four files I changed.</strong> <code>.env</code>, <code>src/config.ts</code>, <code>src/db.ts</code>, <code>package.json</code>, plus the new <code>src/db.test.ts</code>. Then run both:
+<pre><code>npm run typecheck
+npm test</code></pre>
+<b>Expect clean, and 166 pass.</b></li>
+
+<li><strong>Watch it fail, like last time.</strong> In <code>src/db.test.ts</code>, change <code>config.APP_DATABASE_URL</code> to <code>config.DATABASE_URL</code>, run <code>npm test</code>, see <b>164 pass, 2 fail</b>, then put it back. I ran this before writing this line.</li>
+
+<li><strong>See the login with your own eyes.</strong> Start the server in one terminal, then in another:
+<pre><code>psql "postgres://tasks:tasks@localhost:5432/tasks" \
+  -c "select usename from pg_stat_activity where datname = 'tasks';"</code></pre>
+<b>Expect <code>tasks_app</code> in the list.</b> It appears only after the first request that touches the database &mdash; the pool is lazy, and <code>/health</code> does not query. Hit <code>/auth/login</code> with a wrong password first.</li>
+
+<li><strong>Prove the config refuses to boot.</strong> One command, no file editing:
+<pre><code>APP_DATABASE_URL= npm start</code></pre>
+<b>Expect <code>Bad environment: Invalid URL &rarr; at APP_DATABASE_URL</code></b> and exit. That is the lesson-27 rule doing its job: the four variables that decide whether production is safe have no default, and now there are five.</li>
+
+<li><strong>The one thing still open, and it is yours.</strong> The password <code>tasks_app</code> is in <code>.env</code> in plain text, and it is the same word as the role name. That is fine on your laptop and wrong anywhere else. Change it now so you never ship it:
+<pre><code>psql "postgres://tasks:tasks@localhost:5432/tasks" \
+  -c "ALTER ROLE tasks_app PASSWORD 'something-long-and-random';"</code></pre>
+Then update <code>APP_DATABASE_URL</code> in <code>.env</code> and run <code>npm test</code> again. Also update the comment in <code>prisma/sql/tasks_app.sql</code>. Bring me the test count.</li>
+
+<li><strong>Words, not code.</strong> One sentence, and this replaces the homework I just answered for you: <b>name one gate in this app that is still only a hint.</b> There is at least one. Start by asking which rules live only in <code>server/CLAUDE.md</code>.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>The role <code>tasks_app</code> existed after <a href="./0041-the-role-that-can-erase-the-evidence.html">lesson 41</a> but nothing used it. Now one line in <code>src/db.ts</code> decides which login every command gets.</p>
+
+<h2>One line, two paths</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+    D["src/db.ts<br/>NODE_ENV === 'test' ?"] -->|"yes"| O["DATABASE_URL<br/>role: tasks (owner)"]
+    D -->|"no"| P["APP_DATABASE_URL<br/>role: tasks_app"]
+    N["npm test"] --> D
+    S["npm start / npm run dev"] --> D
+    M["npx prisma migrate"] --> O
+    O --> DB[("tasks database")]
+    P --> DB
+    style P fill:#1b3a1b,stroke:#4c9a4c,color:#d7f0d7
+    style O fill:#332f22,stroke:#8a7b4c,color:#f0e7d7
+</pre>
+<figcaption>Prisma's CLI reads <code>DATABASE_URL</code> directly, so migrations never pass through this line at all.</figcaption>
+</figure>
+
+<h2>Which variable wins</h2>
+<div class="box">
+<div class="cap">measured &mdash; does .env overwrite the shell, or the other way round?</div>
+<div class="body">
+<div><span class="dim">.env</span>   FOO=fromfile</div>
+<div><span class="dim">shell</span>  FOO=fromshell node -e "process.loadEnvFile(); console.log(process.env.FOO)"</div>
+<div>&nbsp;</div>
+<div><span class="ok">fromshell</span>   <span class="dim">the shell wins &mdash; loadEnvFile only fills in what is missing</span></div>
+</div>
+</div>
+<p>That is why <code>NODE_ENV=test npm test</code> works even though <code>.env</code> says <code>development</code>, and why <code>LOG_LEVEL=silent</code> has worked since lesson 6.</p>
+
+<h2>What the database refuses</h2>
+<div class="two">
+<div>
+<h4>as tasks_app</h4>
+<div class="box"><div class="body">
+<div>SELECT count(*) "AuditLog"  <span class="ok">6664</span></div>
+<div>INSERT INTO "AuditLog"      <span class="ok">id 9974</span></div>
+<div>DELETE FROM "AuditLog"      <span class="bad">42501</span></div>
+<div>UPDATE "AuditLog"           <span class="bad">42501</span></div>
+<div>TRUNCATE "AuditLog"         <span class="bad">42501</span></div>
+<div>CREATE TABLE zzz            <span class="bad">42501</span></div>
+<div>GRANT DELETE TO tasks_app   <span class="bad">WARNING: none granted</span></div>
+</div></div>
+</div>
+<div>
+<h4>as tasks (owner)</h4>
+<div class="box"><div class="body">
+<div>SELECT count(*) "AuditLog"  <span class="ok">6664</span></div>
+<div>INSERT INTO "AuditLog"      <span class="ok">ok</span></div>
+<div>DELETE FROM "AuditLog"      <span class="ok">ok</span></div>
+<div>UPDATE "AuditLog"           <span class="ok">ok</span></div>
+<div>TRUNCATE "AuditLog"         <span class="ok">ok</span></div>
+<div>CREATE TABLE zzz            <span class="ok">ok</span></div>
+<div>GRANT DELETE TO tasks       <span class="ok">GRANT</span></div>
+</div></div>
+</div>
+</div>
+<p>The last row is the one that matters. <code>tasks_app</code> owns nothing, so granting itself a power is not an error &mdash; it is a <code>WARNING</code> and nothing changes. That is the hole lesson 41 found, closed.</p>
+
+<h2>The test can fail</h2>
+<div class="box">
+<div class="cap">src/db.test.ts, one word changed, then changed back</div>
+<div class="body">
+<div>connectionString: config.APP_DATABASE_URL   <span class="ok">166 pass   0 fail</span></div>
+<div>connectionString: config.DATABASE_URL       <span class="bad">164 pass   2 fail</span></div>
+<div>&nbsp;</div>
+<div><span class="dim">the two failures are exactly the two refusal tests</span></div>
+</div>
+</div>
+
+<h2>Proof it is really connected</h2>
+<div class="box">
+<div class="cap">server running on port 3001, after one request that touches the database</div>
+<div class="body">
+<div>select usename from pg_stat_activity where datname = 'tasks';</div>
+<div>&nbsp;</div>
+<div>  tasks        <span class="dim">your dev tools</span></div>
+<div>  <span class="acc">tasks_app</span>    <span class="dim">the API</span></div>
+<div>&nbsp;</div>
+<div><span class="dim">/health alone shows nothing &mdash; the pool is lazy and health does not query</span></div>
+</div>
+</div>
+
+<p class="takeaway">A hint asks. A gate refuses. Today's gate is four characters long: <code>42501</code>.</p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://www.postgresql.org/docs/current/errcodes-appendix.html">PostgreSQL manual &mdash; Error Codes</a>. Find <code>42501</code> in class 42. Skim the class names only; the point is that every refusal has a stable five-character code, which is what a test should assert.</p>
+<p><b>Then this:</b> <a href="https://nodejs.org/api/process.html#processloadenvfilepath">Node docs &mdash; <code>process.loadEnvFile()</code></a>. Short page. It is the function behind the measurement above, and behind your whole <code>src/config.ts</code>.</p>
+<p><b>Reference card:</b> <a href="../reference/environment.html">Environment and config</a>, with <code>APP_DATABASE_URL</code> added, and <a href="../reference/prisma-postgres.html">Prisma + Postgres</a>, with the two-login table.</p>
+<p><b>Ask the community:</b> <a href="https://dba.stackexchange.com/questions/tagged/postgresql+permissions">dba.stackexchange.com, postgresql + permissions</a>. Good question for them: <em>where do people keep the app role's password once it is not a laptop &mdash; a secrets manager, or the platform's own env vars?</em> That is a week-15 question and the answers will shape your deploy.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0041-the-role-that-can-erase-the-evidence.html">&larr; Back</a>
+<a href="../reference/environment.html">Environment reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

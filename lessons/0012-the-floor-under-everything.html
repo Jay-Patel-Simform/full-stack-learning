@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 12 — Choosing security libraries</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 12 &middot; Week 7&ndash;8 &middot; API security</p>
+<h1>Choosing security libraries</h1>
+<p class="lede">Lesson 11 put a wall in front of <em>one</em> route. The other twenty will still answer as fast as your laptop can ask.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>Lesson 11 stopped <em>guessing</em>. This one stops <em>noise</em>.</li>
+<li>A junk cookie has no email in it, so the only key left is the IP. Here that is fine.</li>
+<li>Install <code>@fastify/rate-limit</code> &mdash; first new dependency in eleven lessons, because this job has no decisions left in it.</li>
+<li>Register it with <code>global: false</code>, then one app-level hook, so the cheap check runs <em>before</em> the session query.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  R["request"] --> L1{"IP floor<br/>100/min<br/>a Map lookup"}
+  L1 -- "over" --> E["429<br/>cost: nothing"]
+  L1 -- "under" --> L2{"requireAuth<br/>a Postgres query"}
+  L2 --> L3{"email backoff<br/>lesson 11"}
+  L3 --> H["handler"]
+  WRONG["global: true<br/>attaches AFTER<br/>each route's own hooks"] -.-> L2
+</pre>
+<figcaption>The order is the lesson. The plugin's own global mode runs after a route's hooks &mdash; so a request you meant to reject for free would still pay for a session lookup first.</figcaption>
+</figure>
+
+<h2>The idea</h2>
+<p>Lesson 11's key was the email, because the attacker was guessing a password. Now the attacker is not guessing anything &mdash; they are just hammering <code>GET /tasks</code> with a junk cookie. There is no email in that request. The only thing left to count is the IP, and for pure volume that is the right key.</p>
+
+<h3>The library rule, both halves</h3>
+<table>
+<tr><th>Lesson 11</th><th>Lesson 12</th></tr>
+<tr><td>Rejected the library</td><td>Took the library</td></tr>
+<tr><td>Because its default key was wrong for a login</td><td>Because "100 per IP per minute" has no decisions left in it</td></tr>
+</table>
+
+<p class="takeaway">Reject a library when its defaults are wrong. Take it when the problem has no decisions left in it.</p>
+
+<h2>The code</h2>
+<pre><code>// src/app.ts
+await app.register(rateLimit, { global: false, max: 100, timeWindow: "1 minute" });
+
+// then YOUR hook, at app level, so it runs first of everything
+app.addHook("onRequest", app.rateLimit());</code></pre>
+
+<p><code>buildApp()</code> is <code>async</code> now, because <code>register</code> is.</p>
+
+<div class="word"><b>x-forwarded-for</b> &mdash; a header a proxy adds to say the real client IP. Believe it only when something <em>you control</em> writes it. <code>trustProxy</code> stays off until you deploy.</div>
+
+<h2>Two layers, and what each catches</h2>
+<table>
+<tr><th>Attack</th><th>IP floor</th><th>Email backoff</th></tr>
+<tr><td>One IP hammering the API</td><td class="yes">caught</td><td>&mdash;</td></tr>
+<tr><td>10,000 proxies, one email</td><td>&mdash;</td><td class="yes">caught</td></tr>
+<tr><td>10,000 proxies, 10,000 emails</td><td>&mdash;</td><td>&mdash;</td></tr>
+</table>
+<p>The third row is honest. Neither layer stops it; that needs MFA or a CAPTCHA.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="0">
+<p class="q">Why not just use the plugin's own <code>global: true</code>?</p>
+<button>It runs after each route's own hooks</button>
+<button>It counts every route in one bucket</button>
+<p class="why" hidden>Global mode attaches per route, and per-route hooks run after app-level ones. So <code>requireAuth</code>'s Postgres query would happen before the rate limit rejected the request &mdash; a check you never reach in time.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><code>npm test</code> &mdash; 70 tests.</li>
+<li><code>for i in $(seq 1 105); do curl -s -o /dev/null -w "%{http_code} " localhost:3000/health; done</code></li>
+<li>Still owed from this lesson: a body size limit. Ask me and we will do it in five minutes.</li>
+</ol>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://github.com/fastify/fastify-rate-limit#options">@fastify/rate-limit options</a> &mdash; look for <code>keyGenerator</code> and see lesson 11's argument for yourself.</p>
+<p><b>The long version:</b> <a href="./long/0012-the-floor-under-everything.html">the hook-order bug in detail</a>.</p>
+<p>Both counters are still in memory, per process. Two instances behind one nginx means two counters. We fix that with Redis in week 11&ndash;12.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0011-five-tries-then-wait.html">&larr; Back</a>
+<a href="./0013-same-site-is-not-same-origin.html">Next: same-site is not same-origin &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

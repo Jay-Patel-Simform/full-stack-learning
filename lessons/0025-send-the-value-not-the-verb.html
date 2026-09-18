@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 25 &mdash; Mutations from the front end</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.2rem 0 .8rem; }
+.two > div { border: 1px solid var(--rule); border-radius: 6px; padding: .9rem 1rem;
+  font-family: var(--mono); font-size: .72rem; line-height: 1.8; }
+.two h4 { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
+  text-transform: uppercase; margin: 0 0 .6rem; color: var(--muted); font-weight: 500; }
+.two .good { border-color: var(--ok); }
+.two .bad { border-color: var(--bad); border-style: dashed; }
+.two .end { margin: .7rem 0 0; font-family: var(--serif); font-size: .82rem; font-weight: 600; }
+.two .good .end { color: var(--ok); }
+.two .bad .end { color: var(--bad); }
+
+.flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: stretch;
+  gap: .5rem; margin: 1.2rem 0 .6rem; }
+.flow > div { border: 1px solid var(--rule); border-radius: 6px; padding: .8rem .9rem;
+  font-family: var(--mono); font-size: .72rem; line-height: 1.7; }
+.flow .arrow { border: none; display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 1rem; padding: 0; }
+.flow h4 { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
+  text-transform: uppercase; margin: 0 0 .5rem; color: var(--muted); font-weight: 500; }
+.flow .out { margin: .6rem 0 0; font-family: var(--serif); font-size: .82rem; font-weight: 600; }
+.flow .hit { border-color: var(--ok); } .flow .hit .out { color: var(--ok); }
+.flow .no { border-color: var(--bad); } .flow .no .out { color: var(--bad); }
+.file { color: var(--muted); font-size: .66rem; }
+
+table.urls { font-family: var(--mono); font-size: .74rem; }
+table.urls td:last-child { text-align: right; font-weight: 600; }
+.s200 { color: var(--ok); } .s400 { color: var(--accent); } .s403 { color: var(--bad); }
+.same { background: var(--code-bg); }
+
+.rule { font-size: .95rem; padding: .8rem 1rem; border-left: 3px solid var(--accent);
+  background: var(--code-bg); border-radius: 0 4px 4px 0; margin: 1.3rem 0 2.2rem; }
+@media (max-width: 44rem) { .two, .flow { grid-template-columns: 1fr; }
+  .flow .arrow { transform: rotate(90deg); } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 25 &middot; Week 10 &middot; Front end</p>
+<h1>Mutations from the front end</h1>
+<p class="lede">The list gets a checkbox. That is your first write from the page &mdash; and a write has two problems a read never had: what to say when the network is slow, and what to believe when the server says no.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>Send the value you want</strong> &mdash; <code>{ done: true }</code>. Never <code>/toggle</code>. A verb is a bet on what the server currently holds; a value is not, so sending it twice is harmless.</li>
+<li><strong>The reply is the new row.</strong> <code>PATCH</code> answers <code>200</code> with the whole task, so write it into the cache with <code>setQueryData</code> and pay nothing more.</li>
+<li><strong>Do not invalidate</strong> what you are already holding. That is a second round trip for data in hand.</li>
+<li><strong>The checkbox has no <code>useState</code>.</strong> Its <code>checked</code> comes from the cache. That is not tidiness &mdash; it is the rollback.</li>
+<li>A refused write leaves the cache untouched, so the box un-ticks itself. <strong>The cheapest rollback is having nothing to roll back.</strong></li>
+</ul>
+</div>
+
+<h2>The word pair</h2>
+<div class="word"><b>idempotent</b> &mdash; doing it twice lands in the same place as doing it once. <code>{ done: true }</code> is. <code>toggle</code> is the opposite: run it twice and you are back where you started.</div>
+<div class="word"><b>authoritative reply</b> &mdash; a response that <em>is</em> the new state, not a receipt saying a change happened. Worth a status code of its own, because it saves the next request.</div>
+<p class="takeaway">A double-click, a retry, a flaky tunnel &mdash; all of them send your request twice. Say something that survives being said twice.</p>
+
+<h2>Measured, on your API, just now</h2>
+<p>A throwaway account: Owner of team <b>443</b> (task <b>359</b>, &ldquo;Tick me&rdquo;), Viewer of team <b>444</b>. Same cookie throughout.</p>
+<pre><code>PATCH /teams/443/tasks/359   {"done":true}             200  {"id":359,"title":"Tick me","done":true}
+PATCH /teams/443/tasks/359   {"done":true}   again --> 200  {"id":359,"title":"Tick me","done":true}
+PATCH /teams/443/tasks/359   {}                        400  "send at least one field to change"
+PATCH /teams/443/tasks/359   {"done":"yes"}            400  "done: expected boolean, received string"
+PATCH /teams/443/tasks/359   {"done":false,"ownerId":1} 400 "Unrecognized key: \"ownerId\""
+PATCH /teams/444/tasks/359   {"done":true}             403  {"error":"forbidden"}
+PATCH /teams/443/tasks/999999 {"done":true}            404  {"error":"not found"}</code></pre>
+<p>Line 1 and line 2 are the same reply. That is the whole design: the second one changed nothing and still answered success, because <em>you sent a value, and the value was already there</em>. A <code>POST /tasks/359/toggle</code> would have un-ticked it.</p>
+<p>Lines 3 to 5 are the wall from <a href="./0017-the-key-you-did-not-name.html">lesson 17</a> still standing &mdash; an empty patch, a wrong type, and a field you were never allowed to set, all refused before the handler runs. Lines 6 and 7 are <a href="./0024-two-ways-to-say-no.html">lesson 24</a>'s two refusals, unchanged by the fact that this is now a write.</p>
+<div class="aside"><b>Why no CSRF token.</b> This <code>PATCH</code> is a write from a page, and nothing extra is needed: the browser sends <code>Sec-Fetch-Site: same-site</code>, a header page JavaScript is forbidden to set, and <code>allowWrite</code> checks it against <code>ALLOWED_ORIGINS</code> (<a href="./0016-who-asked-for-this-write.html">lesson 16</a>). The defence you wrote nine lessons ago is why today's lesson is short.</div>
+
+<h2>Where the checked state lives</h2>
+<p>There are two places to keep &ldquo;is this box ticked&rdquo;, and only one of them is honest.</p>
+<table>
+<tr><th></th><th><code>useState</code> in the row</th><th>The cache</th></tr>
+<tr><td>Ticking</td><td>set state, then send</td><td>send; the reply sets it</td></tr>
+<tr><td>Server says 403</td><td>you must remember to set it back</td><td>nothing was written, so nothing to undo</td></tr>
+<tr><td>Two tabs open</td><td>each tab keeps its own answer</td><td>one cache entry per team, per tab</td></tr>
+<tr><td>What it is</td><td>a copy of a server fact</td><td>the server fact</td></tr>
+</table>
+<p class="takeaway">The rollback bug is not written and then fixed. It is never written, because the value the box renders was never yours to change.</p>
+
+<h2>The code &mdash; type it yourself</h2>
+
+<h3>1. <code>web/src/features/tasks/tasks.ts</code> &mdash; add to the existing file</h3>
+<pre><code>import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+
+// …Task, tasksKey and useTasks stay exactly as they are…
+
+export function useSetTaskDone(teamId: number) {
+  const client = useQueryClient();
+
+  return useMutation({
+    // The VALUE we want, never a verb. Send it twice and the answer is the
+    // same both times, so a double-click and a retry are the same event.
+    mutationFn: async ({ id, done }: { id: number; done: boolean }) =&gt;
+      (await api.patch&lt;Task&gt;(`/teams/${teamId}/tasks/${id}`, { done })).data,
+
+    // The reply IS the new row, so put it in the cache and stop. Invalidating
+    // here would refetch the whole list to learn what we are already holding.
+    onSuccess: (task) =&gt;
+      client.setQueryData&lt;Task[]&gt;(tasksKey(teamId), (tasks) =&gt;
+        tasks?.map((t) =&gt; (t.id === task.id ? task : t)),
+      ),
+  });
+}</code></pre>
+<p>Note what is <em>not</em> here: no <code>onError</code>. A failed write never touched the cache, so there is nothing to put back.</p>
+
+<h3>2. <code>web/src/features/tasks/tasks-panel.tsx</code> &mdash; replace the list</h3>
+<pre><code>import { errorMessage } from "@/lib/api";
+import { useSetTaskDone, useTasks } from "@/features/tasks/tasks";
+
+export function TasksPanel({ teamId }: { teamId: number }) {
+  const { data: tasks, isPending, error } = useTasks(teamId);
+  const setDone = useSetTaskDone(teamId);
+
+  if (isPending) return &lt;p className="text-muted-foreground text-sm"&gt;Asking…&lt;/p&gt;;
+
+  if (error !== null)
+    return &lt;p className="text-destructive text-sm"&gt;{errorMessage(error, "Could not load tasks.")}&lt;/p&gt;;
+
+  if (tasks.length === 0)
+    return &lt;p className="text-muted-foreground text-sm"&gt;No tasks yet.&lt;/p&gt;;
+
+  return (
+    &lt;div className="grid gap-2"&gt;
+      &lt;ul className="grid gap-1"&gt;
+        {tasks.map((task) =&gt; (
+          &lt;li key={task.id} className="flex items-center gap-2 text-sm"&gt;
+            &lt;input
+              type="checkbox"
+              className="size-4 accent-primary"
+              checked={task.done}
+              // Only this row waits. variables is the payload in flight.
+              disabled={setDone.isPending &amp;&amp; setDone.variables.id === task.id}
+              // e.target.checked is the state the user ASKED for. Send that.
+              onChange={(e) =&gt; setDone.mutate({ id: task.id, done: e.target.checked })}
+            /&gt;
+            &lt;span className={task.done ? "text-muted-foreground line-through" : ""}&gt;
+              {task.title}
+            &lt;/span&gt;
+          &lt;/li&gt;
+        ))}
+      &lt;/ul&gt;
+
+      {/* Same rule as the read: say what the server said, and no more. */}
+      {setDone.error !== null &amp;&amp; (
+        &lt;p className="text-destructive text-sm"&gt;
+          {errorMessage(setDone.error, "Could not save that.")}
+        &lt;/p&gt;
+      )}
+    &lt;/div&gt;
+  );
+}</code></pre>
+<p>The checkbox is a plain <code>&lt;input&gt;</code>, not <code>npx shadcn add checkbox</code>. It is one line, it is keyboard-accessible for free, and a component you do not install is a component you never update.</p>
+<div class="aside"><b>Why the box moves at all.</b> <code>checked={task.done}</code> is a controlled input: the browser shows what React last rendered. Click it and the DOM box flips for an instant, React re-renders from the unchanged cache, and it flips straight back &mdash; until <code>setQueryData</code> lands and it stays. That flicker <em>is</em> the round trip, honestly displayed.</div>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="0">
+<p class="q">Why send <code>{ done: true }</code> instead of calling a toggle route?</p>
+<button>The same request twice is safe</button>
+<button>The same route is fewer lines</button>
+<p class="why" hidden>A toggle is a bet about the current value, so a retry, a double-click or a duplicated request lands you in the opposite place. A value says where you want to end up, and repeating it changes nothing. Measured above: the same PATCH twice, the same 200 twice.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">The PATCH answers 403. What puts the checkbox back?</p>
+<button>The onError handler undoes it</button>
+<button>Nothing did, so nothing must</button>
+<p class="why" hidden><code>checked</code> renders from the cached row, and only <code>onSuccess</code> writes to the cache. A refused write leaves the list exactly as it was, so the next render draws the old value. There is no rollback code because there is no forward code to undo.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why is <code>setQueryData</code> better here than <code>invalidateQueries</code>?</p>
+<button>Invalidate cannot be run in onSuccess</button>
+<button>The reply already carries that row</button>
+<p class="why" hidden>The server answered with the whole updated task. Invalidating asks for the entire list again to discover something you were handed a millisecond ago &mdash; one extra round trip, plus a loading state, per tick. Invalidate is for when the write changed things you were <em>not</em> told about.</p>
+</div>
+
+<h2>What this does NOT do</h2>
+<table>
+<tr><th>Gap</th><th>Why it is still open</th></tr>
+<tr><td>No optimistic update</td><td>Ticking waits for the server. <code>onMutate</code> + rollback is real work and only worth it once you feel the delay. Deliberate, not forgotten.</td></tr>
+<tr><td>Nothing creates a task</td><td>The list is edit-only; rows still come from the API by hand. A form is the next lesson.</td></tr>
+<tr><td>The error line is per panel</td><td>One failed write greys out one line for the whole list, not the row that failed. Fine at five rows.</td></tr>
+<tr><td>A Viewer sees checkboxes</td><td>They are drawn, they are clickable, they get a 403 &mdash; exactly <a href="./0023-the-button-you-can-still-press.html">lesson 23</a>. Hiding them with <code>can</code> is a two-line exercise.</td></tr>
+</table>
+
+<h2>Do this</h2>
+<ol>
+<li>Write the two pieces above. <code>cd web &amp;&amp; npx tsc -b &amp;&amp; npm run lint</code> before you look at the page.</li>
+<li>Two terminals: <code>cd server &amp;&amp; npm run dev</code>, <code>cd web &amp;&amp; npm run dev</code>. Sign in, <b>Show tasks</b> on the team you own, tick a box. The Network tab shows one <code>PATCH</code> and <b>no</b> follow-up <code>GET</code>.</li>
+<li><strong>Prove the reply is enough.</strong> Tick a box, then hard-refresh. The tick survived, and it was never re-fetched to be shown.</li>
+<li><strong>Watch the refusal.</strong> Tick a box on your <em>Viewer</em> team's panel (add a task to it with psql, or borrow one). The box snaps back and the red line says <code>forbidden</code>. You wrote no rollback.</li>
+<li><strong>Break it on purpose, one.</strong> Replace <code>onSuccess</code> with <code>onSuccess: () =&gt; client.invalidateQueries({ queryKey: tasksKey(teamId) })</code>. Same result on screen, two requests per tick in the Network tab. Put it back.</li>
+<li><strong>Break it on purpose, two.</strong> Give the row a <code>const [checked, setChecked] = useState(task.done)</code> and drive the box from that instead. Tick on the Viewer team: the box stays ticked, the server refused, and the screen now lies. Put it back.</li>
+<li><code>npm run log</code> in <code>server/</code>: every tick and every 403 is a row, with the method and route on it (<a href="./0019-the-row-that-outlives-the-user.html">lesson 19</a>).</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Two pictures. What a repeated request does to each kind of write, and which copy of &ldquo;ticked&rdquo; the screen is drawing.</p>
+
+<h2>1. Say it twice</h2>
+<p>Same user, same task, the request sent two times &mdash; a double-click, an axios retry, a flaky tunnel. Task starts at <code>done: false</code>.</p>
+<div class="two">
+<div class="good"><h4>value &mdash; PATCH { done: true }</h4>
+1st &rarr; <span class="s200">200</span> done: true<br>
+2nd &rarr; <span class="s200">200</span> done: true<br>
+<span class="file">(measured, team 443 / task 359)</span>
+<p class="end">Ends where you aimed.</p></div>
+<div class="bad"><h4>verb &mdash; POST /tasks/359/toggle</h4>
+1st &rarr; <span class="s200">200</span> done: true<br>
+2nd &rarr; <span class="s200">200</span> done: <b>false</b><br>
+<span class="file">(both replies say success)</span>
+<p class="end">Ends where it started.</p></div>
+</div>
+<p class="rule">A verb is a bet on what the server currently holds. A value is a statement about where you want to end up &mdash; and repeating a statement changes nothing. <b>Idempotence is not the server's property here. It is your sentence's.</b></p>
+
+<h2>2. The write, and what it costs</h2>
+<div class="flow">
+<div><h4>the click</h4>
+e.target.checked<br>
+&rarr; mutate({ id, done })<br>
+<span class="file">the value the user asked for</span>
+<p class="out">1 request</p></div>
+<div class="arrow">&rarr;</div>
+<div class="hit"><h4>the reply</h4>
+200<br>
+{id:359, title:"Tick me",<br>&nbsp;done:true}<br>
+<span class="file">the whole new row</span>
+<p class="out">already in hand</p></div>
+<div class="arrow">&rarr;</div>
+<div class="hit"><h4>onSuccess</h4>
+setQueryData(<br>&nbsp;&nbsp;tasksKey(teamId), &hellip;)<br>
+<span class="file">map the one row over</span>
+<p class="out">0 more requests</p></div>
+</div>
+<p>With <code>invalidateQueries</code> instead, the last box becomes <code>GET /teams/443/tasks</code> &mdash; a second round trip to be told what the second box already said.</p>
+
+<h2>3. Where <code>checked</code> lives, when the server says no</h2>
+<p>Tick a box on a team where your role is Viewer. The <code>PATCH</code> answers <span class="s403">403</span>. What happens next depends only on which value the input is drawing.</p>
+<div class="two">
+<div class="good"><h4>checked = {task.done}</h4>
+cache: done <b>false</b><br>
+PATCH &rarr; <span class="s403">403</span><br>
+onSuccess never runs<br>
+cache: done <b>false</b><br>
+re-render &rarr; box empty
+<p class="end">Rollback code: none.</p></div>
+<div class="bad"><h4>checked = {useState}</h4>
+state: <b>true</b> (set on click)<br>
+PATCH &rarr; <span class="s403">403</span><br>
+onError must setChecked(false)<br>
+forget it &rarr; state stays <b>true</b><br>
+re-render &rarr; box ticked
+<p class="end">Screen lies. Server refused.</p></div>
+</div>
+<p class="rule">The bug on the right is not a bug you fix. It is a bug you avoid having, by never keeping a second copy of a fact the server owns.</p>
+
+<h2>4. The wall is still there</h2>
+<p>Every one of these was refused before the handler ran &mdash; measured on your API today:</p>
+<table class="urls">
+<tr><th>PATCH /teams/&hellip;/tasks/&hellip;</th><th>why</th><th></th></tr>
+<tr class="same"><td>{"done":true}</td><td>owner, first send</td><td class="s200">200</td></tr>
+<tr class="same"><td>{"done":true}</td><td>owner, same send again</td><td class="s200">200</td></tr>
+<tr><td>{}</td><td>an empty patch is not success</td><td class="s400">400</td></tr>
+<tr><td>{"done":"yes"}</td><td>a string is not a boolean</td><td class="s400">400</td></tr>
+<tr><td>{"done":false,"ownerId":1}</td><td>a key you may not set</td><td class="s400">400</td></tr>
+<tr><td>team 444 (viewer)</td><td>the gate, before the row</td><td class="s403">403</td></tr>
+</table>
+<p>The two shaded rows are the point of the whole lesson: <b>identical requests, identical replies, one change.</b></p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://tanstack.com/query/latest/docs/framework/react/guides/updates-from-mutation-responses">TanStack Query &mdash; Updates from Mutation Responses</a>. Ten lines of prose, and it is precisely today's <code>setQueryData</code>. Five minutes.</p>
+<p><b>Also:</b> <a href="https://developer.mozilla.org/en-US/docs/Glossary/Idempotent">MDN &mdash; Idempotent</a>, then the two paragraphs on <code>PATCH</code>. Note that <code>PATCH</code> is <em>not</em> idempotent in general &mdash; it is idempotent when <em>you</em> make it so, which is the choice you made today.</p>
+<p><b>Reference card:</b> <a href="../reference/react-query-rules.html">React Query, the rules so far</a> &mdash; new, and it collects lessons 22 to 25 onto one page.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/reactjs/">r/reactjs</a> &mdash; ask how people decide between <code>setQueryData</code> and invalidating. Watch for the ones who always invalidate; ask them what their write reply contains.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0024-two-ways-to-say-no.html">&larr; Back</a>
+<a href="../reference/the-whole-arc.html">The whole arc, one page &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

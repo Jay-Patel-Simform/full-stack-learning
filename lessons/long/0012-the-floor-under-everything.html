@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 12 — The Floor Under Everything</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 12 &middot; Week 7&ndash;8 &middot; API security &mdash; second one</p>
+<h1>The floor under everything</h1>
+<p class="lede"><a href="../0011-five-tries-then-wait.html">Lesson 11</a> put a wall in front of one route. The other twenty-odd routes will still answer you as fast as your laptop can ask. Today you add the second layer &mdash; and you break an eleven-lesson streak on purpose.</p>
+
+<div class="aside">
+<p><strong>Checked before we started.</strong> Everything from lesson 11 is in the repo and working: <code>src/auth/throttle.ts</code>, the three calls in <code>src/routes/auth.route.ts</code>, the <code>ponytail:</code> note, and <code>npm test</code> at 66 pass. Nothing was missing. It is now 70.</p>
+</div>
+
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>Lesson 11 stopped <em>guessing</em>. This one stops <em>noise</em>.</li>
+<li>A junk cookie has no email in it, so the only key left is the IP address. Here that is fine.</li>
+<li>Install <code>@fastify/rate-limit</code> &mdash; first new dependency in eleven lessons. The job has no decisions left in it.</li>
+<li>Register it with <code>global: false</code>, then add your own app-level hook, so the cheap check runs <em>before</em> the session query.</li>
+</ul>
+</div>
+
+<h2>The hole you left</h2>
+<p>Login is guarded. Now count what is not. Every other route runs behind <code>requireAuth</code>, and <code>requireAuth</code> does a database lookup on the session cookie before it can say no. So a stranger with a junk cookie can do this:</p>
+<pre><code>while true; do curl -s localhost:3000/teams/1/tasks -H 'cookie: sid=junk'; done</code></pre>
+<p>Each request is one Postgres round trip that you pay for and they do not. Lesson 11's counter cannot help: it is keyed on an email address, and there is no email address in that request. Nothing here is being <em>guessed</em>. It is just noise, and noise is its own problem.</p>
+<blockquote>Lesson 11 was about guessing. This one is about volume. Different attack, different key, different layer.</blockquote>
+
+<h2>What do you count when there is no account?</h2>
+<p>Use the same question that worked last time: <strong>what does the caller have only one of?</strong> A stuffing kit has one email per victim, so login counts the email. But a request with a junk cookie has no account attached at all. Work down what is left in the request &mdash; and the honest answer is the connection it arrived on.</p>
+<p>So this layer <em>is</em> per-IP. The key that was wrong for login is the only key available here.</p>
+
+<div class="quiz" data-answer="1">
+<p class="q">Per-IP counting failed in lesson 11. Why is it acceptable now?</p>
+<button>Because a global limit is much larger than a login limit is</button>
+<button>Because the goal is volume, which one address cannot fake away</button>
+<p class="why" hidden>Right. A proxy network beat the per-IP login counter because the attacker only needed <em>two</em> requests per address. Flooding is the opposite shape: the whole point is many requests, so spreading them thin defeats the flood, not the counter. Rotating 5,000 proxies gets a rude client 500,000 requests a minute &mdash; but now it is a paid, coordinated botnet, not a laptop.</p>
+</div>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  REQ["Any request"] --> L2["Layer 2: global limit<br/>key = request.ip, 100/min<br/>catches volume"]
+  L2 -- "over budget" --> R429["429"]
+  L2 --> AUTH["requireAuth<br/>Postgres lookup"]
+  LOGIN["POST /auth/login"] --> L1["Layer 1: login counter<br/>key = email, 5 free tries<br/>catches guessing"]
+  L1 -- "waiting" --> R429b["429"]
+  L1 --> HASH["scrypt, 252 ms"]
+</pre>
+<figcaption>Neither layer covers the other. Stuffing spreads thin, so layer 2 never sees it; a junk cookie has no email, so layer 1 never sees it. That is defence in depth.</figcaption>
+</figure>
+
+<h2>Take the library this time</h2>
+<p>Eleven lessons, zero new dependencies. This one installs <code>@fastify/rate-limit</code>. Here is the reasoning, because &ldquo;write it yourself&rdquo; was right ten times and is wrong now.</p>
+<p>You already own three of the functions. You could key <code>throttle.ts</code> on <code>request.ip</code> and reuse it in a hook. But read what the two jobs actually need:</p>
+<div class="scroll">
+<table>
+<tr><th></th><th>login counter (yours)</th><th>global limit (the plugin)</th></tr>
+<tr><td>counts</td><td>failures only</td><td>every request</td></tr>
+<tr><td>forgets</td><td>on a correct password</td><td>on a clock, every 60s</td></tr>
+<tr><td>answer to more</td><td>a wait that doubles</td><td>a flat no until the window ends</td></tr>
+<tr><td>tells the client</td><td>nothing until blocked</td><td>the budget on every reply</td></tr>
+</table>
+</div>
+<p>Only the shape of the storage is shared. Everything that <em>decides</em> is different, so reuse would mean a second set of options threaded through the same file &mdash; a config flag for a value that never changes, on both sides. And the last row is real work: sliding windows, three headers, an eviction policy, <code>allowList</code>, a Redis mode for later. That is a maintained 292 KB package doing a job with no interesting decisions left in it.</p>
+<blockquote>Reject a library when its <em>defaults</em> are wrong for your problem. Take it when the problem has no decisions left in it. Lesson 11 was the first. This is the second.</blockquote>
+<pre><code>cd server &amp;&amp; npm i @fastify/rate-limit
+# @fastify/rate-limit@11.2.0, 292 KB, 4 small deps</code></pre>
+
+<h2>The wiring, and the one line that is not obvious</h2>
+<p>In <code>src/app.ts</code>, before the routes:</p>
+<pre><code>await app.register(rateLimit, {
+  global: false,
+  max: 100,
+  timeWindow: "1 minute",
+  cache: 5_000,
+});
+app.addHook("onRequest", app.rateLimit());</code></pre>
+<p><code>global: false</code> followed by a hook that turns it back on globally looks like nonsense. It is the whole reason this lesson is not two lines long.</p>
+<p>The plugin's own global mode attaches its check <em>to each route</em>, appended after that route's hooks. Read the plugin's source and you can see it happen:</p>
+<pre><code>// node_modules/@fastify/rate-limit/index.js
+} else if (typeof routeOptions[hook] === 'function') {
+  routeOptions[hook] = [routeOptions[hook], hookHandler]   // yours first
+}</code></pre>
+<p>So on <code>GET /auth/me</code>, which sets <code>onRequest: requireAuth</code>, the order would be: check the session in Postgres, answer 401, <em>then</em> count. A blocked request would still cost you a query. I found this by writing a test that expected 429 and getting 401.</p>
+<p>An app-wide <code>addHook</code> is different: Fastify runs every app-level <code>onRequest</code> hook before any route's own. So the counter goes first, and a rejected request costs a cache lookup. That is lesson 11's rule again &mdash; <strong>the cheap check goes in front of the expensive work</strong> &mdash; except this time the expensive work is a query, not a hash.</p>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why does hook order matter more here than the limit number does?</p>
+<button>Because a rejected request must cost you less than it costs them</button>
+<button>Because Fastify cannot run two onRequest hooks on the same route</button>
+<p class="why" hidden>Right, and this is the third time that idea has decided where code goes: before the scrypt hash in lesson 11, before the session query here. A limiter that only runs after the expensive part still shrinks your bill &mdash; but it turns a flood into a slow flood instead of a cheap no.</p>
+</div>
+
+<p>One consequence to notice: <code>buildApp()</code> is now <code>async</code>, because <code>app.rateLimit</code> does not exist until the plugin has finished loading. Every caller grew an <code>await</code> &mdash; six lines, all of them <code>const app = await buildApp();</code>. Test files can do that at the top level; ESM allows it.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  subgraph BAD["global: true &mdash; plugin attaches per route"]
+    B1["GET /auth/me"] --> B2["requireAuth<br/>Postgres query"] --> B3["401"]
+    B3 -.-> B4["limiter counts<br/>too late, you paid"]
+  end
+  subgraph GOOD["global: false + app.addHook"]
+    G1["GET /auth/me"] --> G2["app-level limiter<br/>cache lookup"] --> G3["429<br/>no query at all"]
+  end
+</pre>
+<figcaption>Fastify runs app-level <code>onRequest</code> hooks before any route's own. That one line is the difference between a cheap no and a slow flood.</figcaption>
+</figure>
+
+<h2>Two layers, and what each one catches</h2>
+<div class="scroll">
+<table>
+<tr><th>attack</th><th>login counter</th><th>global limit</th></tr>
+<tr><td>Guess one user's password 1000 times</td><td class="yes">stops it at 5</td><td>no &mdash; 1000 is under 100/min for long</td></tr>
+<tr><td>Stuffing: 40k pairs over 5k proxies</td><td class="yes">stops it, one email each</td><td>no &mdash; 8 requests per address</td></tr>
+<tr><td>Hammer any authenticated route</td><td>no &mdash; no email in the request</td><td class="yes">stops it at 100/min</td></tr>
+<tr><td>Scrape every task in the API</td><td>no</td><td class="yes">slows it to 100/min</td></tr>
+<tr><td>A bug in your own front end, looping</td><td>no</td><td class="yes">and the headers tell it why</td></tr>
+</table>
+</div>
+<p>Neither row covers the other. That is what &ldquo;defence in depth&rdquo; means in practice, and it is why OWASP's <a href="https://cheatsheetseries.owasp.org/cheatsheets/Denial_of_Service_Cheat_Sheet.html">Denial of Service cheat sheet</a> asks for limits at more than one level.</p>
+
+<h2>What it does not fix</h2>
+<p>Same honest table as last lesson. A defence you cannot describe the edge of is a defence you will over-trust.</p>
+<div class="scroll">
+<table>
+<tr><th>hole</th><th>why it is still open</th><th>when you close it</th></tr>
+<tr><td>Counters die on restart, and are per-process</td><td>An in-process cache, exactly like <code>throttle.ts</code>.</td><td>Week 11&ndash;12. The plugin takes a <code>redis</code> option.</td></tr>
+<tr><td>Behind a proxy, every request looks like one IP</td><td><code>request.ip</code> is the socket. A load balancer is the socket.</td><td>At deploy: <code>trustProxy</code>, and only then.</td></tr>
+<tr><td>One huge request body</td><td>100 requests a minute can still be 100 &times; 50 MB.</td><td>Homework. Fastify has a one-line answer.</td></tr>
+<tr><td>One expensive request</td><td>An unpaginated list of every task counts as 1.</td><td>Week 13&ndash;14, with pagination.</td></tr>
+<tr><td>A real botnet</td><td>10,000 addresses, 100 each, all legal.</td><td>Not at this layer. That is Cloudflare's job.</td></tr>
+</table>
+</div>
+<p><code>trustProxy</code> is worth one more sentence, because getting it wrong is worse than not having it. It tells Fastify to believe the <code>x-forwarded-for</code> header. If you turn that on while the API is reachable directly, anyone can send a fake header and get a fresh budget per made-up address. <strong>Believe a header only when something you control is the one writing it.</strong></p>
+
+<h2>The tests</h2>
+<p><code>npm test</code> is now <strong>70</strong>, up from 66. New file, <code>src/routes/rate-limit.test.ts</code> &mdash; and this one is all enforcement, no decision tests. The counting logic belongs to the plugin, so what is worth testing is your wiring:</p>
+<ul>
+<li>The 101st request from one address is 429, and carries <code>retry-after</code>.</li>
+<li>One address running out does not block another. (This one matters: get the key wrong and your security feature is a global outage button.)</li>
+<li>The count is shared across routes &mdash; 100 hits on <code>/health</code>, then <code>/auth/me</code> gets 429, not 401. That is the hook-order bug, written down so it cannot come back.</li>
+<li>A normal reply says how much budget is left.</li>
+</ul>
+<p><code>app.inject()</code> takes a <code>remoteAddress</code>, which is what makes the per-key test possible without a network.</p>
+<div class="aside">
+<p><strong>Gotcha that cost me ten minutes.</strong> <code>npm test</code> runs <code>tsx --test src/**/*.test.ts</code>, and npm runs scripts in <code>sh</code>, not <code>zsh</code>. In <code>sh</code>, <code>**</code> is just <code>*</code> &mdash; so the pattern means <em>exactly one</em> directory deep. A test file at <code>src/anything.test.ts</code> is silently skipped. Mine was. The test count not moving is the only warning you get.</p>
+</div>
+
+<h2>Read this</h2>
+<p>Primary source: <a href="https://cheatsheetseries.owasp.org/cheatsheets/Denial_of_Service_Cheat_Sheet.html">OWASP &mdash; Denial of Service Cheat Sheet</a>. Read &ldquo;Input validation&rdquo; and &ldquo;Access control&rdquo;. It is where the body-size and multi-layer advice comes from.</p>
+<p>Then the plugin, properly this time: <a href="https://github.com/fastify/fastify-rate-limit">@fastify/rate-limit</a>. Read <code>allowList</code>, <code>ban</code>, and <code>continueExceeding</code>. Three options, three design decisions someone already made for you &mdash; decide whether you agree.</p>
+<p>And <a href="https://fastify.dev/docs/latest/Reference/Hooks/">Fastify &mdash; Hooks</a> once more, for the sentence that explains today's one weird line: app-level hooks run before route-level ones.</p>
+
+<h2>Do this before lesson 13</h2>
+<ol>
+<li>Run <code>cd server &amp;&amp; npm test</code>. 70 pass.</li>
+<li>See it. Start the server, then:
+<pre><code>for i in $(seq 1 101); do
+  curl -s -o /dev/null -w "%{http_code} " localhost:3000/health
+done; echo
+curl -si localhost:3000/health | head -5</code></pre>
+You want a hundred 200s, then 429, then the four headers. Wait 60 seconds and it heals itself.</li>
+<li>Break it on purpose, the useful way. In <code>src/app.ts</code>, swap the two lines for the plugin's own global mode:
+<pre><code>app.register(rateLimit, { max: 100, timeWindow: "1 minute" });</code></pre>
+Run the tests. One fails, and the failure is <code>401 !== 429</code>. That is the hook-order bug reproducing on demand. Put it back.</li>
+<li>Break the key. Change the hook to <code>app.rateLimit({ keyGenerator: () =&gt; "everyone" })</code>. A different test fails. Read its name out loud &mdash; that is what a wrong key does to your users.</li>
+<li>Close the body-size hole yourself. It is one option on <code>Fastify({ ... })</code> in <code>src/app.ts</code>; find it in the <a href="https://fastify.dev/docs/latest/Reference/Server/">server options docs</a> and pick a number for a task tracker. Then prove it with <code>curl -X POST</code> and a body made by <code>head -c 2000000 /dev/urandom | base64</code>. Tell me the status code you got and whether it surprised you.</li>
+</ol>
+<p>Then two questions to bring me:</p>
+<ol>
+<li>You still owe me lesson 11's answer &mdash; where the login counter lives after a restart. Now there are <em>two</em> in-memory counters with the same problem, and the plugin already ships the fix for its own. So: does moving both to Redis in week 11&ndash;12 mean the login counter should also become the plugin, keyed on email? Argue it either way, but say what you would <em>lose</em>. There is something in <code>throttle.ts</code> the plugin cannot express.</li>
+<li>Opinion, for the community: 100 requests a minute is a number I made up. Find out how anyone chooses one. Ask on <a href="https://www.reddit.com/r/node/">r/node</a> or <a href="https://security.stackexchange.com/">Security StackExchange</a> what people actually run in production, and whether they limit per-route or per-app. Bring back the most surprising answer.</li>
+</ol>
+
+<div class="aside">
+<p>Stuck, or something felt hand-wavy? Ask me. I am your teacher here &mdash; say what confused you and I will re-teach it another way. The bit worth re-reading is <em>why the same plugin was wrong in lesson 11 and right in lesson 12</em>. If you can say that in one sentence, you have this lesson.</p>
+</div>
+
+<hr>
+<p class="nav">Back: <a href="../0011-five-tries-then-wait.html">Lesson 11 &mdash; Five tries, then wait</a> &middot; Keep for reference: <a href="../../reference/api-security-basics.html">API security basics</a> &middot; <a href="../../reference/sessions-and-cookies.html">Sessions &amp; cookies</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a> &middot; Sources: <a href="../../RESOURCES.md">RESOURCES.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

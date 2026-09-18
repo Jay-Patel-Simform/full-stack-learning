@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Whole Arc — Every Rule, One Page</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<p class="kicker">Reference &middot; Secure Full-Stack APIs &middot; lessons 1&ndash;18</p>
+<h1>The whole arc</h1>
+<p class="lede">Every rule you have earned, in the order you earned it. Made to be printed and stuck on a wall. If a line means nothing to you, that lesson is the one to re-read.</p>
+
+<h2>The shape of a request</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  R["request arrives"] --> RL{"1. IP floor<br/>100/min &mdash; L12"}
+  RL --> CS{"2. CSRF<br/>Sec-Fetch-Site &mdash; L16"}
+  CS --> V{"3. body schema<br/>strict &mdash; L2, L17"}
+  V --> A{"4. requireAuth<br/>who? 401 &mdash; L6"}
+  A --> P{"5. can(role, action, resource)<br/>may you? 403 &mdash; L7, 8, 9"}
+  P --> H["6. handler<br/>no checks inside"]
+  H --> S["7. store<br/>where: { teamId } scopes &mdash; L10"]
+  S --> O["8. reply schema<br/>+ Cache-Control &mdash; L2, L15"]
+  O --> AU["9. onResponse<br/>audit row &mdash; L19"]
+  A -.->|401| AU
+  P -.->|403| AU
+</pre>
+<figcaption>Nine layers, in order, and every one of them came from a lesson. Cheap checks first: a rejected request should cost you a Map lookup, never a Postgres query or a 252 ms hash. Layer 9 is the only one downstream of <em>every</em> refusal, which is why the audit row is written there and nowhere else.</figcaption>
+</figure>
+
+<h2>Rules that keep coming back</h2>
+<table>
+<tr><th>Rule</th><th>First seen</th><th>Used again in</th></tr>
+<tr><td>Make the safe thing the default, the unsafe thing deliberate.</td><td>L2</td><td>3, 5, 6, 7, 9</td></tr>
+<tr><td>One reply for two different noes.</td><td>L6</td><td>8, 11, 18</td></tr>
+<tr><td>Count the nouns in the rule, then count what your code can hold.</td><td>L9</td><td>10, 11, 17</td></tr>
+<tr><td>A check you must remember to write is a check that will be missing.</td><td>L7</td><td>9, 18, 19, 22</td></tr>
+<tr><td>Cheap check first &mdash; but only if the cheap check leaks less.</td><td>L11</td><td>12, 18</td></tr>
+<tr><td>Access control you never reach is access control you do not have.</td><td>L12</td><td>15, 16</td></tr>
+<tr><td>A store keyed on caller input is a store the caller can fill. Cap it as you create it.</td><td>L11</td><td>17, 19</td></tr>
+<tr><td>Name what may go out. A thing you never named cannot escape.</td><td>L3</td><td>30, 34</td></tr>
+<tr><td>The dangerous bug has no failing state. Find it by grep or by measuring, then pin it with a test.</td><td>L29</td><td>32, 33, 34, 35</td></tr>
+<tr><td>A test you have never seen fail is not a test. Break the code, watch it go red, put it back.</td><td>L20</td><td>34, 35</td></tr>
+</table>
+
+<h2>Every lesson's one sentence</h2>
+<table>
+<tr><th>#</th><th>The rule</th></tr>
+<tr><td>01</td><td>The front end validates to be kind to the user. The back end validates to stay alive.</td></tr>
+<tr><td>02</td><td>Make the safe thing the default thing. Then forgetting is not possible.</td></tr>
+<tr><td>03</td><td>A boundary earns its keep the day the thing behind it is replaced.</td></tr>
+<tr><td>04</td><td>Store the pointer, not the copy. Then filter by the pointer, every query.</td></tr>
+<tr><td>05</td><td>Store the recipe next to the shreds, so you can turn the dial up later.</td></tr>
+<tr><td>06</td><td>Hand out a ticket, keep the facts. Then logging someone out is one DELETE.</td></tr>
+<tr><td>07</td><td>Roles are data. Permissions are code. Deny by default.</td></tr>
+<tr><td>08</td><td>Routes ask for a job, never for a badge.</td></tr>
+<tr><td>09</td><td>Count the nouns in the rule you want. Then count the parameters you have.</td></tr>
+<tr><td>10</td><td>A permission needs a scope, so the scope goes in the URL.</td></tr>
+<tr><td>11</td><td>Rate-limit the thing the attacker has only ONE of.</td></tr>
+<tr><td>12</td><td>Reject a library when its defaults are wrong. Take it when no decisions are left.</td></tr>
+<tr><td>13</td><td>CORS is advice to a browser. It stops nobody with curl.</td></tr>
+<tr><td>14</td><td>The best answer to "which cross-origin setting?" is to stop being cross-origin.</td></tr>
+<tr><td>15</td><td>A library can be right about the facts and wrong about your situation.</td></tr>
+<tr><td>16</td><td>Reading is CORS, writing is CSRF. Never the same defence.</td></tr>
+<tr><td>17</td><td>Strip is safe. Reject is safe and honest.</td></tr>
+<tr><td>18</td><td>Hide it, or charge for it. Those are the only two moves against an oracle.</td></tr>
+<tr><td>19</td><td>An audit row that vanishes with the person it accuses is not evidence.</td></tr>
+<tr><td>20</td><td>A value can travel beside the query. An identifier has to be part of it.</td></tr>
+<tr><td>21</td><td>A 4xx is the caller's fault, so name the field. A 5xx is yours, so tell the log.</td></tr>
+<tr><td>22</td><td>"Logged in" is not a fact the page holds. It is a question the page asks.</td></tr>
+<tr><td>23</td><td>Hiding a button is a hint. The server is the gate. Ship both, trust one.</td></tr>
+<tr><td>24</td><td>403 is about you and runs first. 404 is about the row and is deliberately vague.</td></tr>
+<tr><td>25</td><td>Send the value you want, never the verb. Then a retry and a double-click are the same event.</td></tr>
+<tr><td>26</td><td>A create is not idempotent. When you cannot make it safe to repeat, make it hard to repeat.</td></tr>
+<tr><td>27</td><td>A default is where a typo hides. The four variables that decide safety get none.</td></tr>
+<tr><td>28</td><td>A 204 carries no body, so the id you filter by is the id you sent.</td></tr>
+<tr><td>29</td><td>One fact, one reader. A snapshot and a live read can disagree, and dead code has no failing state.</td></tr>
+<tr><td>30</td><td>A list with no limit lets the caller pick your memory. Count to a place, or look one up.</td></tr>
+<tr><td>31</td><td>Paging changes the shape of the cache, and a declared type is believed rather than checked.</td></tr>
+<tr><td>32</td><td>Testability is a property of the import graph, not of the function. And the cache keeps what did not change.</td></tr>
+<tr><td>33</td><td>The list is a question, so the filter belongs in the key. And a write that changes membership can no longer be patched in by hand.</td></tr>
+<tr><td>34</td><td>The log is a second wire out of the app and nothing guards it. Log the fields you chose, never a whole object; redaction is the net under that rule, not the rule.</td></tr>
+<tr><td>35</td><td>The shell expands the glob before the runner sees it, so a correct test file never ran and the suite stayed green. A pass reports only on the files the runner was handed.</td></tr>
+</table>
+
+<h2>Words you now own</h2>
+<table>
+<tr><th>Word</th><th>Plain meaning</th><th>L</th></tr>
+<tr><td>schema</td><td>the shape you want, written down</td><td>3</td></tr>
+<tr><td>migration</td><td>the change from old shape to new, saved as SQL in git</td><td>3</td></tr>
+<tr><td>foreign key</td><td>a column holding another row's id, enforced by Postgres</td><td>4</td></tr>
+<tr><td>IDOR</td><td>handing over a record because you forgot to filter by owner</td><td>4</td></tr>
+<tr><td>salt</td><td>random bytes per user, so equal passwords hash differently</td><td>5</td></tr>
+<tr><td>session</td><td>a random ticket in a cookie; the facts stay in your table</td><td>6</td></tr>
+<tr><td>revocation</td><td>ending a login right now, from the server side</td><td>6</td></tr>
+<tr><td>401 vs 403</td><td>I do not know you / I know you and the answer is still no</td><td>7</td></tr>
+<tr><td>enum</td><td>a fixed list of allowed values, enforced by the database</td><td>8</td></tr>
+<tr><td>subject / operation / object</td><td>the three nouns in every access rule</td><td>9</td></tr>
+<tr><td>expand, backfill, contract</td><td>the three safe steps to add a required column to a live table</td><td>10</td></tr>
+<tr><td>permission vs scoping</td><td>deciding who may / choosing which rows. Identical-looking queries</td><td>10</td></tr>
+<tr><td>credential stuffing</td><td>one stolen email, thousands of leaked passwords</td><td>11</td></tr>
+<tr><td>password spraying</td><td>one common password, thousands of emails</td><td>11</td></tr>
+<tr><td>exponential backoff</td><td>doubling the wait &mdash; never a lockout, which is a DoS on your users</td><td>11</td></tr>
+<tr><td>same-origin</td><td>scheme + host + port all equal. Used by CORS</td><td>13</td></tr>
+<tr><td>same-site</td><td>scheme + registrable domain. Used by cookie SameSite</td><td>13</td></tr>
+<tr><td>preflight</td><td>the OPTIONS request a browser sends before an unsafe cross-origin call</td><td>13</td></tr>
+<tr><td>HSTS</td><td>"HTTPS only, for a year". Production only &mdash; it pins localhost too</td><td>15</td></tr>
+<tr><td>CSRF</td><td>your browser made a write the attacker wanted; nobody read the reply</td><td>16</td></tr>
+<tr><td>mass assignment</td><td>a key you never named, passed to the database anyway</td><td>17</td></tr>
+<tr><td>user enumeration</td><td>any reply that tells a stranger whether an account exists</td><td>18</td></tr>
+<tr><td>request log vs audit log</td><td>a text stream about the server / a table about a person</td><td>19</td></tr>
+<tr><td>onResponse</td><td>the hook that runs after the reply is already sent, so its work is free to the caller</td><td>19</td></tr>
+<tr><td>a fact vs a question</td><td>state the page holds / state only the server can answer, and can re-answer</td><td>22</td></tr>
+<tr><td>idempotent</td><td>doing it twice leaves the world exactly as doing it once</td><td>26</td></tr>
+<tr><td>snapshot vs live read</td><td>a value copied once / a value re-read every time. They can drift apart</td><td>29</td></tr>
+<tr><td>offset vs cursor</td><td>count past 4,980 rows / jump straight to the row after id 4980</td><td>30</td></tr>
+<tr><td>overfetching</td><td>loading data the reply throws away. Costs a query and fills memory</td><td>30</td></tr>
+<tr><td>N+1</td><td>one query for the list, then one more per row</td><td>30</td></tr>
+<tr><td>compound index</td><td>one index on two columns, storing the filter and the sort order together</td><td>30</td></tr>
+<tr><td>query vs infinite query</td><td>one key, one answer / one key, a growing ordered list of answers</td><td>31</td></tr>
+<tr><td>inferred vs declared type</td><td>a type TypeScript worked out and checks / a type you wrote in <code>&lt;&gt;</code> and it believes</td><td>31</td></tr>
+<tr><td>pageParam</td><td>the value <code>queryFn</code> gets to fetch one page. Here, the cursor</td><td>31</td></tr>
+<tr><td>runtime vs type-only import</td><td>the file is really loaded / only its shape was wanted, and the line is erased</td><td>32</td></tr>
+<tr><td>import graph</td><td>everything a file pulls in, and everything those pull in, all the way down</td><td>32</td></tr>
+<tr><td>structural sharing</td><td>the cache keeps the old object wherever your new value is deeply equal</td><td>32</td></tr>
+<tr><td>key prefix vs whole key</td><td>matches a family of entries / names one exact entry</td><td>33</td></tr>
+<tr><td>contents vs membership</td><td>what the row now says / whether it still answers this list's question</td><td>33</td></tr>
+<tr><td>coercion vs parsing</td><td>convert and hope / decide, and be able to refuse</td><td>33</td></tr>
+<tr><td>allowlist vs denylist</td><td>name what may pass / name what may not, and hope you listed it all</td><td>34</td></tr>
+<tr><td>glob / shell expansion</td><td>a pattern that matches file names / the shell swapping it for the names before your program starts</td><td>35</td></tr>
+<tr><td>globstar</td><td><code>**</code> as &ldquo;any depth&rdquo; &mdash; on in zsh, off in sh, where it is one level</td><td>35</td></tr>
+</table>
+
+<h2>Traps that bit you personally</h2>
+<ul>
+<li><code>node:test</code> runs test files in <strong>parallel processes</strong>. Two files keying fixtures on <code>Date.now()</code> delete each other's rows. (L10)</li>
+<li><code>@fastify/rate-limit</code>'s <code>global: true</code> attaches <em>after</em> a route's own hooks, so a blocked request still pays for <code>requireAuth</code>. (L12)</li>
+<li><code>origin: true</code> plus <code>credentials: true</code> reflects any origin and leaks logged-in data. (L13)</li>
+<li>HSTS from localhost pins your own browser for a year. Manual fix, per browser. (L15)</li>
+<li><code>setQueryData&lt;Task[]&gt;</code> on a paged cache <strong>compiles clean and throws</strong> &mdash; <code>tasks?.map is not a function</code>. The component's errors were caught, the three cache writes were not. (L31)</li>
+<li>Mutating <code>data.pages[0].items</code> updates the cache and re-renders <strong>nothing</strong>. React compares references. (L31)</li>
+<li>zod chains run <strong>left to right</strong>: <code>z.email().trim()</code> validates the untrimmed string. (L18)</li>
+<li>Half a normalisation is worse than none &mdash; a lower-cased throttle key with a case-sensitive lookup. (L18)</li>
+<li><code>request.params</code> holds raw <strong>strings</strong> until zod coerces them &mdash; so a 401 audit row records <code>"249"</code>, not <code>249</code>. (L19)</li>
+<li>Every model cascades from <code>User</code> except <code>AuditLog</code>, on purpose. A cascade there deletes the evidence. (L19)</li>
+<li>A cross-origin <code>fetch</code> sends <strong>no cookie</strong> without <code>credentials: "include"</code>. Same URL, same tab: 401 vs 200. (L22)</li>
+<li><code>document.cookie</code> is <code>""</code> while signed in &mdash; <code>HttpOnly</code>, by your own choice in L6. There is no client-side answer. (L22)</li>
+<li>A React Query <code>staleTime</code> on the session query is how long a destroyed session still looks signed in. Auth needs <code>staleTime: 0</code>. (L22)</li>
+<li>A test cannot import <code>tasks.ts</code>: <code>ERR_MODULE_NOT_FOUND: Cannot find package '@/lib'</code>. The <code>@/</code> alias is a <strong>Vite</strong> rule, copied into <code>tsconfig</code>, and Node reads neither. (L32)</li>
+<li><code>setQueryData</code> after an edit that changes nothing gives back <strong>the same object</strong>. Assert on contents, not identity, or your first test fails against correct code. (L32)</li>
+<li>A filter left out of the query key means <strong>0 requests</strong> when the user changes it. No error, no wrong data &mdash; the screen just does not react. (L33)</li>
+<li>A cursor from one filter, sent with another, is not an error: measured <strong>1 row where 4 belong</strong>. A cursor is a bookmark in one list. (L33)</li>
+<li><code>z.coerce.boolean().parse("false")</code> is <strong><code>true</code></strong>. It is <code>Boolean()</code>, and a conversion that can never fail is not a check. Use <code>z.stringbool()</code>. (L33)</li>
+<li>Prisma <code>contains</code> is case <strong>sensitive</strong> &mdash; 2 of 4 real matches. <code>mode: "insensitive"</code>. (L33)</li>
+<li><code>...(done &amp;&amp; { done })</code> silently drops <code>done: false</code>. Test <code>=== undefined</code>. (L33)</li>
+<li><code>request.log.error({ err })</code> prints <strong>every property the error carries</strong> &mdash; measured, a <code>passwordHash</code> and a full SQL string next to the stack you wanted. (L34)</li>
+<li>A pino redact wildcard is <strong>one level</strong>: <code>*.passwordHash</code> misses <code>err.user.passwordHash</code>. (L34)</li>
+<li><code>"**.passwordHash"</code> is not pino syntax. It does not throw, does not warn, matches nothing, and the value prints in full. (L34)</li>
+<li>A log test under <code>LOG_LEVEL=silent</code> reads an empty stream and <strong>passes forever</strong>. Assert the log is not empty first. (L34)</li>
+<li><code>stream: undefined</code> does not compile under <code>exactOptionalPropertyTypes</code> &mdash; <code>TS2769</code>. Same flag, same spread, one lesson after L33. (L34)</li>
+<li>An unquoted <code>src/**/*.test.ts</code> in <code>package.json</code>: <strong>22 files on disk, 21 run</strong>. <code>npm run</code> uses sh, where <code>**</code> is one level. Quote the pattern. (L35)</li>
+<li>The same command gave <strong>154 through <code>npm test</code> and 155 pasted into zsh</strong>. Only the shell differed. (L35)</li>
+<li>A pattern that matches <em>nothing</em> is passed through untouched &mdash; which is the only reason <code>web</code> escaped the same bug. That is luck, not a design. (L35)</li>
+<li>A missing test file is <strong>not a failure and not a skip</strong>. It has no row. The expected count is the only thing that catches it. (L35)</li>
+</ul>
+
+<h2>Still open</h2>
+<ul>
+<li>Both rate-limit counters are in-process. Redis in week 11&ndash;12.</li>
+<li><code>trustProxy</code> stays OFF until nginx is real. (L14)</li>
+<li>Register's design-A (<code>202</code> always) with the invite mailer. (L18, week 13&ndash;14)</li>
+<li>Forgot-password does not exist. Build it design-A from line one.</li>
+<li>Can an OWNER leave their own team? Equal rank says no. Undecided.</li>
+<li>Nobody <em>reads</em> the audit log. An alert on repeated 403s is the missing half. (L19)</li>
+<li>No retention job on <code>AuditLog</code>. It only grows. Week 13&ndash;14. (L19)</li>
+<li>Creating a task in a paged list now costs <strong>one refetch per page held</strong>. Refetching only the last page is the optimisation, deliberately not built. (L31)</li>
+<li><code>@@index([teamId, createdAt])</code> is measured and NOT added &mdash; nothing sorts by <code>createdAt</code> yet. Add it with the sort. (L30)</li>
+<li>Front-end tests exist: <strong>4</strong>, under plain <code>node --test</code>. Vitest is deferred until the first <em>component</em> test &mdash; a click, a rendered row. (L32)</li>
+<li>A trigram index (<code>pg_trgm</code>) for <code>?q=</code>. Named, measured as unnecessary at this size, not built. (L33)</li>
+<li>Every filtered list refetches on any change or create. Refetching only what changed is the optimisation, deliberately not built. (L31, L33)</li>
+<li>No <code>POST /teams</code> from the page &mdash; there is no way to create a team in the UI. (L23)</li>
+<li>Soft delete and a real undo (<code>deletedAt</code>). Planted in L28.</li>
+<li>Idempotency keys for <code>POST</code>. Planted in L26.</li>
+<li>No CSP on the front-end page itself &mdash; <code>python3 -m http.server</code> sends no headers. nginx, week 11&ndash;12. (L22)</li>
+</ul>
+
+<footer class="ask">
+<p><a href="../lessons/index.html">All lessons</a> &middot; <a href="../PLAN.md">PLAN.md</a> &middot; <a href="../MISSION.md">MISSION.md</a></p>
+<p>Print this. Any line that reads as noise is the lesson to re-open.</p>
+</footer>
+
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

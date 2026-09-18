@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 13 — CORS: same-site vs same-origin</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 13 &middot; Week 7&ndash;8 &middot; API security</p>
+<h1>CORS: same-site vs same-origin</h1>
+<p class="lede">Your React app will be on a different port. Today you learn what the browser does about that &mdash; and why the fix everybody copies hands your users' sessions to strangers.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>A CORS error does not mean your server said no. Your server answered in full; the <em>browser</em> binned the reply.</li>
+<li><strong>Same-origin</strong> counts the port. <strong>Same-site</strong> does not. Two words, two jobs.</li>
+<li>Anything that could change data gets a <strong>preflight</strong> <code>OPTIONS</code> first.</li>
+<li><code>origin: true</code> reflects whoever asked. With <code>credentials: true</code> that gives your sessions away.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+sequenceDiagram
+  participant P as page at :5173
+  participant B as the browser
+  participant A as API at :3000
+  P->>B: fetch("/tasks", credentials)
+  B->>A: OPTIONS /tasks (preflight)
+  A-->>B: Access-Control-Allow-Origin: http://localhost:5173
+  B->>A: GET /tasks + cookie
+  A-->>B: 200 { your tasks }
+  B-->>P: allowed, here it is
+  Note over B,A: if the header had not matched:<br/>the API still ran and still replied.<br/>The browser just refuses to show the page.
+</pre>
+<figcaption>CORS lives entirely in the browser. The server did the work either way &mdash; the header only decides whether the calling page is permitted to read the answer.</figcaption>
+</figure>
+
+<h2>The two words</h2>
+<table>
+<tr><th></th><th>Same-origin</th><th>Same-site</th></tr>
+<tr><td>Counts</td><td>scheme + host + <strong>port</strong></td><td>scheme + registrable domain</td></tr>
+<tr><td><code>:5173</code> vs <code>:3000</code></td><td>different</td><td class="yes">same</td></tr>
+<tr><td><code>app.x.com</code> vs <code>api.x.com</code></td><td>different</td><td class="yes">same</td></tr>
+<tr><td>Used by</td><td>CORS</td><td>cookie <code>SameSite</code></td></tr>
+</table>
+
+<p>This is why localhost development is confusing: two ports are <em>cross-origin</em> (so you need CORS) but <em>same-site</em> (so <code>SameSite=Lax</code> cookies still work).</p>
+
+<h2>The line that gives your sessions away</h2>
+<div class="vs">
+<div class="no">
+<h4>Never</h4>
+<pre><code>cors({
+  origin: true,        // echoes ANY origin
+  credentials: true,   // ...with the cookie
+})</code></pre>
+</div>
+<div class="yes">
+<h4>Always</h4>
+<pre><code>cors({
+  origin: process.env.ALLOWED_ORIGINS.split(","),
+  credentials: true,
+})</code></pre>
+</div>
+</div>
+
+<p><code>origin: true</code> means "reflect back whatever origin asked". So <code>evil.com</code> asks, gets told yes, and its script reads your logged-in data.</p>
+
+<p class="takeaway">CORS is advice to a browser. It stops nobody with <code>curl</code>. Your access control is <code>requireAuth</code> + <code>can()</code>, and always was.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">A CORS error appears in your console. What happened server-side?</p>
+<button>The server refused and sent nothing</button>
+<button>The server ran and replied in full</button>
+<p class="why" hidden>The request arrived, the handler ran, the database was touched, the reply was sent. The browser then refused to hand it to the page. This is why CORS is not access control.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><code>npm test</code> &mdash; 75 tests.</li>
+<li><code>curl -H 'Origin: https://evil.com' -i localhost:3000/tasks</code>. Read the headers. Note you still got a reply &mdash; <code>curl</code> is not a browser.</li>
+<li>Homework: your API and your React app in production &mdash; how many ways can you arrange them? Write down three. Lesson 14 marks it.</li>
+</ol>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/CORS">MDN, Cross-Origin Resource Sharing</a>.</p>
+<p><b>The long version:</b> <a href="./long/0013-same-site-is-not-same-origin.html">preflight caching and the five tests</a>.</p>
+<p>If the two words still blur together, ask me and I will drill you with URL pairs.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0012-the-floor-under-everything.html">&larr; Back</a>
+<a href="./0014-one-origin-no-question.html">Next: one origin, no question &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 38 &mdash; Reading the audit log</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.box { font-family: var(--mono); font-size: 0.72rem; margin: 0.9rem 0;
+    border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  .box > .cap { background: var(--code-bg); color: var(--muted); font-size: 0.66rem;
+    padding: 0.35rem 0.7rem; border-bottom: 1px solid var(--rule); }
+  .box .body { padding: 0.6rem 0.7rem; overflow-x: auto; }
+  .box .body > div { padding: 0.12rem 0; white-space: nowrap; }
+  .bad { color: var(--bad); font-weight: 600; }
+  .ok { color: var(--ok); font-weight: 600; }
+  .dim { color: var(--muted); }
+  .acc { color: var(--accent); font-weight: 600; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; margin: 1.1rem 0; }
+  .two h4 { font-family: var(--mono); font-size: 0.66rem; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--muted); margin: 0 0 0.2rem; font-weight: 600; }
+  @media (max-width: 34rem) { .two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 38 &middot; Week 11 &middot; Real world</p>
+<h1>Reading the audit log</h1>
+<p class="lede">For twenty lessons the audit log has only been written to. Today it gets a reader: <code>GET /teams/:teamId/audit</code>. Two things make this route different from every list route you have built. First, <b>looking is a power of its own</b> &mdash; a MEMBER may delete a task and still have no business seeing who else deleted what. Second, the route audits itself: I built it, ran it, and the row count came back <b>one higher than I seeded</b>. That extra row is the refused read.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>Reading is an action.</strong> <code>"audit:read"</code> is a new entry in <code>ACTIONS</code>, granted to ADMIN and OWNER. Not a new <code>if</code> anywhere.</li>
+<li><strong>Doing &ne; seeing.</strong> A MEMBER holds <code>task:delete</code> and does <em>not</em> hold <code>audit:read</code>. The two powers are unrelated, so they are two rows in the table.</li>
+<li><strong>The writer picked the reader's filters.</strong> Lesson 18 wrote <code>@@index([teamId, at])</code>. That index is exactly &ldquo;one team, newest first&rdquo;, and that is the query you are allowed to write cheaply.</li>
+<li><strong>Order by <code>at DESC, id DESC</code>.</strong> <code>at</code> is not unique. A cursor into a tied order skips rows. <code>id</code> is the tiebreak.</li>
+<li><strong>The response schema is the allowlist again.</strong> <code>ip</code>, <code>params</code> and <code>targetSnapshot</code> are not in <code>AuditPublic</code>, so they never reach the browser.</li>
+<li><strong>One trap I hit for you:</strong> <code>z.iso.datetime()</code> on the <code>at</code> field is a <b>500</b>. Your serializer <em>parses</em> before it stringifies, and Prisma hands you a real <code>Date</code>. Use <code>z.date()</code>.</li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<pre><code>server: npm test          <b>157 passing</b>
+web:    npm test          <b>5 passing</b>
+server: npm run typecheck clean</code></pre>
+<p>Sixth clean hand-over. 157, not the 156 lesson 37 promised &mdash; you added one yourself. Lesson 37 landed in full: both <code>undefined</code>s in <code>src/audit/audit.ts</code>, both <code>as never</code> casts gone, and the backfill migration applied. I checked the table: <code>params</code> is now 0 JSON nulls.</p>
+<p>Homework 7 (<code>params.id</code> vs <code>targetId</code>) has been carried twice. After today it is answerable in ten seconds by reading one JSON reply, so this is the last time I ask.</p>
+
+<h2>The question the route answers</h2>
+<p>Not &ldquo;show me the log&rdquo;. That is not a question a database can answer well. The real question is the one your index was built for:</p>
+<div class="vs">
+<div class="yes"><h4>What the index serves</h4><pre><code>@@index([teamId, at])
+
+where:   { teamId }
+orderBy: [{ at: "desc" }, { id: "desc" }]
+take:    limit + 1</code></pre>
+<p>One team. Newest first. A page at a time. Postgres walks the index backwards and stops.</p></div>
+<div class="no"><h4>What it does not serve</h4><pre><code>where: { route: { contains: "tasks" } }
+where: { actorEmail: "..." }
+orderBy: { status: "asc" }</code></pre>
+<p>No index starts with those columns, so each one is a full scan of the biggest table you own. Fine at 7,400 rows. Not fine at 7 million.</p></div>
+</div>
+<p class="takeaway">The filters a list route may offer are decided by the indexes that already exist. A query builder that accepts anything is a promise the table cannot keep.</p>
+<p>So today's route takes exactly three query keys: <code>limit</code>, <code>cursor</code>, and <code>status</code>. <code>status</code> is the one extra, and it is honest &mdash; it is a cheap filter on top of a range the index already narrowed to one team. Everything else waits for an index that justifies it. <a href="https://use-the-index-luke.com/sql/where-clause/the-equals-operator/concatenated-keys">Use The Index, Luke &mdash; concatenated keys</a> is the short, exact explanation of why the column order in <code>[teamId, at]</code> is the whole story.</p>
+
+<h2>A power you have not named yet</h2>
+<p>Open <code>src/auth/can.ts</code> and read the action list aloud. Every entry is something a person <em>does</em>: create, update, delete, invite, remove. Not one of them is something a person <em>sees</em>.</p>
+<p>That is the gap. The rule you want is:</p>
+<pre><code>A MEMBER may delete a task.
+A MEMBER may <b>not</b> see that somebody else deleted a task.</code></pre>
+<p>Count the nouns, the way you did in lessons 9 and 10. There are two different powers in those two lines, so there must be two entries in the table. Writing this as <code>if (role === "ADMIN")</code> inside the handler would be the fourth time you avoided the table, and the table is the only place that can be audited itself.</p>
+<div class="aside"><b>Why ADMIN and not OWNER only.</b> An audit log nobody reads is decoration. The people who investigate an incident are the people who run the team day to day. OWNER-only sounds safer and in practice means the log is never opened. <a href="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html#logging-for-monitoring">OWASP's logging cheat sheet</a> is blunt about this: logs exist to be monitored, and an unmonitored log is a cost with no benefit.</div>
+
+<h2>The self-audit</h2>
+<p>Here is the thing I did not plan for. I seeded 25 rows into a test team, then wrote this test first:</p>
+<pre><code>test("a MEMBER may delete a task but may not read the log", async () =&gt; {
+  const res = await list("", memberCookie);
+  assert.equal(res.statusCode, 403);
+});</code></pre>
+<p>Then the next test asked for all the rows and asserted 25. It got <b>26</b>.</p>
+<p>The 403 above is a refusal, and <code>shouldAudit()</code> has said since lesson 18 that <em>every refusal earns a row</em>. So the refused read wrote itself into the very log it was refused. The newest row in that team is now:</p>
+<pre><code>{ "route": "/teams/:teamId/audit", "status": 403, "method": "GET",
+  "actorEmail": "audit-member-...@example.com" }</code></pre>
+<p class="takeaway">Somebody trying to read the log is the single most interesting line in the log. You did not write a rule for that. The rule you wrote in lesson 18 &mdash; &ldquo;every refusal, even on a read&rdquo; &mdash; already covered a route that did not exist yet.</p>
+<p>That is what a cross-cutting hook buys you, and it is <a href="./0018-the-route-nobody-audited.html">lesson 18</a> paying a dividend. A per-handler audit call could not have logged this, because no handler ever ran.</p>
+
+<h2>The trap in the reply schema</h2>
+<p>I wrote <code>at: z.iso.datetime()</code>, which is the obviously correct thing, and got a 500 on every request. Your own serializer, from <code>src/app.ts</code>:</p>
+<pre><code>app.setSerializerCompiler(({ schema }) =&gt; (data) =&gt; JSON.stringify((schema as ZodType).parse(data)));</code></pre>
+<p>It <b>parses</b>, then stringifies. Prisma gives you a JavaScript <code>Date</code>. A <code>Date</code> is not a string, so zod throws, and your error handler turns a thrown error into a 500 with a <code>requestId</code>. The fix is one word:</p>
+<pre><code>at: z.date(),   // ? JSON.stringify turns it into the same ISO text anyway</code></pre>
+<p>This is a small thing with a general shape worth keeping: <b>a response schema describes the value your handler returns, not the JSON the caller receives.</b> Those two are not the same object, and <code>Date</code> is where they first disagree.</p>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why is <code>audit:read</code> a new action rather than a role check?</p>
+<button>Because OWNER already holds it</button>
+<button>Because seeing is its own power</button>
+<p class="why" hidden>Deleting a task and seeing who deleted it are two unrelated jobs, so they are two entries in the table. A role check in the handler puts a permission somewhere that <code>can.ts</code> cannot see, which is the one thing lesson 7 forbade.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why does the order need <code>id DESC</code> after <code>at DESC</code>?</p>
+<button>Because two rows can share a time</button>
+<button>Because the index says to do it</button>
+<p class="why" hidden><code>at</code> is not unique. Two rows written in the same millisecond tie, Postgres may return ties in any order, and a cursor into an unstable order skips or repeats rows. <code>id</code> is unique, so it breaks every tie. Same rule you learned for <code>?sort=title</code>.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">A MEMBER is refused at <code>GET /teams/3/audit</code>. What happens?</p>
+<button>Nothing, the read never ran</button>
+<button>A row lands in that log</button>
+<p class="why" hidden><code>shouldAudit()</code> returns true for 401, 403 and 429 even on a GET. The refusal is written by the <code>onResponse</code> hook in <code>app.ts</code>, long after the gate said no and without any handler running. An attempted read of the log is exactly the row you want most.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>Name the power.</strong> In <code>src/auth/can.ts</code>, add <code>"audit:read"</code> to <code>ACTIONS</code> and to the <code>ADMIN</code> list. <b>Expect <code>npm run typecheck</code> clean and 157 still passing.</b> Nothing uses it yet &mdash; that is correct.</li>
+
+<li><strong>The schema.</strong> New file <code>src/schemas/audit.schema.ts</code>, with <code>AuditQuery</code> (<code>limit</code> max 100 default 20, optional <code>cursor</code>, optional <code>status</code>), <code>AuditPublic</code> and <code>AuditPage</code>.
+<pre><code>export const AuditPublic = z.object({
+  id: z.number(),
+  at: z.date(),                      // ! not z.iso.datetime() -- see above
+  userId: z.number().nullable(),
+  actorEmail: z.string().nullable(),
+  method: z.string(),
+  route: z.string(),
+  status: z.number(),
+  targetType: z.string().nullable(),
+  targetId: z.number().nullable(),
+});</code></pre>
+<b>Leave <code>ip</code>, <code>params</code> and <code>targetSnapshot</code> out.</b> Say out loud why before you move on.</li>
+
+<li><strong>The store.</strong> <code>src/store/audit.store.ts</code>, one function. It is <code>listTasks</code> with a different <code>orderBy</code> &mdash; go and read that function first, then write this one without copying the parts that do not apply:
+<pre><code>where: { teamId, ...(status === undefined ? {} : { status }) },
+orderBy: [{ at: "desc" }, { id: "desc" }],
+take: limit + 1,
+...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),</code></pre></li>
+
+<li><strong>The route.</strong> <code>src/routes/audit.route.ts</code>: <code>requireAuth</code> as an <code>onRequest</code> hook, then <code>preHandler: requirePermission("audit:read")</code>, <code>params: TeamParams</code>, <code>querystring: AuditQuery</code>, <code>response: { 200: AuditPage, 403: ErrorReply }</code>. Register it in <code>src/app.ts</code> next to the others. <b>Forget the <code>querystring</code> key and <code>?limit=1000000</code> answers 200</b> &mdash; lesson 31's silent skip.</li>
+
+<li><strong>Five tests</strong>, in <code>src/routes/audit-list.test.ts</code>. Seed 25 rows with <code>prisma.auditLog.createMany</code>, five of them <code>status: 403</code>, plus one row in a second team. Then: the MEMBER gets 403; the ADMIN sees the rows newest first; the cursor walks the whole log in three pages with no id twice; <code>?status=403</code> filters and <code>?limit=1000000</code> is a 400; and the reply carries no <code>ip</code>.
+<b>Expect 162 passing.</b> Two of your counts will be one higher than you seeded &mdash; when that happens, do not change the seed. Work out which row it is first, then write the assertion that names it:
+<pre><code>assert.equal(items[0]!.route, "/teams/:teamId/audit");
+assert.equal(items[0]!.status, 403);</code></pre></li>
+
+<li><strong>Homework 7, finally.</strong> Delete a task through the real API, then <code>GET /teams/:teamId/audit</code> and read the newest row. <code>params.id</code> and <code>targetId</code> now hold the same number in front of you. <b>Say which one the audit page should display, and what happens to the other one when a route has no <code>:id</code> in its URL.</b> Two sentences.</li>
+
+<li><strong>One question, no code.</strong> Today's route refuses a MEMBER with 403 and writes that refusal to the log. So a MEMBER can fill your audit table with rows by hitting the endpoint in a loop &mdash; past the 100/minute rate limit, that is 144,000 rows a day. <b>Is that a bug, a feature, or a retention problem?</b> Argue one side. Your answer decides what week 13's retention job looks like.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>One index. The page it serves. And the row that wrote itself when somebody was told no.</p>
+
+<h2>The index is the shape of the page</h2>
+<div class="box">
+<div class="cap">@@index([teamId, at]) &mdash; Postgres walks it backwards and stops</div>
+<div class="body">
+<div><span class="dim">teamId  at                    -&gt; id</span></div>
+<div><span class="dim">......</span></div>
+<div><span class="acc">7</span>       2026-09-11 09:14:02   7433  <span class="ok">&lt;- page 1 starts here (newest)</span></div>
+<div><span class="acc">7</span>       2026-09-11 09:13:58   7431</div>
+<div><span class="acc">7</span>       2026-09-11 09:13:58   7430  <span class="dim">&lt;- same millisecond: id breaks the tie</span></div>
+<div><span class="acc">7</span>       2026-09-11 09:11:40   7428  <span class="ok">&lt;- limit=4, so stop. nextCursor = 7428</span></div>
+<div><span class="acc">7</span>       2026-09-11 09:02:19   7425  <span class="dim">&lt;- read anyway (take: limit+1) to answer "is there more?"</span></div>
+<div>8       2026-09-11 09:14:44   7434  <span class="bad">&lt;- another team. Never reached.</span></div>
+</div>
+</div>
+<p>The query is not clever. It is the index, read in order, from one end. That is the whole reason it stays fast at seven million rows.</p>
+
+<div class="two">
+<div><h4>A filter the index serves</h4>
+<div class="box"><div class="body">
+<div>where: { teamId: <span class="acc">7</span> }</div>
+<div>order: at desc, id desc</div>
+<div><span class="ok">4 rows read</span></div>
+</div></div></div>
+<div><h4>A filter it does not</h4>
+<div class="box"><div class="body">
+<div>where: { actorEmail: <span class="bad">"x@y"</span> }</div>
+<div>order: at desc</div>
+<div><span class="bad">7,433 rows read</span></div>
+</div></div></div>
+</div>
+
+<h2>Two powers, two entries</h2>
+<div class="box">
+<div class="cap">src/auth/can.ts &mdash; the only place this is decided</div>
+<div class="body">
+<div><span class="dim">role     task:delete   audit:read</span></div>
+<div>VIEWER   <span class="bad">no</span>            <span class="bad">no</span></div>
+<div>MEMBER   <span class="ok">yes</span>           <span class="bad">no</span>   <span class="dim">&lt;- may do it, may not see who did it</span></div>
+<div>ADMIN    <span class="ok">yes</span>           <span class="ok">yes</span></div>
+<div>OWNER    <span class="ok">yes</span>           <span class="ok">yes</span></div>
+</div>
+</div>
+
+<h2>The refusal that logs itself</h2>
+<div class="box">
+<div class="cap">MEMBER hits GET /teams/7/audit</div>
+<div class="body">
+<div>requireAuth      <span class="ok">ok</span>      <span class="dim">-&gt; request.userId = 42</span></div>
+<div>requirePermission(<span class="acc">"audit:read"</span>)  <span class="bad">403</span>  <span class="dim">-&gt; reply sent, handler never runs</span></div>
+<div><span class="dim">...</span></div>
+<div>onResponse hook  shouldAudit("GET", <span class="bad">403</span>) = <span class="ok">true</span></div>
+<div>                 <span class="acc">INSERT INTO "AuditLog"</span> &hellip;</div>
+<div><span class="dim">...</span></div>
+<div>ADMIN hits GET /teams/7/audit  <span class="ok">200</span></div>
+<div>  items[0] = { route: <span class="acc">"/teams/:teamId/audit"</span>, status: <span class="bad">403</span>,</div>
+<div>               actorEmail: <span class="acc">"member@example.com"</span> }</div>
+</div>
+</div>
+<p>The newest line in the log is the person who was refused the log. Nobody wrote a rule for that. The rule from lesson 18 &mdash; <b>every refusal earns a row, even on a read</b> &mdash; already covered a route built twenty lessons later.</p>
+
+<h2>The 500 I hit for you</h2>
+<div class="two">
+<div><h4>z.iso.datetime()</h4>
+<div class="box"><div class="body">
+<div>handler returns <span class="acc">Date</span></div>
+<div>schema.parse(Date)</div>
+<div><span class="bad">ZodError: expected string</span></div>
+<div><span class="bad">500 + requestId</span></div>
+</div></div></div>
+<div><h4>z.date()</h4>
+<div class="box"><div class="body">
+<div>handler returns <span class="acc">Date</span></div>
+<div>schema.parse(Date) <span class="ok">ok</span></div>
+<div>JSON.stringify -&gt; <span class="ok">"2026-09-11T09:14:02.101Z"</span></div>
+<div><span class="ok">200</span></div>
+</div></div></div>
+</div>
+<p>The serializer parses before it stringifies. The response schema describes what your <em>handler returns</em>, not the JSON the caller reads.</p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://use-the-index-luke.com/no-offset">Use The Index, Luke &mdash; &ldquo;We need tool support for keyset pagination&rdquo;</a>. Short, and it is the primary source for why <code>at DESC, id DESC</code> and a cursor beat <code>OFFSET</code> on a table that grows at the front. This is today's one thing to read.</p>
+<p><b>Then this:</b> <a href="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html">OWASP &mdash; Logging Cheat Sheet</a>. Skim the section on what to log and who may read it.</p>
+<p><b>Reference cards:</b> <a href="../reference/rbac-permissions.html">RBAC and permissions</a> and <a href="../reference/pagination-and-indexes.html">pagination and indexes</a>.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/ExperiencedDevs/">r/ExperiencedDevs</a>. Search &ldquo;audit log retention&rdquo; before you post &mdash; question 7 above is a question people argue about with real numbers.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0037-two-kinds-of-nothing.html">&larr; Back</a>
+<a href="../reference/rbac-permissions.html">RBAC reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

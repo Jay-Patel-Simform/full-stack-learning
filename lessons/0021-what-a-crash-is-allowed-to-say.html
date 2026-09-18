@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 21 &mdash; Error handling: 4xx vs 5xx</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+/* The pipe: every hook a request passes through, in order. */
+.pipe { list-style: none; padding: 0; margin: 1.3rem 0 1.6rem; font-size: .84rem; }
+.pipe li { display: grid; grid-template-columns: 8.5rem 1fr 7rem; gap: .9rem;
+  padding: .55rem .75rem; border: 1px solid var(--rule); border-radius: 4px;
+  margin-bottom: .3rem; align-items: center; background: var(--code-bg); }
+.pipe .h { font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+.pipe .when { font-size: .7rem; color: var(--muted); text-align: right; }
+.pipe li.here { border-color: var(--accent); border-width: 2px;
+  background: var(--bg); }
+.pipe li.here .h { color: var(--accent); font-weight: 700; }
+
+/* The fork: one condition, two audiences. */
+.fork { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1rem 0 1.6rem; }
+.fork > div { border: 1px solid var(--rule); border-radius: 6px; padding: 1rem 1.1rem; }
+.fork h3 { margin: 0 0 .2rem; font-size: .95rem; }
+.fork .tag { font-family: var(--mono); font-size: .64rem; letter-spacing: .12em;
+  text-transform: uppercase; display: block; margin-bottom: .5rem; color: var(--muted); }
+.fork p { margin: .55rem 0 0; font-size: .8rem; color: var(--muted); line-height: 1.55; }
+.fork pre { margin: .6rem 0 0; font-size: .72rem; }
+.fork.a > div:first-child { border-color: var(--ok); }
+.fork.a > div:first-child .tag { color: var(--ok); }
+.fork.a > div:last-child { border-color: var(--accent); }
+.fork.a > div:last-child .tag { color: var(--accent); }
+
+.cond { text-align: center; font-family: var(--mono); font-size: .9rem;
+  padding: .7rem; border: 1px dashed var(--rule); border-radius: 6px;
+  margin: 1.4rem 0 .2rem; }
+
+/* The join. */
+.join { display: grid; grid-template-columns: 1fr auto 1fr; gap: .8rem;
+  align-items: center; margin: 1.2rem 0 1.8rem; font-size: .76rem; }
+.join > pre { margin: 0; overflow-x: auto; }
+.join .id { font-family: var(--mono); font-weight: 700; color: var(--accent);
+  border: 2px solid var(--accent); border-radius: 999px; padding: .35rem .8rem;
+  white-space: nowrap; }
+
+.rule { font-size: .95rem; padding: .8rem 1rem; border-left: 3px solid var(--accent);
+  background: var(--code-bg); border-radius: 0 4px 4px 0; margin: 1.5rem 0 2.4rem; }
+.leak { color: var(--bad); font-weight: 600; }
+@media (max-width: 40rem) {
+  .fork, .join { grid-template-columns: 1fr; }
+  .pipe li { grid-template-columns: 1fr; gap: .2rem; }
+  .pipe .when { text-align: left; }
+}
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 21 &middot; Week 9 &middot; API security</p>
+<h1>Error handling: 4xx vs 5xx</h1>
+<p class="lede">Every wall you have built decides who gets in. This one decides what leaks out when something goes wrong &mdash; and until today, the answer was &ldquo;everything&rdquo;.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>Fastify's default: when your code throws, it sends <code>err.message</code> to the caller.</li>
+<li>A Prisma error's message is your <strong>file paths, your source lines, and every column of the model</strong>.</li>
+<li>The fix is one hook and one rule: <strong>split on the status, not on the error.</strong></li>
+<li>A <code>4xx</code> was caused by the caller's input &mdash; tell them. A <code>5xx</code> was caused by your code &mdash; tell the log.</li>
+<li>Send back a <code>requestId</code> so the two halves can be joined.</li>
+</ul>
+</div>
+
+<h2>The word pair</h2>
+<div class="word"><b>the caller's fault</b> &mdash; a <code>4xx</code>. Bad email, missing field, no session, too many requests. The message describes <em>their</em> input. Telling them is the whole point of the API.</div>
+<div class="word"><b>your fault</b> &mdash; a <code>5xx</code>. Something in your code broke. The message describes <em>your</em> internals. The caller cannot act on it, and an attacker very much can.</div>
+<p class="takeaway">Status code, not error type. It is the one label already on every error, and it already says whose fault it is.</p>
+
+<h2>Measured, on your app, this morning</h2>
+<p>I registered a route that calls Prisma with a bad <code>orderBy</code> &mdash; exactly the crash <a href="./0020-the-column-that-cannot-be-a-parameter.html">lesson 20</a> left open. Here is what your API sent, before today:</p>
+<pre><code>HTTP 500
+{"statusCode":500,"error":"Internal Server Error","message":"
+Invalid `prisma.task.findMany()` invocation in
+/Users/jay/learning/full-stack-learning/server/src/probe-tmp.ts:6:43
+
+  4 const app = await buildApp();
+&rarr; 6 app.get("/boom2", async () =&gt; prisma.task.findMany({
+      orderBy: {
+        nope: "asc",
+    ?   id?: SortOrder,
+    ?   title?: SortOrder,
+    ?   done?: SortOrder,
+    ?   createdAt?: SortOrder,
+    ?   ownerId?: SortOrder,
+    ?   teamId?: SortOrder,
+    ?   owner?: UserOrderByWithRelationInput,
+    ?   team?: TeamOrderByWithRelationInput
+      }})"}</code></pre>
+<p>Read the bottom half again. That is not just a stack trace &mdash; it is <strong>your database schema</strong>, printed for anyone who can make a request fail. Column names, relation names, the shape of <code>User</code> and <code>Team</code>. Lesson 20 promised this leak was real. It is worse than I wrote there.</p>
+<div class="aside"><strong>Why does an error message contain source code at all?</strong> Because Prisma is trying to help <em>you</em>, at your terminal. That is correct behaviour for a developer tool. The bug is not Prisma's &mdash; it is that a developer-facing message reached a stranger, unchanged, because nobody stood in between.</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  T["something throws"] --> H{"err.statusCode<br/>&lt; 500 ?"}
+  H -->|"yes: 400 403 429"| C["the CALLER caused it<br/>reply.send(err)"]
+  C --> C2["message names their field<br/>'email: invalid'"]
+  H -->|"no, or missing"| S["YOUR code caused it"]
+  S --> L["log.error({ err })<br/>full stack, our eyes only"]
+  S --> R["reply: fixed string<br/>+ requestId"]
+  L -.->|"joined by req-1"| R
+</pre>
+<figcaption>One fork, on a number that is already there. The detail is not destroyed &mdash; it changes audience.</figcaption>
+</figure>
+
+<h2>What you shipped</h2>
+<p>Step 9 in <code>src/app.ts</code>, after the audit hook, before the routes:</p>
+<pre><code>app.setErrorHandler((err: FastifyError, request, reply) =&gt; {
+  if ((err.statusCode ?? 500) &lt; 500) return reply.send(err);
+
+  request.log.error({ err }, "unhandled error");
+
+  return reply.code(500).send({
+    statusCode: 500,
+    error: "Internal Server Error",
+    message: "Internal Server Error",
+    requestId: request.id,
+  });
+});</code></pre>
+<p>Five lines that matter. Take them one at a time.</p>
+<table>
+<tr><th>Line</th><th>Why</th></tr>
+<tr><td><code>err.statusCode ?? 500</code></td><td>An error Fastify made carries its status. An error <em>your bug</em> made carries none &mdash; so <strong>missing means 500</strong>. The unsafe case is the default, not the exception.</td></tr>
+<tr><td><code>return reply.send(err)</code></td><td>Hand a <code>4xx</code> straight back to Fastify's own formatting. You are not writing a second error format; you are choosing not to interfere.</td></tr>
+<tr><td><code>request.log.error({ err })</code></td><td>The detail moves, it does not vanish. Passing <code>{ err }</code> (not <code>err.message</code>) makes the logger serialise the whole thing &mdash; type, message, stack.</td></tr>
+<tr><td><code>requestId: request.id</code></td><td>The join. Fastify already puts <code>reqId</code> on every log line for free. Now the caller can say &ldquo;error <code>req-1</code>&rdquo; and you can find the exact stack.</td></tr>
+</table>
+<p>The reply is now, every time, for every possible crash:</p>
+<pre><code>HTTP 500
+{"statusCode":500,"error":"Internal Server Error",
+ "message":"Internal Server Error","requestId":"req-1"}</code></pre>
+<p>And in your terminal, the same second:</p>
+<pre><code>{"level":50,"reqId":"req-1","err":{"type":"PrismaClientValidationError",
+ "message":"\nInvalid `prisma.task.findMany()` invocation in\n/Users/...</code></pre>
+<p class="takeaway">Same incident, two audiences, one shared id. That is the whole design.</p>
+
+<h2>Why not just hide everything</h2>
+<p>You could reply <code>{"error":"error"}</code> to all of it. Do not. A <code>400</code> that will not say <em>which field</em> is broken makes your API unusable, and it protects nothing &mdash; the caller already knows what they sent.</p>
+<div class="vs">
+<div class="no"><h4>too much</h4>
+<pre><code>message: "Cannot read
+ properties of undefined
+ (reading 'name')"</code></pre></div>
+<div class="yes"><h4>right</h4>
+<pre><code>message: "email:
+ Invalid email address"</code></pre></div>
+</div>
+<p>The left one is a <code>500</code>: it names a variable in your code. The right one is a <code>400</code>: it names a field in <em>their</em> request. Same instinct as <a href="./0018-the-route-nobody-audited.html">lesson 18</a> &mdash; a reply should describe what the caller already knows, and nothing more.</p>
+
+<h2>How it sits with the other walls</h2>
+<p>You now have three hooks and a handler wrapped around every request, and their order is not an accident:</p>
+<pre><code>onRequest   rate limit, CSRF, requireAuth      before work happens
+handler     the route                          the work
+setErrorHandler  what a failure may say        when the work throws
+onResponse  audit log                          after, knows the status
+onSend      cache-control: no-store            on the way out</code></pre>
+<p>The error handler runs <em>before</em> <code>onResponse</code>, so <a href="./0019-the-row-that-outlives-the-user.html">your audit log</a> still records the <code>500</code> &mdash; with the route, the user and the ip. Nothing you built last lesson stopped working. Check it yourself: <code>npm run log</code>.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">Why fork on the status code instead of the error's type?</p>
+<button>Because checking a type needs instanceof</button>
+<button>Because the status already says whose fault</button>
+<p class="why" hidden>A <code>4xx</code> means the caller caused it, a <code>5xx</code> means you did. That is exactly the line you want to draw. Matching on error types means a new library ships a new class and your handler silently misses it &mdash; the status has no such gap.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">An error arrives with no <code>statusCode</code> at all. What now?</p>
+<button>Treat it as 500 and say nothing</button>
+<button>Treat it as 400 and send the text</button>
+<p class="why" hidden><code>err.statusCode ?? 500</code>. An error with no status came from your own code, not from Fastify &mdash; which is precisely the case whose message you must not send. The default has to be the careful one.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">What does <code>requestId</code> in the reply actually buy you?</p>
+<button>It proves the request was authentic</button>
+<button>It finds the hidden log line later</button>
+<p class="why" hidden>Hiding the detail is useless if you cannot get it back. Fastify stamps <code>reqId</code> on every log line already, so returning <code>request.id</code> costs nothing and turns &ldquo;it broke&rdquo; into one <code>grep</code>. It is not a secret and proves nothing.</p>
+</div>
+
+<h2>What this does NOT fix</h2>
+<table>
+<tr><th>Gap</th><th>Why it is still open</th></tr>
+<tr><td>Nothing reads the logs</td><td>The stack is in your terminal and dies with the process. An error tracker is week 13&ndash;14.</td></tr>
+<tr><td>A <code>4xx</code> can still leak</td><td>You pass those through on purpose. If <em>you</em> ever throw a 400 whose message names an internal, this handler will happily send it. That is on the thrower.</td></tr>
+<tr><td>No <code>LIMIT</code> on the task list</td><td>Still open from lesson 20. Week 9&ndash;10.</td></tr>
+<tr><td>Stack traces in <code>dev</code></td><td>You now hide them from yourself too, in the reply. That is fine &mdash; the log has more, not less.</td></tr>
+</table>
+
+<h2>Do this</h2>
+<ol>
+<li><code>cd server &amp;&amp; npm test</code> &mdash; <strong>130</strong> tests, five new in <code>src/routes/error-handler.test.ts</code>.</li>
+<li>Open that file. Note that the crashing routes are registered <em>in the test</em>, on a real <code>buildApp()</code>. You cannot test an error handler without something that errors, and a deliberate crash does not belong in the shipped app.</li>
+<li>Read the four assertions in the Prisma test. Each one is a separate thing the old reply gave away: a path, a query, a column, another column. <strong>One assertion per leak</strong> beats one assertion on the whole body &mdash; when it fails, it names what escaped.</li>
+<li>Break it on purpose: in <code>src/app.ts</code>, change <code>&lt; 500</code> to <code>&lt;= 500</code>. Run <code>npm test</code>. Watch which tests fail, and read the message they print &mdash; that is your schema, coming back.  Then put it back.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<h2>1. Where the handler sits</h2>
+<p>Every request walks the same pipe. The new piece is not a hook &mdash; it is the branch taken only when something throws.</p>
+<ul class="pipe">
+<li><span class="h">onRequest</span><span>rate limit &rarr; CSRF &rarr; requireAuth &rarr; requirePermission</span><span class="when">before work</span></li>
+<li><span class="h">handler</span><span>the route does its job</span><span class="when">the work</span></li>
+<li class="here"><span class="h">setErrorHandler</span><span>only if something threw &mdash; decides what the failure may <em>say</em></span><span class="when">on throw</span></li>
+<li><span class="h">onResponse</span><span>audit log &mdash; still sees the 500, with route, user, ip</span><span class="when">after</span></li>
+<li><span class="h">onSend</span><span><code>cache-control: no-store</code></span><span class="when">on the way out</span></li>
+</ul>
+<p>Note the order: the error handler runs <strong>before</strong> <code>onResponse</code>. Everything from <a href="./0019-the-row-that-outlives-the-user.html">lesson 19</a> keeps working, unchanged.</p>
+
+<h2>2. The whole decision</h2>
+<div class="cond">err.statusCode ?? 500 &nbsp;&lt;&nbsp; 500 ?</div>
+<div class="fork a">
+<div>
+<span class="tag">yes &mdash; 400, 403, 429</span>
+<h3>The caller caused it</h3>
+<p>The message describes <em>their</em> input. Hiding it makes the API unusable and protects nothing &mdash; they already know what they sent.</p>
+<pre><code>return reply.send(err)
+
+{"statusCode":400,
+ "message":"email: Invalid
+  email address"}</code></pre>
+</div>
+<div>
+<span class="tag">no, or no status at all</span>
+<h3>Your code caused it</h3>
+<p>The message describes <em>your</em> internals. Missing status means your bug, so the careful branch is the <strong>default</strong>.</p>
+<pre><code>log.error({ err })
+
+{"statusCode":500,
+ "message":"Internal Server
+  Error","requestId":"req-1"}</code></pre>
+</div>
+</div>
+<p class="takeaway">The fork is on a number already attached to every error, and that number already says whose fault it is.</p>
+
+<h2>3. What used to come out of the right-hand box</h2>
+<pre><code>HTTP 500  message:
+  Invalid `prisma.task.findMany()` invocation in
+  <span class="leak">/Users/jay/learning/full-stack-learning/server/src/...</span>:6:43
+    ? id?: SortOrder,        <span class="leak">&larr; your schema</span>
+    ? title?: SortOrder,
+    ? ownerId?: SortOrder,
+    ? teamId?: SortOrder,
+    ? owner?: UserOrderByWithRelationInput</code></pre>
+<p>File path, source lines, and every column of the model &mdash; to anyone who can make a request fail.</p>
+
+<h2>4. The detail moves, it does not vanish</h2>
+<div class="join">
+<pre><code>to the caller
+{"statusCode":500,
+ "message":"Internal Server Error",
+ "requestId":"req-1"}</code></pre>
+<span class="id">req-1</span>
+<pre><code>to your log
+{"level":50,"reqId":"req-1",
+ "err":{"type":"PrismaClientValidationError",
+ "message":"\nInvalid `prisma.task...</code></pre>
+</div>
+<p>Fastify already stamps <code>reqId</code> on every log line, so returning <code>request.id</code> costs nothing. &ldquo;It broke&rdquo; becomes one <code>grep</code>.</p>
+
+<div class="rule">Split on the <b>status</b>, not the error&rsquo;s class. A class-based handler has a gap the day a library ships a new error type. A status has none.</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://cheatsheetseries.owasp.org/cheatsheets/Error_Handling_Cheat_Sheet.html">OWASP, Error Handling Cheat Sheet</a> &mdash; short, and it is exactly this lesson written by people who have cleaned up after the alternative.</p>
+<p><b>Also:</b> <a href="https://fastify.dev/docs/latest/Reference/Errors/">Fastify, Errors</a> &mdash; read the section on <code>setErrorHandler</code> and note that it is per-encapsulated-context, so a plugin can have its own.</p>
+<p><b>Reference card:</b> <a href="../reference/api-security-basics.html">API security basics</a>.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/node/">r/node</a> &mdash; ask what people put in a 500 reply in production. Watch for the ones who return an error <em>code</em> the caller can look up. That is the next level of this idea.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0020-the-column-that-cannot-be-a-parameter.html">&larr; Back</a>
+<a href="../reference/the-whole-arc.html">The whole arc, one page &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

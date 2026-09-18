@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 26 &mdash; Double-submit and idempotency</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.2rem 0 .8rem; }
+.two > div { border: 1px solid var(--rule); border-radius: 6px; padding: .9rem 1rem;
+  font-family: var(--mono); font-size: .72rem; line-height: 1.8; }
+.two h4 { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
+  text-transform: uppercase; margin: 0 0 .6rem; color: var(--muted); font-weight: 500; }
+.two .good { border-color: var(--ok); }
+.two .bad { border-color: var(--bad); border-style: dashed; }
+.two .end { margin: .7rem 0 0; font-family: var(--serif); font-size: .82rem; font-weight: 600; }
+.two .good .end { color: var(--ok); }
+.two .bad .end { color: var(--bad); }
+.file { color: var(--muted); font-size: .66rem; }
+
+.rows { display: grid; grid-template-columns: 1fr; gap: .35rem; margin: .6rem 0 0; }
+.rows span { border: 1px solid var(--rule); border-radius: 4px; padding: .3rem .5rem;
+  font-family: var(--mono); font-size: .72rem; }
+.rows .new { border-color: var(--accent); border-width: 2px; font-weight: 600; }
+
+.flow { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; align-items: stretch;
+  gap: .5rem; margin: 1.2rem 0 .6rem; }
+.flow > div { border: 1px solid var(--rule); border-radius: 6px; padding: .8rem .9rem;
+  font-family: var(--mono); font-size: .72rem; line-height: 1.7; }
+.flow .arrow { border: none; display: flex; align-items: center; justify-content: center;
+  color: var(--muted); font-size: 1rem; padding: 0; }
+.flow h4 { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
+  text-transform: uppercase; margin: 0 0 .5rem; color: var(--muted); font-weight: 500; }
+.flow .out { margin: .6rem 0 0; font-family: var(--serif); font-size: .82rem; font-weight: 600; }
+.flow .hit { border-color: var(--ok); } .flow .hit .out { color: var(--ok); }
+.flow .no { border-color: var(--bad); } .flow .no .out { color: var(--bad); }
+
+table.urls { font-family: var(--mono); font-size: .74rem; }
+table.urls td:last-child { text-align: right; font-weight: 600; }
+.s201 { color: var(--ok); } .s400 { color: var(--accent); } .s403 { color: var(--bad); }
+.same { background: var(--code-bg); }
+
+.rule { font-size: .95rem; padding: .8rem 1rem; border-left: 3px solid var(--accent);
+  background: var(--code-bg); border-radius: 0 4px 4px 0; margin: 1.3rem 0 2.2rem; }
+@media (max-width: 44rem) { .two, .flow { grid-template-columns: 1fr; }
+  .flow .arrow { transform: rotate(90deg); } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 26 &middot; Week 10 &middot; Front end</p>
+<h1>Double-submit and idempotency</h1>
+<p class="lede">The list can be edited but not grown. Today it gets a form. And a create is the one request you cannot make safe to send twice &mdash; so the safety has to move somewhere else.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>A create is not idempotent.</strong> Send it twice and you own two rows. Measured below: same body, two <code>201</code>s, ids 360 and 361.</li>
+<li><strong>You cannot fix that on the wire, so fix it at the button.</strong> <code>disabled={isPending}</code> is not a spinner &mdash; it is the duplicate guard.</li>
+<li><strong>The typed text <em>is</em> yours, so it lives in <code>useState</code>.</strong> Yesterday <code>done</code> was a server fact and state was a lie. A draft is not a server fact until you send it.</li>
+<li><strong>Append the reply when you know where it goes.</strong> The list is <code>sort=id&amp;dir=asc</code> and the new id is the biggest, so &ldquo;last&rdquo; is not a guess.</li>
+<li><strong>Invalidate when you do not.</strong> Switch that list to <code>sort=title</code> and the server puts the new row <em>first</em>. That is the first honest use of <code>invalidateQueries</code> in this course.</li>
+</ul>
+</div>
+
+<h2>The word pair</h2>
+<div class="word"><b>idempotent</b> (again) &mdash; <code>PATCH { done: true }</code> was. <code>POST /tasks</code> is not, and no amount of care makes it so: each call is a request for a <em>new</em> row, and two calls ask for two.</div>
+<div class="word"><b>in flight</b> &mdash; sent, not yet answered. The window where a second click does damage. <code>isPending</code> is exactly this window, and it is the only thing you can close.</div>
+<p class="takeaway">When you cannot make the request safe to repeat, make it hard to repeat.</p>
+
+<h2>Measured, on your API, just now</h2>
+<p>A throwaway account: Owner of team <b>445</b>, Viewer of team <b>446</b>. Same cookie throughout.</p>
+<pre><code>POST /teams/445/tasks {"title":"Write the form"}   201  {"id":360,"title":"Write the form","done":false}
+POST /teams/445/tasks {"title":"Write the form"}   201  {"id":361,"title":"Write the form","done":false}
+POST /teams/445/tasks {"title":""}                 400  title: Too small: expected string to have >=1 characters
+POST /teams/445/tasks {}                           400  title: Invalid input: expected string, received undefined
+POST /teams/445/tasks {"title":"x","done":true}    201  {"id":362,"title":"x","done":true}
+POST /teams/445/tasks {"title":"x","ownerId":1}    400  (root): Unrecognized key: "ownerId"
+POST /teams/445/tasks {"title":"aaa…201 chars"}    400  title: Too big: expected string to have <=200 characters
+POST /teams/446/tasks {"title":"Nope"}             403  {"error":"forbidden"}
+POST /teams/999999/tasks {"title":"Nope"}          403  {"error":"forbidden"}</code></pre>
+<p>Look at the first two lines and compare them with <a href="./0025-send-the-value-not-the-verb.html">lesson 25</a>. There, the same request twice gave <em>the same row</em> twice. Here it gives <b>two different rows</b>, and both replies say success, because both calls succeeded. Nothing went wrong on the server. The duplicate is not a bug you can catch &mdash; it is what you asked for.</p>
+<p>Line 8 and line 9 are the same refusal for two different reasons: a Viewer holds no <code>task:create</code>, and a team you are not in gives you no role at all. One answer, so neither tells the caller which (<a href="./0024-two-ways-to-say-no.html">lesson 24</a>). Note there is no <code>404</code> on this route &mdash; you are not naming a row, you are asking for one.</p>
+
+<h2>Where the new row belongs</h2>
+<p>The reply is the whole task, so you can put it in the cache without asking again. But <em>where</em> in the list? That depends on something the reply never mentions: the sort you asked for. Same four rows, same moment, two orders:</p>
+<pre><code>GET /teams/445/tasks?sort=id&amp;dir=asc
+  [ 360 "Write the form",  361 "Write the form",  362 "x",  <b>363 "Aardvark"</b> ]
+
+GET /teams/445/tasks?sort=title&amp;dir=asc
+  [ <b>363 "Aardvark"</b>,  360 "Write the form",  361 "Write the form",  362 "x" ]</code></pre>
+<table>
+<tr><th>Your list is sorted by</th><th>Where does the new row go?</th><th>So do this</th></tr>
+<tr><td><code>id</code>, ascending</td><td>Last. A new id is always the biggest one.</td><td><code>setQueryData</code>, append</td></tr>
+<tr><td><code>title</code></td><td>Somewhere. You would have to re-sort, in the same collation Postgres used.</td><td><code>invalidateQueries</code></td></tr>
+<tr><td>anything, but paged</td><td>Possibly on a page you are not holding.</td><td><code>invalidateQueries</code></td></tr>
+</table>
+<p class="takeaway">Put the reply in the cache when you know where it goes. Ask again when you do not. That is the whole rule, and today is the first time the second half of it is true.</p>
+<div class="aside"><b>This is the exception named in lesson 25.</b> The reference card says: invalidate when the write changed something you were <em>not</em> told about. A create changes the list&rsquo;s <em>membership and its order</em>, and the reply only describes one row. You are appending today only because <code>sort=id</code> makes the order a fact you can compute, not a guess.</div>
+
+<h2>Where the typed text lives</h2>
+<p>Yesterday the rule was &ldquo;no <code>useState</code> &mdash; <code>checked</code> is a server fact&rdquo;. Today the input <em>is</em> <code>useState</code>, and that is not a contradiction.</p>
+<table>
+<tr><th></th><th><code>task.done</code> (lesson 25)</th><th><code>title</code> (today)</th></tr>
+<tr><td>Who owns it</td><td>the server</td><td>you, until you press the button</td></tr>
+<tr><td>If you reload</td><td>it comes back</td><td>it is gone, correctly</td></tr>
+<tr><td>If the server says no</td><td>the cache never changed</td><td>the text must <em>stay</em>, so you can fix it</td></tr>
+<tr><td>So it lives in</td><td>the cache</td><td><code>useState</code></td></tr>
+</table>
+<p>That third row is the one to notice. Clearing the input in <code>onSuccess</code> and nowhere else means a <code>403</code> or a <code>400</code> leaves your sentence on screen. Clearing it in <code>onSubmit</code> would throw the user&rsquo;s typing away to celebrate a request that had not been answered yet.</p>
+
+<h2>The code &mdash; type it yourself</h2>
+
+<h3>1. <code>web/src/features/tasks/tasks.ts</code> &mdash; add to the existing file</h3>
+<pre><code>// …Task, tasksKey, useTasks and useSetTaskDone stay exactly as they are…
+
+export function useCreateTask(teamId: number) {
+  const client = useQueryClient();
+
+  return useMutation({
+    // No `done`. The server defaults it to false, and a field you do not send
+    // is a field you cannot get wrong.
+    mutationFn: async (title: string) =&gt;
+      (await api.post&lt;Task&gt;(`/teams/${teamId}/tasks`, { title })).data,
+
+    // Append, and only because useTasks asks for sort=id&amp;dir=asc: a new id is
+    // the biggest id, so "last" is arithmetic, not a hope. Sort this list by
+    // title one day and this line must become invalidateQueries.
+    onSuccess: (task) =&gt;
+      client.setQueryData&lt;Task[]&gt;(tasksKey(teamId), (tasks) =&gt; [...(tasks ?? []), task]),
+  });
+}</code></pre>
+
+<h3>2. <code>web/src/features/tasks/tasks-panel.tsx</code> &mdash; the form</h3>
+<p>A new component in the same file, above <code>TasksPanel</code>:</p>
+<pre><code>import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { useCreateTask } from "@/features/tasks/tasks";
+
+function NewTaskForm({ teamId }: { teamId: number }) {
+  const [title, setTitle] = useState("");
+  const create = useCreateTask(teamId);
+
+  function onSubmit(event: React.FormEvent&lt;HTMLFormElement&gt;) {
+    event.preventDefault();
+    create.mutate(title, {
+      // Clear ONLY on success. A 403 or a 400 leaves the sentence on screen,
+      // because the words are still yours until the server accepts them.
+      onSuccess: () =&gt; setTitle(""),
+    });
+  }
+
+  return (
+    &lt;form onSubmit={onSubmit} className="flex gap-2"&gt;
+      &lt;Input
+        aria-label="New task"
+        placeholder="Add a task…"
+        maxLength={200}
+        required
+        value={title}
+        onChange={(e) =&gt; setTitle(e.target.value)}
+      /&gt;
+      {/* This is the duplicate guard, not a spinner. A create cannot be
+          repeated safely, so the second click must not happen. */}
+      &lt;Button type="submit" disabled={create.isPending}&gt;
+        {create.isPending ? "Adding…" : "Add"}
+      &lt;/Button&gt;
+    &lt;/form&gt;
+  );
+}</code></pre>
+<p>Then render it inside <code>TasksPanel</code>. Careful where: the three early returns each end the function, so a form placed after them disappears exactly when it is most useful.</p>
+<pre><code>export function TasksPanel({ teamId }: { teamId: number }) {
+  const { data: tasks, isPending, error } = useTasks(teamId);
+  const setDone = useSetTaskDone(teamId);
+
+  if (isPending) return &lt;p className="text-muted-foreground text-sm"&gt;Asking…&lt;/p&gt;;
+
+  if (error !== null)
+    return (
+      &lt;p className="text-destructive text-sm"&gt;
+        {errorMessage(error, "Could not load tasks.")}
+      &lt;/p&gt;
+    );
+
+  return (
+    &lt;div className="grid gap-3"&gt;
+      {/* "No tasks yet" is no longer a reason to render nothing: an empty
+          list is the moment you most want the form. */}
+      {tasks.length === 0 ? (
+        &lt;p className="text-muted-foreground text-sm"&gt;No tasks yet.&lt;/p&gt;
+      ) : (
+        &lt;ul className="grid gap-1"&gt;
+          {/* …the &lt;li&gt; with the Checkbox from lesson 25, unchanged… */}
+        &lt;/ul&gt;
+      )}
+
+      {setDone.error !== null ? (
+        &lt;p className="text-destructive text-sm"&gt;
+          {errorMessage(setDone.error, "Could not save that.")}
+        &lt;/p&gt;
+      ) : null}
+
+      &lt;NewTaskForm teamId={teamId} /&gt;
+    &lt;/div&gt;
+  );
+}</code></pre>
+<div class="aside"><b>Where is the error line for the form?</b> Inside <code>NewTaskForm</code>, next to its own <code>create.error</code> &mdash; that is step 3 of <b>Do this</b>, and it is yours to write. A mutation&rsquo;s error belongs beside the control that caused it, which is the small thing lesson 25 got wrong on purpose.</div>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">Why can a create not be made idempotent the way the PATCH was?</p>
+<button>Because POST is not a safe method</button>
+<button>Because it asks for a new row</button>
+<p class="why" hidden><code>{ done: true }</code> names an end state, so arriving there twice changes nothing. A create names no row &mdash; it asks the server to invent one &mdash; so two calls are two requests for two rows, and the server is right to make both. Measured above: ids 360 and 361, both <code>201</code>. (Making it repeatable needs an idempotency key the caller invents, which is week 13.)</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why may <code>onSuccess</code> append the reply to the end of the list?</p>
+<button>The list is sorted by id ascending</button>
+<button>The server returns rows in that order</button>
+<p class="why" hidden>Because <code>useTasks</code> asks for <code>sort=id&amp;dir=asc</code> and a new id is always the largest, so &ldquo;last&rdquo; is computed, not assumed. The same append under <code>sort=title</code> puts &ldquo;Aardvark&rdquo; at the bottom while the server puts it at the top &mdash; measured above. The order is a property of your request, never of the server.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">What does <code>disabled={create.isPending}</code> actually prevent?</p>
+<button>A confusing wait with no feedback</button>
+<button>A second row you never wanted</button>
+<p class="why" hidden>It closes the in-flight window. On the checkbox, a double-click was harmless &mdash; the same value twice is the same result. Here the second click is a second task. The disabled attribute is doing security-shaped work, not decoration, which is also why a slow network makes this the most important line in the file.</p>
+</div>
+
+<h2>What this does NOT do</h2>
+<table>
+<tr><th>Gap</th><th>Why it is still open</th></tr>
+<tr><td>A retry still duplicates</td><td><code>disabled</code> stops the second <em>click</em>. It does not stop a request the browser or a proxy sends again. Real protection is an idempotency key the client invents and the server remembers &mdash; week 13.</td></tr>
+<tr><td>A Viewer sees the form</td><td>It renders, it submits, it gets a <code>403</code>. Exactly <a href="./0023-the-button-you-can-still-press.html">lesson 23</a>: hiding it with <code>can</code> is the polite half, and the gate is the real half.</td></tr>
+<tr><td>No optimistic append</td><td>The row appears when the server says it exists. Deferred for the second time, deliberately.</td></tr>
+<tr><td>Still no front-end test</td><td>This form is the first thing worth one: submit, assert one request, assert the input cleared. Vitest + Testing Library, when you want it.</td></tr>
+</table>
+
+<h2>Do this</h2>
+<ol>
+<li>Write the two pieces above, then <code>cd web &amp;&amp; npx tsc -b &amp;&amp; npm run lint</code>.</li>
+<li>Two terminals: <code>cd server &amp;&amp; npm run dev</code>, <code>cd web &amp;&amp; npm run dev</code>. Sign in, open a team you own, add a task. One <code>POST</code> in the Network tab and <b>no</b> follow-up <code>GET</code>.</li>
+<li><strong>Give the form its own error line.</strong> Render <code>create.error</code> inside <code>NewTaskForm</code>, the same shape as the one in <code>TasksPanel</code>. Then add a task on your <em>Viewer</em> team: red line says <code>forbidden</code>, and your typing is still there.</li>
+<li><strong>Prove the guard.</strong> Comment out <code>disabled={create.isPending}</code>, throttle the Network tab to Slow 3G, and double-click <b>Add</b>. Two rows, two <code>201</code>s, nothing broken and nothing to blame. Put it back.</li>
+<li><strong>Break it on purpose.</strong> Change <code>useTasks</code> to <code>sort: "title"</code>. Add a task called <code>Aardvark</code>: your screen puts it last, a refresh puts it first. Now swap the <code>onSuccess</code> for <code>client.invalidateQueries({ queryKey: tasksKey(teamId) })</code> and watch it land in the right place at the cost of one extra request. Put the sort back.</li>
+<li><strong>Then fix the server.</strong> Add a task whose title is three spaces. It is accepted &mdash; <code>min(1)</code> counts spaces as characters. In <code>server/src/schemas/task.schema.ts</code> make it <code>z.string().trim().min(1).max(200)</code>: trim runs first, so <code>"   "</code> becomes <code>""</code> and is refused, and <code>"  hi  "</code> is stored as <code>"hi"</code>. <code>UpdateTask</code> reuses <code>CreateTask.shape.title</code>, so one word fixes both routes. Add a test for it, then <code>npm test</code>.</li>
+<li><code>npm run log</code> in <code>server/</code>: every create and every 403 is a row (<a href="./0019-the-row-that-outlives-the-user.html">lesson 19</a>).</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Three pictures. What repeating a create does, what closes that window, and why &ldquo;append&rdquo; is a fact today and a guess tomorrow.</p>
+
+<h2>1. Say it twice, again</h2>
+<p>The same experiment as <a href="./0025-send-the-value-not-the-verb.html">lesson 25</a>, one route along. Same body, sent two times.</p>
+<div class="two">
+<div class="good"><h4>value &mdash; PATCH { done: true }</h4>
+1st &rarr; <span class="s201">200</span> {id:359, done:true}<br>
+2nd &rarr; <span class="s201">200</span> {id:359, done:true}<br>
+<span class="file">one row, twice</span>
+<p class="end">Ends where you aimed.</p></div>
+<div class="bad"><h4>create &mdash; POST /teams/445/tasks</h4>
+1st &rarr; <span class="s201">201</span> {id:<b>360</b>, "Write the form"}<br>
+2nd &rarr; <span class="s201">201</span> {id:<b>361</b>, "Write the form"}<br>
+<span class="file">two rows, measured</span>
+<p class="end">Two of everything.</p></div>
+</div>
+<p class="rule">Nothing failed on the right. Both calls succeeded, because each one asked for a <b>new</b> row and got one. The duplicate is not an error to catch &mdash; it is the answer to the question you asked twice.</p>
+
+<h2>2. So the guard moves to the button</h2>
+<div class="flow">
+<div><h4>click 1</h4>
+create.mutate(title)<br>
+isPending &rarr; <b>true</b><br>
+<span class="file">the in-flight window opens</span>
+<p class="out">1 request</p></div>
+<div class="arrow">&rarr;</div>
+<div class="no"><h4>click 2</h4>
+&lt;Button disabled&gt;<br>
+onSubmit never fires<br>
+<span class="file">this is the whole defence</span>
+<p class="out">0 requests</p></div>
+<div class="arrow">&rarr;</div>
+<div class="hit"><h4>the reply</h4>
+201 {id:363, &hellip;}<br>
+append to the cache<br>
+setTitle("")<br>
+<span class="file">clear only on success</span>
+<p class="out">window closed</p></div>
+</div>
+<p><code>disabled={create.isPending}</code> is doing security-shaped work, not decoration. On a checkbox the second click was harmless. Here it is a second task.</p>
+<p class="rule">When you cannot make the request safe to repeat, make it <b>hard</b> to repeat. The grown-up version &mdash; an idempotency key the caller invents and the server remembers &mdash; is week 13.</p>
+
+<h2>3. Where does the new row go?</h2>
+<p>Four tasks, one moment, two <code>sort</code> values. <code>Aardvark</code> is the row just created.</p>
+<div class="two">
+<div class="good"><h4>sort=id&amp;dir=asc &mdash; what useTasks asks for</h4>
+<div class="rows">
+<span>360 &nbsp;Write the form</span>
+<span>361 &nbsp;Write the form</span>
+<span>362 &nbsp;x</span>
+<span class="new">363 &nbsp;Aardvark &nbsp;&larr; last</span>
+</div>
+<p class="end">Append is arithmetic.</p></div>
+<div class="bad"><h4>sort=title&amp;dir=asc</h4>
+<div class="rows">
+<span class="new">363 &nbsp;Aardvark &nbsp;&larr; first</span>
+<span>360 &nbsp;Write the form</span>
+<span>361 &nbsp;Write the form</span>
+<span>362 &nbsp;x</span>
+</div>
+<p class="end">Append puts it in the wrong place.</p></div>
+</div>
+<p>A new id is always the biggest id, so under <code>sort=id</code> &ldquo;last&rdquo; is computed, not hoped. Under <code>sort=title</code> the reply cannot tell you the position &mdash; only the server knows, in Postgres&rsquo;s collation &mdash; and that is the first honest <code>invalidateQueries</code> in this course.</p>
+<p class="rule"><b>Put the reply in the cache when you know where it goes. Ask again when you do not.</b> The order is a property of your request, never of the server.</p>
+
+<h2>4. What the wall answered</h2>
+<p>Measured on your API today, Owner of team 445, Viewer of team 446:</p>
+<table class="urls">
+<tr><th>POST /teams/&hellip;/tasks</th><th>why</th><th></th></tr>
+<tr class="same"><td>{"title":"Write the form"}</td><td>owner, first send</td><td class="s201">201 &nbsp;id 360</td></tr>
+<tr class="same"><td>{"title":"Write the form"}</td><td>owner, same send again</td><td class="s201">201 &nbsp;id 361</td></tr>
+<tr><td>{"title":""}</td><td>min(1) &mdash; empty is not a title</td><td class="s400">400</td></tr>
+<tr><td>{}</td><td>title is not optional</td><td class="s400">400</td></tr>
+<tr><td>{"title":"x","ownerId":1}</td><td>a key you may not set</td><td class="s400">400</td></tr>
+<tr><td>{"title":"aaa&hellip;201 chars"}</td><td>max(200)</td><td class="s400">400</td></tr>
+<tr><td>team 446 (viewer)</td><td>no task:create in that role</td><td class="s403">403</td></tr>
+<tr><td>team 999999 (not a member)</td><td>no role there at all</td><td class="s403">403</td></tr>
+<tr><td>{"title":"&nbsp;&nbsp;&nbsp;"}</td><td><b>accepted &mdash; spaces are characters</b></td><td class="s201">201</td></tr>
+</table>
+<p>The two shaded rows are the whole lesson. The last row is your homework: <code>z.string().trim().min(1).max(200)</code>, one word, and it fixes the <code>PATCH</code> too because <code>UpdateTask</code> reuses that same field.</p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods/POST">MDN &mdash; HTTP POST</a>. Short. Note the table: <code>POST</code> is neither safe nor idempotent, and that is a promise about <em>your</em> route, not a warning about the method.</p>
+<p><b>Also:</b> <a href="https://stripe.com/docs/api/idempotent_requests">Stripe &mdash; Idempotent requests</a>. Two screens, and it is the grown-up version of today&rsquo;s <code>disabled</code> attribute: the caller invents a key, the server remembers it, and the duplicate gets the first reply back. Read it now, build it in week 13.</p>
+<p><b>Reference card:</b> <a href="../reference/react-query-rules.html">React Query, the rules so far</a> &mdash; updated with the append-or-invalidate table.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/reactjs/">r/reactjs</a> &mdash; ask how people stop double submits. Count how many answers are a debounce. A debounce is a guess about how fast a human clicks; <code>isPending</code> is a fact about the request.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0025-send-the-value-not-the-verb.html">&larr; Back</a>
+<a href="../reference/the-whole-arc.html">The whole arc, one page &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

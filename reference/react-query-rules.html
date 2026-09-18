@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference &mdash; React Query, the rules so far</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<p class="kicker">Reference &middot; Front end</p>
+<h1>React Query, the rules so far</h1>
+<p class="lede">Every rule the front end has earned across lessons 22&ndash;31, on one page. Print it and keep it next to <code>web/src</code>.</p>
+
+<h2>The one-line rules</h2>
+<div class="scroll">
+<table>
+<tr><th>Rule</th><th>Because</th><th>From</th></tr>
+<tr><td>Server state lives in the cache. No <code>useState</code> copy, no <code>useEffect</code> sync.</td><td>A copy drifts, and the copy that drifts is the one with no test.</td><td>22, 25</td></tr>
+<tr><td>Three session states, not two: <code>undefined</code> asking, <code>null</code> out, <code>User</code> in.</td><td>Booting into &ldquo;signed out&rdquo; flashes a login form at someone signed in.</td><td>22</td></tr>
+<tr><td>The query key mirrors the URL, scope included.</td><td>A key is a claim about which answers are interchangeable.</td><td>24</td></tr>
+<tr><td><code>staleTime: 0</code> on the session query. 30s for everything else.</td><td>Staleness is how long a destroyed session still renders a signed-in UI.</td><td>23</td></tr>
+<tr><td>The server sends the answer, never the policy.</td><td><code>can</code> comes from the same table the gate uses, so there is no second copy.</td><td>23</td></tr>
+<tr><td>Send the value, not the verb.</td><td>The same request twice must land in the same place.</td><td>25</td></tr>
+<tr><td>If the reply is the new row, <code>setQueryData</code>. Invalidate only when you must.</td><td>Invalidating is a round trip to learn what you are holding.</td><td>25, 26</td></tr>
+<tr><td>Never mutate the cached value; always spread. But what you build is a <em>proposal</em>.</td><td>Mutating skips the comparison and nothing re-renders. Spreading lets structural sharing decide.</td><td>31, 32</td></tr>
+<tr><td>Assert on cache <em>contents</em>, not on object identity.</td><td>An edit that changes nothing gives the same object back, and the code is correct.</td><td>32</td></tr>
+<tr><td>A create cannot be made safe to repeat, so the button carries the guard.</td><td><code>disabled={isPending}</code> closes the in-flight window; two clicks are two rows.</td><td>26</td></tr>
+<tr><td>Put the reply in the cache when you know where it goes. Ask again when you do not.</td><td>Position is a property of the <code>sort</code> you asked for, not of the reply.</td><td>26</td></tr>
+<tr><td>When the reply is empty, use <code>variables</code> &mdash; the id you sent.</td><td>A <code>204</code> is zero bytes; <code>.data</code> is <code>""</code>, so <code>task.id</code> is <code>undefined</code> and the filter keeps everything.</td><td>28</td></tr>
+<tr><td>Type a date field from the wire as <code>string</code>, and convert it in one visible line.</td><td>JSON has no date type. <code>at: Date</code> compiles and prints the raw ISO text, because a string has <code>toLocaleString</code> too.</td><td>39</td></tr>
+<tr><td>A read-only list needs no scope prefix.</td><td><code>tasksScope</code> exists so mutations can invalidate every filter. Nothing writes to an append-only log.</td><td>39</td></tr>
+<tr><td>Build one <code>Intl.DateTimeFormat</code> at module level, never one per row.</td><td>The formatter is the expensive part. The rows are not.</td><td>39</td></tr>
+<tr><td>Never type a reply that has no body. No <code>api.delete&lt;Task&gt;</code>.</td><td>A type parameter is a claim you made, not a fact TypeScript checked.</td><td>28</td></tr>
+<tr><td>Idempotent is about the state, not the answer.</td><td><code>DELETE</code> twice is <code>204</code> then <code>404</code>: safe, and it looks broken. Judge a retry by the row count.</td><td>28</td></tr>
+<tr><td>A destructive button carries the row in its <code>aria-label</code>.</td><td>&ldquo;Delete&rdquo; alone does not say <em>which</em> task is about to disappear.</td><td>28</td></tr>
+<tr><td>The text being typed lives in <code>useState</code>. A server fact never does.</td><td>A draft is yours until the server accepts it &mdash; and a refusal must leave it on screen.</td><td>26</td></tr>
+<tr><td>Work hangs off the event that caused it, not an effect watching state.</td><td>An effect makes the cause invisible and runs twice under StrictMode.</td><td>22</td></tr>
+<tr><td>One <code>QueryClient</code>, one axios instance, both at module level.</td><td>Built in a component body they are rebuilt every render.</td><td>22</td></tr>
+<tr><td>Closed means unmounted. No <code>enabled</code> flag.</td><td>A component that is not mounted asks nothing.</td><td>24</td></tr>
+<tr><td>The error line says what the server said, and no more.</td><td>A helpful message hands back what a vague 404 was blurring.</td><td>24</td></tr>
+<tr><td>A type parameter is a claim you made, not a fact TypeScript checked.</td><td><code>setQueryData&lt;Task[]&gt;</code> on a paged cache compiles clean and throws. Inferred types are checked; declared ones are believed.</td><td>28, 31</td></tr>
+<tr><td>A field in a reply that no caller reads is a promise the server kept and the client broke.</td><td>Dropping <code>nextCursor</code> hid every task past the twentieth, with no error anywhere.</td><td>31</td></tr>
+<tr><td>Write the paged cache shape <b>once</b>, in one helper.</td><td>Three call sites are three chances to get the shape wrong differently. One place beats N places.</td><td>31</td></tr>
+<tr><td>Return a new box from a cache updater. Never edit the pages in place.</td><td>React compares references. A mutation updates the cache and re-renders nothing.</td><td>31</td></tr>
+<tr><td><b>Everything the answer depends on goes in the key.</b> A filter included.</td><td>Measured: filter left out of the key = <b>0 requests</b> when the user changes it. No error, no wrong data, no reaction.</td><td>33</td></tr>
+<tr><td>A read takes the <b>whole key</b>. A write takes the <b>prefix</b>.</td><td>A read means one answer. A write means every answer to a family of questions.</td><td>33</td></tr>
+<tr><td>A new key resets the paging for free.</td><td>Empty entry &rarr; no pages &rarr; <code>initialPageParam</code> &rarr; no cursor. There is nothing to reset.</td><td>33</td></tr>
+<tr><td>You know a reply's <b>contents</b>. Filters take away its <b>membership</b>.</td><td>A task that just became done does not belong in a <code>?done=false</code> list, and only the server knows the new list.</td><td>33</td></tr>
+<tr><td><code>setQueriesData</code> when a row leaves <em>every</em> question. Only a delete qualifies.</td><td>Nothing can want a row that is gone, so the surgical edit is a fact, not a guess.</td><td>33</td></tr>
+<tr><td>Stale is not fetched. Invalidate marks every match; it refetches only what is mounted.</td><td>Measured: 2 of 2 entries stale, <b>2</b> requests &mdash; both for the list on screen.</td><td>33</td></tr>
+<tr><td><code>placeholderData: keepPreviousData</code> on any query whose key the user changes.</td><td>A new key means <code>isPending</code>, which replaces the filter bar with &ldquo;Asking&hellip;&rdquo; and leaves no way back.</td><td>33</td></tr>
+<tr><td>A <code>&lt;form&gt;</code> is the debounce.</td><td>The words live in <code>useState</code> and join the key on submit. One request per Enter, not per letter, and no <code>useEffect</code>.</td><td>33</td></tr>
+</table>
+</div>
+
+<h2>Read: the shape of a query</h2>
+<pre><code>export const tasksKey = (teamId: number) =&gt; ["teams", teamId, "tasks"] as const;
+
+export function useTasks(teamId: number) {
+  return useQuery({
+    queryKey: tasksKey(teamId),
+    queryFn: async () =&gt; (await api.get&lt;Task[]&gt;(`/teams/${teamId}/tasks`)).data,
+  });
+}</code></pre>
+<p><code>isPending</code> = no answer yet. <code>error !== null</code> = the server said no. <code>data</code> = the answer. Handle all three, in that order, before the happy path.</p>
+
+<h2>Write: the shape of a mutation</h2>
+<pre><code>export function useSetTaskDone(teamId: number) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ id, done }: { id: number; done: boolean }) =&gt;
+      (await api.patch&lt;Task&gt;(`/teams/${teamId}/tasks/${id}`, { done })).data,
+    onSuccess: (task) =&gt;
+      client.setQueryData&lt;Task[]&gt;(tasksKey(teamId), (tasks) =&gt;
+        tasks?.map((t) =&gt; (t.id === task.id ? task : t)),
+      ),
+  });
+}</code></pre>
+<p>And the same shape when the reply is empty. Two differences, both forced by the <code>204</code>: no type parameter, and the id comes from the second argument.</p>
+<pre><code>export function useDeleteTask(teamId: number) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: number) =&gt; {
+      await api.delete(`/teams/${teamId}/tasks/${id}`);   // no &lt;Task&gt;, no .data
+    },
+    onSuccess: (_nothing, <b>id</b>) =&gt;
+      client.setQueryData&lt;Task[]&gt;(tasksKey(teamId), (tasks) =&gt;
+        tasks?.filter((t) =&gt; t.id !== <b>id</b>),
+      ),
+  });
+}</code></pre>
+<p>Useful fields on the returned object: <code>mutate</code>, <code>isPending</code>, <code>error</code>, and <code>variables</code> &mdash; the payload currently in flight, which is how one row knows to disable itself while the others stay live.</p>
+
+<h2>After a write: which move?</h2>
+<div class="scroll">
+<table>
+<tr><th>The reply is&hellip;</th><th>Do</th><th>Cost</th></tr>
+<tr><td>the whole changed row</td><td><code>setQueryData</code>, map it over the old one</td><td>0 extra requests</td></tr>
+<tr><td>a bare <code>204</code> (a delete)</td><td><code>setQueryData</code>, filter out the id from <code>variables</code></td><td>0 extra requests</td></tr>
+<tr><td>a new row, an <b>unpaged</b> list sorted <code>id&amp;asc</code></td><td><code>setQueryData</code>, append it</td><td>0 extra requests</td></tr>
+<tr><td>a new row, and the list is <b>paged</b> (lesson 31)</td><td><code>invalidateQueries</code> &mdash; the row may belong to a page you never fetched</td><td>1 request <em>per page held</em></td></tr>
+<tr><td>a <b>deleted</b> row, paged, any number of filters cached</td><td><code>editPages</code> on the <b>prefix</b> &mdash; <code>setQueriesData</code> drops it from all of them</td><td>0 extra requests</td></tr>
+<tr><td>a <b>changed</b> row, and the list is <b>filtered</b> (lesson 33)</td><td><code>invalidateQueries</code> on the prefix &mdash; the change may move the row out of the list</td><td>1 request <em>per page held</em>, mounted keys only</td></tr>
+<tr><td>a new row that must be sorted in</td><td><code>invalidateQueries</code></td><td>1 extra request, correct order</td></tr>
+<tr><td>a change that touched other queries too</td><td><code>invalidateQueries</code> on each key</td><td>1 request each, and honest</td></tr>
+</table>
+</div>
+<p class="takeaway">Invalidate when the write changed something you were <strong>not</strong> told about. Otherwise you are asking a question you have already been answered.</p>
+
+<h2>Where &ldquo;ticked&rdquo; lives</h2>
+<div class="scroll">
+<table>
+<tr><th></th><th><code>useState</code> in the row</th><th>The cache</th></tr>
+<tr><td>the click</td><td>set state, then send</td><td>send; the reply sets it</td></tr>
+<tr><td>server says 403</td><td>you must set it back yourself</td><td>nothing was written, nothing to undo</td></tr>
+<tr><td>you forget</td><td>the screen lies</td><td>&mdash;</td></tr>
+</table>
+</div>
+<p><code>useState</code> is still right for facts about <em>this tab</em>: an open panel, an unsent form field, a chosen sort.</p>
+
+<h2>Paging: <code>useInfiniteQuery</code></h2>
+<p>One key, an ordered list of replies. The recipe, from lesson 31:</p>
+<pre><code>useInfiniteQuery({
+  queryKey: tasksKey(teamId),
+  queryFn: async ({ pageParam }) =&gt;
+    (await api.get&lt;TaskPage&gt;(url, {
+      params: { sort: "id", dir: "asc", <b>cursor: pageParam</b> },
+    })).data,                      // the WHOLE page, not .items
+  <b>initialPageParam: undefined</b> as number | undefined,
+  <b>getNextPageParam: (last) =&gt; last.nextCursor ?? undefined</b>,
+});
+
+// in the component
+const tasks = data.pages.flatMap((page) =&gt; page.items);
+{hasNextPage &amp;&amp; &lt;Button disabled={isFetchingNextPage}
+   onClick={() =&gt; fetchNextPage()}&gt;Load more&lt;/Button&gt;}</code></pre>
+
+<div class="scroll">
+<table>
+<tr><th></th><th><code>useQuery</code></th><th><code>useInfiniteQuery</code></th></tr>
+<tr><td><code>data</code> is</td><td>the reply</td><td><code>{ pages, pageParams }</code> &mdash; two keys, measured</td></tr>
+<tr><td>the rows are at</td><td><code>data</code></td><td><code>data.pages[n].items</code></td></tr>
+<tr><td><code>data.map</code></td><td>works</td><td><code>undefined</code> &mdash; <code>TypeError</code> at runtime</td></tr>
+<tr><td>a refetch</td><td>1 request</td><td>1 request <em>per page held</em>, in order</td></tr>
+<tr><td>&ldquo;is there more?&rdquo;</td><td>&mdash;</td><td><code>hasNextPage</code>, from <code>getNextPageParam</code></td></tr>
+<tr><td>&ldquo;no more&rdquo; is</td><td>&mdash;</td><td><code>undefined</code> back from <code>getNextPageParam</code></td></tr>
+</table>
+</div>
+<p class="takeaway"><b>query</b> = one key, one answer. <b>infinite query</b> = one key, a growing list of answers. Everything that reads or writes that key has to know which &mdash; and the type checker will only tell you about the reads.</p>
+
+<h3>Editing a paged cache</h3>
+<pre><code>function editPages(client, teamId, edit: (items: Task[]) =&gt; Task[]) {
+  client.setQueryData&lt;<b>InfiniteData&lt;TaskPage&gt;</b>&gt;(tasksKey(teamId), (data) =&gt;
+    data === undefined ? data : {
+      ...data,                                   // new box
+      pages: data.pages.map((page) =&gt; ({         // new array
+        ...page, items: edit(page.items),        // new page
+      })),
+    },
+  );
+}</code></pre>
+<p>Three spreads, on purpose: the box, the array, the page. The <code>undefined</code> branch is required &mdash; the updater runs even when the entry was collected while the write was in flight.</p>
+
+<h2>Filters: the key <em>is</em> the question</h2>
+<pre><code>export type TaskFilter = { done?: boolean; q?: string };
+
+// the PREFIX - every mutation talks to this
+export const tasksScope = (teamId: number) =&gt; ["teams", teamId, "tasks"] as const;
+
+// the WHOLE key - every read talks to this
+export const tasksKey = (teamId: number, filter: TaskFilter) =&gt;
+  [<b>...tasksScope(teamId), filter</b>] as const;
+
+useInfiniteQuery({
+  queryKey: tasksKey(teamId, filter),
+  queryFn: ({ pageParam }) =&gt; api.get(url, {
+    params: { sort: "id", dir: "asc", cursor: pageParam, <b>...filter</b> },
+  }),
+  <b>placeholderData: keepPreviousData</b>,   // the key changes; do not blank the screen
+  ...
+})</code></pre>
+<div class="scroll">
+<table>
+<tr><th>The filter is&hellip;</th><th>Change it and&hellip;</th><th>Then &ldquo;Load more&rdquo; sends&hellip;</th></tr>
+<tr><td><b>not</b> in the key</td><td><b>0 requests.</b> Same entry, still fresh. The screen does not react.</td><td>the new filter with the <b>old cursor</b> &mdash; measured 1 row where 4 belong, and the pages of two questions land in one array</td></tr>
+<tr><td>in the key</td><td>a new entry, so a request with <b>no cursor</b></td><td>the right cursor for the right list</td></tr>
+</table>
+</div>
+<p class="takeaway">A cursor is a bookmark in <b>one</b> list. Hand it to a different list and it is still a valid number pointing at the wrong place &mdash; the server cannot tell, and answers.</p>
+<p>Two notes on hashing keys. React Query <b>drops undefined values</b> when it hashes, so <code>{ done: undefined }</code> and <code>{}</code> are the same entry &mdash; which is why clearing a filter to <code>undefined</code> is safe. And axios drops an <code>undefined</code> param, so an absent filter sends no query string at all. Verified: <code>{sort:"id",dir:"asc",cursor:undefined,done:false}</code> &rarr; <code>?sort=id&amp;dir=asc&amp;done=false</code>.</p>
+
+<h2>Structural sharing: what actually gets stored</h2>
+<p>You return a new box. React Query does not store it as-is. It deep-compares your value against the one it held and <b>keeps the original object for every part that did not change</b>. Measured on 5.102.8, deleting one row from a two-page cache:</p>
+<div class="scroll">
+<table>
+<tr><th>Level</th><th>After the write</th><th>Effect</th></tr>
+<tr><td>the box</td><td>new object</td><td>subscribers re-run</td></tr>
+<tr><td><code>pages</code> array</td><td>new array</td><td>the list is rebuilt</td></tr>
+<tr><td>page 0 &mdash; the row left here</td><td>new object</td><td>re-renders</td></tr>
+<tr><td>page 1 &mdash; untouched</td><td><b>the same object</b></td><td>does <em>not</em> re-render</td></tr>
+<tr><td>any edit that changes nothing</td><td><b>the same box</b></td><td>nothing re-renders at all</td></tr>
+</table>
+</div>
+<p>So the three spreads are still required &mdash; mutating in place skips the comparison entirely and the screen never updates. You just do not get to decide the outcome. <b>New reference where there is new data, and nowhere else.</b></p>
+
+<h2>Testing this without a browser</h2>
+<p>A real <code>QueryClient</code> runs under plain <code>node --test</code>. No jsdom, no Vitest. The blocker is never the browser &mdash; it is the <code>@/</code> alias, which Vite and <code>tsc</code> know and Node does not.</p>
+<pre><code><b>The rule:</b> a function is testable when its <em>runtime</em> import graph
+has no <code>@/</code> in it. Type-only imports are erased, so they cost nothing.
+
+// web/src/features/tasks/edit-pages.ts
+<b>import type</b> { InfiniteData, QueryClient } from "@tanstack/react-query";
+<b>import type</b> { Task, TaskPage } from "./tasks.ts";
+// -&gt; at runtime this file imports NOTHING. node --test can load it.
+
+// web/package.json
+"test": "node --test \"src/**/*.test.ts\""</code></pre>
+<p>Install Vitest the day you test a <em>component</em> &mdash; a click, a rendered row. That needs a fake browser, and hand-rolling one is not worth it. Until then: 0 MB.</p>
+
+<h2>The reply is not the type you wrote</h2>
+<p>The browser cannot import the server's zod schemas, so every reply type in <code>web/</code> is a hand-kept copy. Copies go stale. Which staleness you <em>hear about</em> depends only on the direction the value travels.</p>
+<div class="scroll">
+<table>
+<tr><th></th><th>Checked</th><th>Believed</th></tr>
+<tr><td>shape</td><td>a value you pass <em>into</em> typed code</td><td>a value that arrives from <em>outside</em></td></tr>
+<tr><td>example</td><td><code>can.includes("audit:read")</code></td><td><code>row.at</code> declared <code>Date</code></td></tr>
+<tr><td>compiler</td><td class="yes">TS2345, before it runs</td><td>silent, forever</td></tr>
+<tr><td>where else</td><td>arguments, assignments, returns</td><td>JSON, <code>localStorage</code>, <code>URLSearchParams</code>, <code>as</code></td></tr>
+</table>
+</div>
+<pre><code><b>The date rule.</b> Prisma gives the handler a real Date. z.date() is correct there.
+JSON.stringify calls Date.prototype.toJSON, so ISO <em>text</em> crosses the wire.
+
+const at = "2026-09-11T06:58:31.158Z";
+at.toLocaleString()              -&gt; "2026-09-11T06:58:31.158Z"   <b>// wrong, and silent</b>
+new Date(at).toLocaleString()    -&gt; "9/11/2026, 12:28:31 PM"     <b>// right</b>
+
+// web/src/features/audit/audit-row.ts
+at: <b>string</b>,                                   // ! what the wire actually carries
+const when = new Intl.DateTimeFormat(undefined, { dateStyle: "short", timeStyle: "medium" });
+export const formatAt = (at: string) =&gt; when.format(new Date(at));</code></pre>
+<p>The cure for a believed type is a runtime check &mdash; parse the reply with a schema in <code>queryFn</code> &mdash; and it costs a copy of zod in the bundle. Not paid yet, on purpose. Until it is, the honest move is to declare the type the wire really carries.</p>
+
+<h2>Status codes the front end must recognise</h2>
+<div class="scroll">
+<table>
+<tr><th>Code</th><th>Means</th><th>The page does</th></tr>
+<tr><td><code>401</code></td><td>no session &mdash; except on login, where it is a wrong password</td><td>the interceptor writes <code>null</code> into <code>SESSION_KEY</code>; everything re-renders to the form</td></tr>
+<tr><td><code>403</code></td><td>your role here says no. Decided before any row is read.</td><td>show the server's message, change nothing</td></tr>
+<tr><td><code>404</code></td><td>not in this scope, or nowhere. Deliberately ambiguous.</td><td>show the server's message, and do not explain it</td></tr>
+<tr><td><code>400</code></td><td>the body failed the schema at the door</td><td>show <code>message</code> &mdash; it describes the caller's own input</td></tr>
+<tr><td><code>204</code></td><td>done, and there is nothing to send back. Zero bytes, no <code>content-type</code>.</td><td><code>filter</code> the id from <code>variables</code> out of the cache</td></tr>
+<tr><td><code>409</code></td><td>the gate agreed; the store found a conflict</td><td>a real answer, not a failure</td></tr>
+</table>
+</div>
+
+<h2>Glossary</h2>
+<div class="scroll">
+<table>
+<tr><th>Term</th><th>Meaning here</th></tr>
+<tr><td>query key</td><td>The identity of a cached answer. Same key = the app claims the answers are interchangeable.</td></tr>
+<tr><td>key prefix</td><td>The first part of a key. Not an entry itself &mdash; it <em>matches</em> every entry starting with it. What <code>invalidateQueries</code> and <code>setQueriesData</code> take.</td></tr>
+<tr><td>whole key</td><td>One exact entry, filter included. What a <code>useQuery</code> reads and <code>setQueryData</code> writes.</td></tr>
+<tr><td>membership</td><td>Whether a row still answers the question a list is asking. Contents come in the reply; membership does not.</td></tr>
+<tr><td><code>setQueriesData</code></td><td>Same updater, run over <em>every</em> entry matching a prefix. One call, all filters.</td></tr>
+<tr><td><code>keepPreviousData</code></td><td>Show the last key's answer while the new key loads. <code>isPending</code> stays false, <code>isPlaceholderData</code> is true.</td></tr>
+<tr><td>staleTime</td><td>How long a cached answer is used without asking again. Zero for anything that decides what screen you get.</td></tr>
+<tr><td>idempotent</td><td>Sending it twice lands where sending it once did. <code>{done:true}</code> is; <code>toggle</code> is not.</td></tr>
+<tr><td>authoritative reply</td><td>A response that <em>is</em> the new state, not a receipt. It is what makes <code>setQueryData</code> honest.</td></tr>
+<tr><td>in flight</td><td>Sent, not yet answered. The window a second click does damage in. <code>isPending</code> is exactly this window.</td></tr>
+<tr><td>idempotency key</td><td>A value the caller invents so the server can recognise a repeat of the same create and return the first reply. Week 13.</td></tr>
+<tr><td>204 No Content</td><td>Success with no body, and it <em>must not</em> have one. The answer moved into the status line.</td></tr>
+<tr><td>variables</td><td>The payload of the mutation currently in flight, and the payload <code>onSuccess</code> gets as its second argument. The only copy of your request you still hold.</td></tr>
+<tr><td>soft delete</td><td>A <code>deletedAt</code> column instead of a removed row. What real undo needs. Not built.</td></tr>
+<tr><td>optimistic update</td><td>Writing the cache in <code>onMutate</code>, before the server answers, with a rollback in <code>onError</code>. Not used yet, on purpose.</td></tr>
+<tr><td>infinite query</td><td>One key holding an ordered list of replies. <code>data.pages</code> plus the <code>pageParams</code> each was fetched with.</td></tr>
+<tr><td>pageParam</td><td>The value <code>queryFn</code> receives to fetch one page. Here it is the cursor. <code>undefined</code> means the first page.</td></tr>
+<tr><td>getNextPageParam</td><td>The only function that reads <code>nextCursor</code>. Its return becomes the next <code>pageParam</code>; <code>undefined</code> means there is no next page.</td></tr>
+<tr><td>InfiniteData&lt;T&gt;</td><td>The cache shape: <code>{ pages: T[]; pageParams: unknown[] }</code>. Not an array, and it has no <code>.map</code>.</td></tr>
+<tr><td>flatMap</td><td>The one line that turns pages back into the flat list the UI wanted. Placed after the loading and error returns, never before.</td></tr>
+<tr><td>structural sharing</td><td>React Query deep-compares your new value to the old one and reuses the old objects wherever nothing changed. Free render skipping.</td></tr>
+<tr><td>import graph</td><td>Everything a file pulls in, and everything those pull in. What decides whether a test can load your function.</td></tr>
+<tr><td>type-only import</td><td><code>import type</code>. Deleted before the code runs, so it is not in the import graph. <code>verbatimModuleSyntax</code> makes you write the word.</td></tr>
+<tr><td>checked</td><td>A value you hand to typed code. The compiler compares it to the type and can refuse it.</td></tr>
+<tr><td>believed</td><td>A value arriving from outside the program. The type is your claim about it; nothing verifies it.</td></tr>
+<tr><td>ISO string</td><td><code>"2026-09-11T06:58:31.158Z"</code>. What every <code>Date</code> becomes in JSON, via <code>Date.prototype.toJSON</code>.</td></tr>
+<tr><td>controlled input</td><td>An input whose value comes from React on every render. The reason a refused write un-ticks the box for free.</td></tr>
+<tr><td>runtime guard</td><td>A function that checks a believed value's actual shape before anything trusts it, e.g. <code>assertAuditPage</code>. Turns believed into checked without a validator library.</td></tr>
+<tr><td>type predicate</td><td><code>(v: unknown) =&gt; v is T</code>. Narrows the type only if the function's body actually checked it &mdash; the check and the claim are the same code.</td></tr>
+</table>
+
+<h3>Where to check a believed reply &mdash; lesson 40</h3>
+<table>
+<tr><th>place</th><th>has the value been used yet?</th></tr>
+<tr><td>inside <code>queryFn</code>, before <code>return</code></td><td class="yes">no &mdash; the right place</td></tr>
+<tr><td>inside the component, before render</td><td class="no">yes, the cache already holds it</td></tr>
+</table>
+<p>91.5&nbsp;KB gzip, measured, is what a general schema validator costs for one nine-field object. A hand-written guard for the same object is ~15 lines and 0&nbsp;KB. Both catch the same wrong-type bug; the library also validates shapes this app does not have.</p>
+</div>
+
+<p class="nav"><a href="../lessons/0022-the-browser-does-not-know-you.html">Lesson 22</a> &middot; <a href="../lessons/0023-the-button-you-can-still-press.html">Lesson 23</a> &middot; <a href="../lessons/0024-two-ways-to-say-no.html">Lesson 24</a> &middot; <a href="../lessons/0025-send-the-value-not-the-verb.html">Lesson 25</a> &middot; <a href="../lessons/0026-the-request-you-cannot-repeat.html">Lesson 26</a> &middot; <a href="../lessons/0028-the-reply-that-says-nothing.html">Lesson 28</a> &middot; <a href="../lessons/0031-the-pages-you-threw-away.html">Lesson 31</a> &middot; <a href="../lessons/0032-the-function-you-cannot-import.html">Lesson 32</a> &middot; <a href="../lessons/0039-the-audit-page-in-the-front-end.html">Lesson 39</a> &middot; <a href="../lessons/0040-a-believed-type-can-check-itself.html">Lesson 40</a> &middot; <a href="./rbac-permissions.html">RBAC &amp; permissions</a> &middot; <a href="./api-security-basics.html">API security basics</a> &middot; <a href="./the-whole-arc.html">The whole arc</a></p>
+
+</body>
+</html>

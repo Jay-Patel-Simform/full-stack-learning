@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 2 — Making validation the default</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 02 &middot; Week 1&ndash;2 &middot; API basics</p>
+<h1>Making validation the default</h1>
+<p class="lede">Lesson 1 asked you to <em>remember</em> the wall. A wall you remember is a wall you forget. Today you declare it instead.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>Move the check into the route definition. Fastify runs it for you, before your handler.</li>
+<li>Add a second check on the way <em>out</em>. It deletes any field you did not name.</li>
+<li>Two walls: one stops bad input, one stops leaks.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  R["request"] --> W1{"body<br/>schema"}
+  W1 -- no --> E1["400"]
+  W1 -- yes --> H["handler"]
+  H --> W2{"reply<br/>schema"}
+  W2 --> OUT["reply<br/>named fields only"]
+  H -.-> LEAK["passwordHash<br/>never leaves"]
+</pre>
+<figcaption>Wall one guards what comes in. Wall two guards what goes out &mdash; it silently drops anything you did not list, including the password hash you forgot was on the row.</figcaption>
+</figure>
+
+<h2>The idea</h2>
+<p>Lesson 1's check lived <em>inside</em> the handler. That means every new route needs you to remember to write it. Twenty routes in, one of them will not have it. That one is the hole.</p>
+<p>Fastify lets you attach the schema to the route itself. Now the check is part of the route's definition, not part of your discipline.</p>
+<p>Then the second half, which is the new idea: your handler returns a database row. That row has columns the caller must never see. Declare what the reply looks like, and everything else is stripped.</p>
+
+<div class="word"><b>declare</b> &mdash; write down what you want and let the framework enforce it. The opposite of doing it by hand each time.</div>
+
+<h2>The code</h2>
+<div class="vs">
+<div class="no">
+<h4>Lesson 1 &mdash; remembered</h4>
+<pre><code>app.post("/tasks", async (req, reply) =&gt; {
+  const p = CreateTask.safeParse(req.body);
+  if (!p.success) return reply.code(400)...
+  return store.create(p.data);
+});</code></pre>
+</div>
+<div class="yes">
+<h4>Lesson 2 &mdash; declared</h4>
+<pre><code>app.post("/tasks", {
+  schema: {
+    body: CreateTask,
+    response: { 201: TaskReply },
+  },
+}, async (req) =&gt; store.create(req.body));</code></pre>
+</div>
+</div>
+
+<p><code>req.body</code> is now safe to use directly, because Fastify already replaced it with the checked copy.</p>
+
+<p class="takeaway">Make the safe thing the default thing. Then forgetting is not possible.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="0">
+<p class="q">What is the reply schema actually protecting you from?</p>
+<button>Sending a field you never intended</button>
+<button>Storing a field you never checked</button>
+<p class="why" hidden>Input schemas stop bad writes. The reply schema stops leaks &mdash; a column added to the table next month does not silently start appearing in your JSON.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li>Add a junk column to the reply object in your handler. Confirm it never reaches the client.</li>
+<li>Send <code>{"title":"hi","admin":true}</code>. Look at what got stored.</li>
+</ol>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://fastify.dev/docs/latest/Reference/Validation-and-Serialization/">Fastify, Validation and Serialization</a>.</p>
+<p><b>The long version:</b> <a href="./long/0002-schemas-at-the-door.html">the full walkthrough</a>.</p>
+<p>Stuck? Ask me.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0001-first-validated-route.html">&larr; Back</a>
+<a href="./0003-rows-that-survive-a-restart.html">Next: rows that survive &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

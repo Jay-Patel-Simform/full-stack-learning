@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 8 — Roles as membership rows</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 08 &middot; Week 5&ndash;6 &middot; RBAC</p>
+<h1>Roles as membership rows</h1>
+<p class="lede">Last lesson you built <code>can()</code> and nothing called it. Today you give it a real role to judge, and four routes start answering 403.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>A role is <em>not</em> a column on <code>User</code>. One person can be OWNER here and VIEWER there.</li>
+<li>The role belongs to the <strong>pair</strong>: this user, in this team. A pair is a row.</li>
+<li>Make <code>role</code> a Postgres <strong>enum</strong>, so <code>"ADMINN"</code> cannot be stored.</li>
+<li>One hook, <code>requirePermission("member:invite")</code>, reads the row and answers 403.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+erDiagram
+  User ||--o{ Membership : has
+  Team ||--o{ Membership : has
+  Membership {
+    Int userId FK
+    Int teamId FK
+    Role role
+  }
+</pre>
+<figcaption>The role is not on the person and not on the team. It is on the line between them &mdash; so the same person can be OWNER of one team and VIEWER of another, with no contradiction.</figcaption>
+</figure>
+
+<h2>The idea</h2>
+<p>The tempting version is <code>User.role</code>. It breaks the first time somebody joins a second team, because there is one column and two answers.</p>
+<p>Ask the question precisely: "what may Jay do <em>in team 7</em>?" The question names two things. So the answer lives on the pair of them.</p>
+
+<div class="word"><b>enum</b> &mdash; a type with a fixed list of allowed values, enforced by Postgres itself. A typo is rejected at the database, not discovered in production.</div>
+
+<h2>The code</h2>
+<pre><code>enum Role { VIEWER MEMBER ADMIN OWNER }
+
+model Membership {
+  team   Team @relation(...)
+  teamId Int
+  user   User @relation(...)
+  userId Int
+  role   Role
+  @@id([teamId, userId])      // one role per pair, enforced
+}</code></pre>
+
+<pre><code>// src/auth/require-permission.ts — a function that RETURNS a hook
+export function requirePermission(action: Action) {
+  return async function (request, reply) {
+    const role = await getRole(request.params.teamId, request.user.id);
+    if (!can(role, action)) return reply.code(403).send({ error: "forbidden" });
+  };
+}
+
+// the route asks for a JOB, never for a BADGE
+app.post("/teams/:teamId/members", {
+  preHandler: requirePermission("member:invite"),
+}, handler);</code></pre>
+
+<p>Notice the route says <code>member:invite</code>, not <code>ADMIN</code>. If you later decide MEMBERs may invite, you change <code>can.ts</code> and no route moves.</p>
+
+<p class="takeaway">Routes ask for a job, never for a badge.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="0">
+<p class="q">A stranger and a VIEWER both hit an admin route. What do they get?</p>
+<button>The same 403, with the same message</button>
+<button>A 404 for one, a 403 for other</button>
+<p class="why" hidden>One reply for two different noes. Different replies would tell a stranger that the team exists &mdash; a small leak, and free to avoid.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><code>npm test</code> &mdash; 28 tests. Note the split: <code>can()</code> tests need no database, route tests need a real one.</li>
+<li>Over HTTP, as a MEMBER, try <code>DELETE /teams/1</code>. You want 403.</li>
+<li>Try to <code>INSERT</code> a membership with <code>role = 'ADMINN'</code> in <code>psql</code>. Postgres refuses.</li>
+</ol>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://www.prisma.io/docs/orm/prisma-schema/data-model/relations/many-to-many-relations">Prisma, explicit many-to-many</a> &mdash; a <code>Membership</code> row is exactly this.</p>
+<p><b>The long version:</b> <a href="./long/0008-a-role-is-a-row.html">with all four routes wired</a>.</p>
+<p>Open question for you: can an ADMIN remove the OWNER right now? Try it. That is lesson 9.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0007-one-place-that-says-no.html">&larr; Back</a>
+<a href="./0009-the-third-argument.html">Next: the third argument &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

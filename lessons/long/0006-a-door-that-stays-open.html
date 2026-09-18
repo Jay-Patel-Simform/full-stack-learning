@@ -1,0 +1,439 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 6 — A Door That Stays Open</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 06 &middot; Week 3&ndash;4 &middot; Auth You Write Yourself</p>
+<h1>A door that stays open</h1>
+<p class="lede">Lesson 5 checked a password once. Today the API remembers. The win: <code>DEV_OWNER_ID = 1</code> is deleted, and <code>/tasks</code> finally shows <em>your</em> tasks because the server knows who is asking.</p>
+
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>HTTP forgets. Every request arrives as a stranger.</li>
+<li>Give the browser a random <strong>session id</strong> in a cookie. The browser re-sends it for free.</li>
+<li>Store only <code>sha256(id)</code>. Steal the table, get nothing usable.</li>
+<li>Delete the row and the person is logged out <em>now</em>. A plain JWT cannot do that.</li>
+<li>One hook, <code>requireAuth</code>, guards every task route by default.</li>
+</ul>
+</div>
+
+<h2>The problem: HTTP forgets</h2>
+<p>Every request to your API arrives as a stranger. The server reads it, answers, and throws away everything it knew. The next request starts from nothing.</p>
+<p>So <code>verifyPassword</code> returning <code>true</code> is worth almost nothing on its own. It proves a password <em>for one request</em>. Then the memory is gone.</p>
+<p>You need to hand the browser a small piece of paper that says <em>"this one is Jay"</em>. The browser shows the paper every time. That paper is a <strong>session</strong>.</p>
+
+<h2>Two ways to make the paper</h2>
+<div class="scroll">
+<table>
+<tr><th></th><th>Server-side session</th><th>JWT (signed token)</th></tr>
+<tr><td>What the browser holds</td><td>A random id. Means nothing by itself.</td><td>The user data, signed so it cannot be edited.</td></tr>
+<tr><td>Server looks it up?</td><td>Yes, one row read.</td><td>No. It just checks the signature.</td></tr>
+<tr><td>Log out right now?</td><td>Delete the row. Done.</td><td>Cannot. It stays valid until it expires.</td></tr>
+</table>
+</div>
+<p>People reach for JWT because "no database lookup" sounds fast. Then they discover they cannot log anyone out, and they bolt a <em>refresh token in a database table</em> onto it &mdash; which is a session, wearing a hat.</p>
+<p>Your PLAN.md said access token + refresh token. We are doing plain sessions instead, and the reason is in the third row: <strong>you asked for revocation.</strong> A session gives it for free. Your app is one server talking to one Postgres, so the "no lookup" win does not apply to you.</p>
+<blockquote>"Sessions provide a way to persist state in stateless protocols like HTTP&hellip; They are especially useful when you need to be able to invalidate them." &mdash; <a href="https://thecopenhagenbook.com/sessions">The Copenhagen Book</a></blockquote>
+<p>Same shape as the scrypt choice in <a href="../0005-passwords-you-cannot-read-back.html">lesson 5</a>: take the simpler approved option, and know exactly when it stops fitting.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant B as Browser
+  participant A as API
+  participant D as Postgres
+  B->>A: POST /auth/login  email + password
+  A->>D: find user by email
+  A->>A: verifyPassword (slow, on purpose)
+  A->>D: insert Session { idHash: sha256(id) }
+  A-->>B: Set-Cookie session=raw-id, HttpOnly, SameSite=Lax
+  Note over B,A: the browser stores the cookie and re-sends it on its own
+  B->>A: GET /tasks  (cookie rides along)
+  A->>D: find Session by sha256(cookie)
+  D-->>A: userId
+  A->>D: tasks where ownerId = userId
+  A-->>B: your tasks only
+</pre>
+<figcaption>The browser holds the raw id. The database holds only its fingerprint. Neither side can be swapped for the other.</figcaption>
+</figure>
+
+<h2>Making the id</h2>
+<p>The session id is the whole key to the account. Two rules.</p>
+<p><strong>Rule 1: unguessable.</strong> Not a counter, not the user id, not a UUID from <code>Math.random</code>. The Copenhagen Book asks for <strong>at least 112 bits of entropy</strong> from a <em>cryptographically secure</em> generator. 15 random bytes gives 120 bits. <a href="https://thecopenhagenbook.com/server-side-tokens">Source</a>.</p>
+<p><strong>Rule 2: hash it before you store it.</strong> Exactly the trick from lesson 5. The browser gets the raw id. The database gets only <code>sha256(id)</code>. Steal the database, and you have a table of useless fingerprints &mdash; no live logins.</p>
+<div class="aside">
+<p><strong>Why <code>sha256</code> here, when lesson 5 said <code>sha256</code> was wrong?</strong> Both are true. sha256 is wrong for passwords because a human password is short and guessable, so a fast hash lets a GPU try billions of guesses. A session id is 120 random bits. There is nothing to guess. Nobody brute-forces that, at any speed. So the fast hash is correct.</p>
+<p>The lesson underneath: <em>slow hashing protects low-entropy secrets.</em> That is the rule, not "always use scrypt".</p>
+</div>
+
+<h2>The cookie, and its four flags</h2>
+<p>The paper travels in a <strong>cookie</strong> &mdash; a small string the browser stores and re-sends automatically on every request to your site. You never write code to attach it. That is the point.</p>
+<pre><code>Set-Cookie: session=MnVUGd07fkrR-j60sZul; HttpOnly; SameSite=Lax; Path=/; Expires=...</code></pre>
+<div class="scroll">
+<table>
+<tr><th>Flag</th><th>What it stops</th></tr>
+<tr><td><code>HttpOnly</code></td><td>Page JavaScript cannot read the cookie. So an XSS bug on your site cannot steal the session.</td></tr>
+<tr><td><code>SameSite=Lax</code></td><td>Another site's form cannot POST to your API with your cookie attached. Blocks the easy CSRF.</td></tr>
+<tr><td><code>Path=/</code></td><td>Sent to every route, not just the one that set it.</td></tr>
+<tr><td><code>Secure</code></td><td>HTTPS only. <strong>Left out today</strong>, on purpose: localhost is plain http, and a <code>Secure</code> cookie would simply never be stored. Add it in week 11-12.</td></tr>
+</table>
+</div>
+<p>Two notes worth writing down. <code>Lax</code> not <code>Strict</code>: Strict cookies are not sent when a user arrives from an external link, so they land logged out. And <code>SameSite</code> alone is <em>not</em> full CSRF protection &mdash; that is still a week 7-8 job. <a href="https://thecopenhagenbook.com/csrf">Copenhagen &mdash; CSRF</a>.</p>
+
+<h2>Step 1 &mdash; the table</h2>
+<p><code>server/prisma/schema.prisma</code>:</p>
+<pre><code>model User {
+  // ...existing fields...
+  sessions     Session[]
+}
+
+model Session {
+  // The SHA-256 of the id we handed the browser. Never the id itself.
+  idHash    String   @id
+  expiresAt DateTime
+
+  // onDelete: Cascade -- delete the user, the sessions go with them.
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId Int
+}</code></pre>
+<pre><code>cd /Users/jay/learning/full-stack-learning/server
+npx prisma migrate dev --name session</code></pre>
+<p>Notice what did <em>not</em> happen: no reset, no data loss. Lessons 4 and 5 both made you reset, because both added a required column to a table that already had rows. A brand-new table asks nothing of the old rows. <strong>Adding is cheap. Requiring is expensive.</strong> Keep that in mind when you design a change.</p>
+
+<h2>Step 2 &mdash; the session module</h2>
+<p>New file <code>server/src/auth/session.ts</code>. Same shape as <code>password.ts</code>: the rest of the app never learns how any of this works.</p>
+<pre><code>import { createHash, randomBytes } from "node:crypto";
+import { prisma } from "../../db.ts";
+
+// 15 random bytes = 120 bits of entropy. Copenhagen asks for 112+.
+// base64url so the string is safe in a cookie with no escaping.
+const ID_BYTES = 15;
+
+// 30 days, and every use pushes it back out to 30 days again.
+const LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
+// Only rewrite the row when less than half the life is left. Saves a write
+// on every single request.
+const RENEW_AFTER_MS = LIFETIME_MS / 2;
+
+// SHA-256 is fine here (not scrypt) because the id is already long and
+// random, so there is nothing to guess.
+function hashId(id: string): string {
+  return createHash("sha256").update(id).digest("base64url");
+}
+
+export async function createSession(userId: number) {
+  const id = randomBytes(ID_BYTES).toString("base64url");
+  const expiresAt = new Date(Date.now() + LIFETIME_MS);
+  await prisma.session.create({ data: { idHash: hashId(id), expiresAt, userId } });
+  return { id, expiresAt };
+}
+
+// The user id when the session is real and alive, otherwise undefined.
+export async function readSession(id: string): Promise&lt;number | undefined&gt; {
+  const row = await prisma.session.findUnique({ where: { idHash: hashId(id) } });
+  if (!row) return undefined;
+
+  // Expiry is checked here, in code. The row may still sit in the table.
+  if (row.expiresAt.getTime() &lt;= Date.now()) {
+    await prisma.session.delete({ where: { idHash: row.idHash } });
+    return undefined;
+  }
+
+  // Sliding window: an active user is never logged out mid-work.
+  if (row.expiresAt.getTime() - Date.now() &lt; RENEW_AFTER_MS) {
+    await prisma.session.update({
+      where: { idHash: row.idHash },
+      data: { expiresAt: new Date(Date.now() + LIFETIME_MS) },
+    });
+  }
+  return row.userId;
+}
+
+// deleteMany, not delete: an already-gone session is not an error.
+export async function endSession(id: string): Promise&lt;void&gt; {
+  await prisma.session.deleteMany({ where: { idHash: hashId(id) } });
+}</code></pre>
+<p>Then the cookie helpers, in the same file. Written by hand, so the flags stay where you can see them:</p>
+<pre><code>export const COOKIE_NAME = "session";
+
+export function sessionCookie(id: string, expiresAt: Date): string {
+  return [
+    `${COOKIE_NAME}=${id}`,
+    "HttpOnly",
+    "SameSite=Lax",
+    "Path=/",
+    `Expires=${expiresAt.toUTCString()}`,
+    // ponytail: add "Secure" once this is served over HTTPS (week 11-12).
+  ].join("; ");
+}
+
+export function clearCookie(): string {
+  return `${COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`;
+}
+
+// Cookies arrive as one header: "a=1; session=xyz; b=2".
+export function readCookie(header: string | undefined, name: string) {
+  if (!header) return undefined;
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+  }
+  return undefined;
+}</code></pre>
+<p>There is a <code>@fastify/cookie</code> plugin that does those last twenty lines. Skip it for now. Cookie flags are the whole security story here, and a plugin would hide them behind an options object you would copy without reading.</p>
+
+<h2>Step 3 &mdash; the gate</h2>
+<p>New file <code>server/src/auth/require-auth.ts</code>. This is a Fastify <strong>hook</strong>: a function that runs <em>before</em> the handler. If it sends a reply, the handler never runs at all.</p>
+<pre><code>import type { FastifyReply, FastifyRequest } from "fastify";
+import { COOKIE_NAME, readCookie, readSession } from "./session.ts";
+
+// Tell TypeScript a request can carry a userId, or the assignment below
+// is a type error.
+declare module "fastify" {
+  interface FastifyRequest {
+    userId?: number;
+  }
+}
+
+export async function requireAuth(request: FastifyRequest, reply: FastifyReply) {
+  const id = readCookie(request.headers.cookie, COOKIE_NAME);
+  const userId = id ? await readSession(id) : undefined;
+
+  // 401 = "I do not know who you are". (403 would be "I know, and no".)
+  if (userId === undefined) return reply.code(401).send({ error: "not logged in" });
+
+  request.userId = userId;
+}</code></pre>
+<p>Learn that pair now, because you will use it for the rest of the project:</p>
+<ul>
+<li><strong>401 Unauthorized</strong> &mdash; who are you? (Really it means <em>unauthenticated</em>. The name is a 1990s mistake.)</li>
+<li><strong>403 Forbidden</strong> &mdash; I know who you are, and you still cannot. That is week 5-6, RBAC.</li>
+</ul>
+
+<h2>Step 4 &mdash; login, logout, me</h2>
+<p>Add to <code>server/src/schemas/auth.schema.ts</code>:</p>
+<pre><code>// Login is not Register. No .min(8) here: an old account may have a shorter
+// password, and telling a guesser "too short" is a free hint.
+export const Login = z.object({
+  email: z.string().max(254),
+  password: z.string().max(256),
+});
+export type LoginInput = z.infer&lt;typeof Login&gt;;</code></pre>
+<p>Two more store functions in <code>server/src/store/user.store.ts</code>:</p>
+<pre><code>export function findUserByEmail(email: string) {
+  return prisma.user.findUnique({ where: { email } });
+}
+export function findUserById(id: number) {
+  return prisma.user.findUnique({ where: { id } });
+}</code></pre>
+<p>Then the three routes in <code>server/src/routes/auth.route.ts</code>:</p>
+<pre><code>app.post("/auth/login", {
+  schema: { body: Login, response: { 200: UserPublic, 401: ErrorReply } },
+  handler: async (request, reply) => {
+    const { email, password } = request.body as LoginInput;
+    const user = await findUserByEmail(email);
+
+    // Always hash, even with no user, so both paths take the same time.
+    const ok = await verifyPassword(password, user?.passwordHash ?? DUMMY_HASH);
+
+    // One message for both failures. "wrong password" would confirm the
+    // email exists, which hands an attacker your user list.
+    if (!user || !ok)
+      return reply.code(401).send({ error: "invalid email or password" });
+
+    const session = await createSession(user.id);
+    reply.header("set-cookie", sessionCookie(session.id, session.expiresAt));
+    return reply.send(user);
+  },
+});
+
+app.post("/auth/logout", {
+  schema: { response: { 204: z.null() } },
+  handler: async (request, reply) => {
+    const id = readCookie(request.headers.cookie, COOKIE_NAME);
+    if (id) await endSession(id); // the row dies -> the cookie is now junk
+    reply.header("set-cookie", clearCookie());
+    return reply.code(204).send();
+  },
+});
+
+// "Who am I?" The front end calls this on load to decide what to render.
+app.get("/auth/me", {
+  onRequest: requireAuth,
+  schema: { response: { 200: UserPublic, 401: ErrorReply } },
+  handler: async (request, reply) => {
+    const user = await findUserById(request.userId!);
+    if (!user) return reply.code(401).send({ error: "not logged in" });
+    return user;
+  },
+});</code></pre>
+<p>Logout deletes the row <em>and</em> clears the cookie. The row deletion is the real one. Clearing the cookie is only tidiness &mdash; a copied cookie is now worthless either way. <strong>That is revocation, and it is the thing a plain JWT cannot do.</strong></p>
+<p>And in <code>password.ts</code>, the stand-in hash that keeps the two failure paths the same speed:</p>
+<pre><code>// Without it, a fast "no" means "no such user", and an attacker can list
+// who has an account.
+export const DUMMY_HASH =
+  `scrypt$${N}$${r}$${p}$${Buffer.alloc(16).toString("base64")}$${Buffer.alloc(64).toString("base64")}`;</code></pre>
+
+<h2>Step 5 &mdash; kill <code>DEV_OWNER_ID</code></h2>
+<p>In <code>server/src/routes/tasks.route.ts</code>, delete the constant and add one line at the top of the plugin:</p>
+<pre><code>export default async function tasksRoutes(app: FastifyInstance) {
+  // One line, every route below it. The gate runs before any handler, and
+  // sets request.userId. No route can forget to check, because none opts in.
+  app.addHook("onRequest", requireAuth);</code></pre>
+<p>Then swap every <code>DEV_OWNER_ID</code> for <code>request.userId!</code>.</p>
+<p>Read that comment again, because it is the real design idea. A gate you <em>opt into</em> gets forgotten on the one route added at 5pm on a Friday. A gate on the whole plugin is on by default, and skipping it has to be deliberate. Same move as naming the column <code>passwordHash</code>: <strong>make the safe thing automatic and the unsafe thing awkward.</strong></p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  REQ["Any request to /tasks/*"] --> HK["onRequest hook<br/>requireAuth"]
+  HK --> C{"cookie present<br/>and session alive?"}
+  C -- "no" --> E401["401 &mdash; who are you?<br/>handler never runs"]
+  C -- "yes" --> SET["request.userId = 7"]
+  SET --> H["Handler runs"]
+  H --> OWN{"where: { id, ownerId }"}
+  OWN -- "not yours" --> E404["404 &mdash; says nothing"]
+  OWN -- "yours" --> OK["200"]
+</pre>
+<figcaption>Two separate gates. The first asks <em>who are you</em> (401). The second asks <em>is it yours</em> (404, on purpose &mdash; a 403 would admit the task exists).</figcaption>
+</figure>
+
+<h2>The bug you just created</h2>
+<p>Until today there was one user, so <code>where: { id }</code> was fine. Now there are many, and this line is a hole:</p>
+<pre><code>const { count } = await prisma.task.updateMany({ where: { id }, data });</code></pre>
+<p>Logged in as anybody, <code>PATCH /tasks/7</code> edits task 7 &mdash; even if task 7 is mine. Being logged in is not the same as being allowed. This is <strong>IDOR</strong> (Insecure Direct Object Reference), and it is number one on the <a href="https://owasp.org/www-project-api-security/">OWASP API Security Top 10</a>.</p>
+<p>Fix in <code>server/src/store/task.store.ts</code>: take the owner too, and put it in the <code>where</code>.</p>
+<pre><code>export async function updateTask(id: number, ownerId: number, patch: UpdateTaskInput) {
+  // { id, ownerId }, never { id } alone. Someone else's task simply is not
+  // found, so the reply is the same 404 as a task that does not exist.
+  const { count } = await prisma.task.updateMany({ where: { id, ownerId }, data });
+  // ...
+}
+
+export async function deleteTask(id: number, ownerId: number): Promise&lt;boolean&gt; {
+  const { count } = await prisma.task.deleteMany({ where: { id, ownerId } });
+  return count &gt; 0;
+}</code></pre>
+<p>404, not 403. A 403 would confirm task 7 exists and belongs to someone else. 404 says nothing.</p>
+
+<h2>Step 6 &mdash; prove it</h2>
+<p><code>-c</code> saves cookies to a file, <code>-b</code> sends them. That file is your pretend browser.</p>
+<pre><code>cd /Users/jay/learning/full-stack-learning/server
+npm run dev   # in another terminal
+
+# no cookie -> locked out
+curl -s -o /dev/null -w '%{http_code}\n' localhost:3000/tasks
+# -> 401
+
+curl -s -X POST localhost:3000/auth/register \
+  -H 'content-type: application/json' \
+  -d '{"email":"a@example.com","password":"correct horse battery"}'
+
+# log in and keep the cookie, and look at the header it sets
+curl -s -c /tmp/jar -D- -o /dev/null -X POST localhost:3000/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"a@example.com","password":"correct horse battery"}' | grep -i set-cookie
+# -> set-cookie: session=MnVUGd07...; HttpOnly; SameSite=Lax; Path=/; Expires=...
+
+curl -s -b /tmp/jar localhost:3000/auth/me       # -> {"id":1,"email":"a@example.com"}
+curl -s -b /tmp/jar -X POST localhost:3000/tasks \
+  -H 'content-type: application/json' -d '{"title":"session works"}'
+curl -s -b /tmp/jar localhost:3000/tasks          # -> your task, nobody else's
+
+# wrong password, and a user who does not exist: identical reply
+curl -s -X POST localhost:3000/auth/login -H 'content-type: application/json' \
+  -d '{"email":"a@example.com","password":"nope"}'
+curl -s -X POST localhost:3000/auth/login -H 'content-type: application/json' \
+  -d '{"email":"ghost@example.com","password":"nope"}'
+# -> {"error":"invalid email or password"} both times
+
+# log out, then try the same cookie again
+curl -s -o /dev/null -X POST -b /tmp/jar localhost:3000/auth/logout
+curl -s -b /tmp/jar localhost:3000/tasks          # -> 401. The row is gone.</code></pre>
+<p>And a test file, <code>server/src/auth/session.test.ts</code>, run with <code>npm test</code>. No framework &mdash; <code>node:test</code> is built in, same reasoning as scrypt:</p>
+<pre><code>npm test
+# -> # tests 8
+#    # pass 8</code></pre>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why is a password hash alone not enough to keep you logged in?</p>
+<button>Because the hash expires the moment the login route finishes running it</button>
+<button>Because the next request is a stranger, and nothing carries the proof over</button>
+<p class="why" hidden>Right: HTTP forgets between requests. The session is the thing that carries the proof.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Lesson 5 said <code>sha256</code> was wrong. Why is it right for a session id?</p>
+<button>The id is 120 random bits, so there is no small set of guesses to try</button>
+<button>The id is never sent to the browser, so its hash needs no real strength</button>
+<p class="why" hidden>Right: slow hashing protects <em>guessable</em> secrets. Random 120-bit ids are not guessable at any speed.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">An XSS bug lands on your page. What does <code>HttpOnly</code> buy you?</p>
+<button>The injected script is blocked from running, because cookies gate execution</button>
+<button>The injected script runs, but it cannot read or steal the session cookie</button>
+<p class="why" hidden>Right: HttpOnly hides the cookie from page JavaScript. The XSS is still a bug, just not a session theft.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Login says "invalid email or password" for both failures. Why not be clearer?</p>
+<button>"Wrong password" confirms the email exists, so it leaks your list of users</button>
+<button>"Wrong password" is slower to compute, so the login route would time out</button>
+<p class="why" hidden>Right: that is user enumeration. The generic message and the dummy hash both close it.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">You are logged in as user 2. <code>DELETE /tasks/7</code> belongs to user 1. Which is true?</p>
+<button>The session check already covers it, since only real users reach the handler</button>
+<button>Nothing covers it until the owner is in the where clause, so it is an IDOR</button>
+<p class="why" hidden>Right: logged in is not allowed. Authentication and authorization are two separate gates.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Adding <code>Session</code> needed no <code>migrate reset</code>. Why did lessons 4 and 5?</p>
+<button>They added a required column to a table that already had rows in it</button>
+<button>They changed a primary key, and Postgres rebuilds the table to do that</button>
+<p class="why" hidden>Right: a new table asks nothing of old rows. A new required column asks every row for a value.</p>
+</div>
+
+<h2>Read this</h2>
+<p><strong>Primary source:</strong> <a href="https://thecopenhagenbook.com/sessions">The Copenhagen Book &mdash; Sessions</a>. Short. Read it all, then <a href="https://thecopenhagenbook.com/server-side-tokens">Server-side tokens</a> for the entropy and hashing rules you just implemented.</p>
+<p>Then <a href="https://thecopenhagenbook.com/csrf">CSRF</a>, so you know what <code>SameSite=Lax</code> does and does not cover. It is the shape of your week 7-8 work.</p>
+<p>For the hook you wrote: <a href="https://fastify.dev/docs/latest/Reference/Hooks/">Fastify &mdash; Hooks</a>, the <code>onRequest</code> section.</p>
+
+<h2>Do this before lesson 7</h2>
+<ol>
+<li>Build it. Run every curl above and confirm each line behaves as written.</li>
+<li>Run <code>npm test</code>. All 8 pass.</li>
+<li>Log in twice from two cookie jars (<code>-c /tmp/j1</code>, <code>-c /tmp/j2</code>). Two rows in <code>Session</code>, one user. Log out of one. Confirm the other still works. That is per-device logout, and you got it for free.</li>
+<li>Look at the table: <code>psql "$DATABASE_URL" -c 'select * from "Session";'</code>. Compare an <code>idHash</code> to the cookie value in your jar file. They must not match.</li>
+<li>Edit your jar file and change one character of the session id. Try <code>/auth/me</code>. Say out loud why it fails.</li>
+<li>Register two users. As user B, try to <code>PATCH</code> and <code>DELETE</code> a task belonging to user A. You must get 404 both times. <em>Then comment out <code>ownerId</code> in the where clause and watch it succeed.</em> Feel the hole before you close it again.</li>
+<li>Guess first, then check: expired rows are only deleted when someone tries to use them. What piles up in that table over a year, and what would you add to fix it? Tell me your answer.</li>
+</ol>
+
+<p>Stuck, or something felt hand-wavy? <strong>Ask me.</strong> I am your teacher here. Say what confused you and I will re-teach it another way.</p>
+
+<hr>
+<p class="nav">Back: <a href="../0005-passwords-you-cannot-read-back.html">Lesson 5 &mdash; Passwords you cannot read back</a> &middot; Keep for reference: <a href="../../reference/sessions-and-cookies.html">Sessions &amp; cookies cheat sheet</a> &middot; <a href="../../reference/password-hashing.html">Password hashing</a> &middot; <a href="../../reference/api-security-basics.html">API Security Basics</a> &middot; <a href="../../reference/prisma-postgres.html">Prisma + Postgres</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a> &middot; Sources: <a href="../../RESOURCES.md">RESOURCES.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

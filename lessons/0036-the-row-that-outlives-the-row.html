@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 36 &mdash; Audit logs store copies, not pointers</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.box { font-family: var(--mono); font-size: 0.72rem; margin: 0.9rem 0;
+    border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  .box > .cap { background: var(--code-bg); color: var(--muted); font-size: 0.66rem;
+    padding: 0.35rem 0.7rem; border-bottom: 1px solid var(--rule); }
+  .box .body { padding: 0.6rem 0.7rem; overflow-x: auto; }
+  .box .body > div { padding: 0.12rem 0; white-space: nowrap; }
+  .bad { color: var(--bad); font-weight: 600; }
+  .ok { color: var(--ok); font-weight: 600; }
+  .dim { color: var(--muted); }
+  .acc { color: var(--accent); font-weight: 600; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; margin: 1.1rem 0; }
+  .two h4 { font-family: var(--mono); font-size: 0.66rem; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--muted); margin: 0 0 0.2rem; font-weight: 600; }
+  @media (max-width: 34rem) { .two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 36 &middot; Week 11 &middot; Real world</p>
+<h1>Audit logs store copies, not pointers</h1>
+<p class="lede">You answered the lesson-34 question yourself, and you went past it: <code>AuditLog.userId</code> must not be a foreign key, because a cascade deletes the evidence with the account. You were right. Today I ran the query that proves it, and then the second query, which is the one that hurts: <b>72 of your audit rows point at a task that no longer exists, and not one of them can tell you what that task was.</b> Today you fix that in a migration, before the page that reads it exists.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>Measured on your database: 3,428 of 7,201 audit rows have a <code>userId</code> that is gone.</strong> The rows survived. That is your no-foreign-key rule already paying.</li>
+<li><strong>And 72 rows are a successful task delete whose task is gone.</strong> The row says <code>DELETE ... 204, {"id": 72493}</code>. It cannot say the title, the team or who owned it.</li>
+<li><strong>An id is a pointer. A pointer into a deleted row is nothing.</strong> An audit log must store <b>copies</b>, not pointers.</li>
+<li><strong>The word is a snapshot</strong> &mdash; the values as they were at that moment, written into the audit row itself.</li>
+<li><strong>The trap is timing, not schema.</strong> Your audit hook runs <code>onResponse</code>. By then the handler has already deleted the task. The hook <em>cannot</em> read what it needs to copy.</li>
+<li><strong>So the capture moves earlier</strong> and the write stays where it is. Four new columns, one migration, one decorator, three lines in the delete route.</li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<p>Pre-flight. You fixed the glob, and the count moved:</p>
+<pre><code>server: npm test          <b>155 passing</b>   &lt;- was 154
+web:    npm test          <b>5 passing</b>
+web:    npx tsc -b        clean</code></pre>
+<p>Fourth clean hand-over in a row, and the first one where the number went up because you changed it. Both owed answers are in, both correct, and answer (b) decided this lesson: the page reads <code>AuditLog</code> and only <code>AuditLog</code>. Which means the table has to be worth reading first.</p>
+
+<h2>The two queries</h2>
+<p>Run these yourself in exercise 1. Here is what they printed on your data:</p>
+<pre><code>-- how many audit rows name a user who is gone?
+select count(*) total,
+       count(*) filter (where "userId" is not null
+         and not exists (select 1 from "User" u where u.id = a."userId")) as dead_actor
+from "AuditLog" a;
+
+ total | dead_actor
+-------+------------
+  <b>7201</b> |       <b>3428</b></code></pre>
+<p>Half your rows outlived the person they are about. Those rows are still there because of the rule you wrote into <code>server/CLAUDE.md</code>. With <code>@relation</code> and <code>onDelete: Cascade</code>, the number would be <b>0</b>, and you would not even see the gap.</p>
+<p>Now the same question about the <em>target</em>:</p>
+<pre><code>-- successful task deletes whose task is gone
+select count(*) from "AuditLog" a
+where a.route like '%tasks/:id' and a.method = 'DELETE' and a.status = 204
+  and not exists (select 1 from "Task" t where t.id = (a.params-&gt;&gt;'id')::int);
+
+ count
+-------
+    <b>72</b></code></pre>
+<p>All 72 rows look like this:</p>
+<pre><code>at                      | userId | route                    | status | params
+2026-09-11 05:19:42.035 |   3504 | /teams/:teamId/tasks/:id |    204 | {"id": <b>72493</b>, "teamId": 972}</code></pre>
+<p>Somebody deleted task 72493. What was task 72493? <b>There is no way to find out.</b> The only place that fact ever lived was the row you deleted.</p>
+
+<h2>A pointer and a copy</h2>
+<div class="word"><b>snapshot</b> &mdash; a copy of some values, written down at one moment and never updated again. It shows the past, not the present.</div>
+<p>Every column in your <code>AuditLog</code> today is either a fact of the request (method, route, status, ip, time) or a <b>pointer</b> to another table (<code>userId</code>, <code>teamId</code>, <code>params.id</code>). Pointers are cheap and always current &mdash; which is exactly what is wrong with them here.</p>
+<div class="vs">
+<div class="no"><h4>Pointer</h4><pre><code>userId: 3504
+params: {"id": 72493}</code></pre>
+<p style="font-size:0.82rem">Answers &ldquo;who is user 3504 <b>now</b>&rdquo;. If the row is gone, it answers nothing. If the row changed, it answers with today&rsquo;s values and quietly rewrites history.</p></div>
+<div class="yes"><h4>Snapshot</h4><pre><code>actorEmail: "ana@x.com"
+targetTitle: "Ship the invoice fix"</code></pre>
+<p style="font-size:0.82rem">Answers &ldquo;who did this, and what did they do it to, <b>at the time</b>&rdquo;. Correct forever, because nothing else can change it.</p></div>
+</div>
+<p>In <a href="./0004-rows-that-point-at-rows.html">lesson 4</a> the rule was the other way round: <b>store the pointer, not the copy</b>, so one edit changes the fact everywhere. That rule is still right for normal tables. An audit table is the one place it is inverted, and for the same reason &mdash; you do <em>not</em> want one edit to change the fact everywhere.</p>
+<p class="takeaway">Keep the pointer <em>and</em> the copy. The pointer is for joining while the target is alive; the copy is for the question asked a year later.</p>
+<p>This is not a trick of ours. It is the standard shape for audit logs: OWASP asks every event to carry the actor and the affected item <em>as data in the event</em>, not as a lookup. <a href="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html">OWASP &mdash; Logging Cheat Sheet, &ldquo;Which events to log&rdquo;</a>.</p>
+
+<h2>The part that will surprise you</h2>
+<p>The schema is the easy half. Here is the hard half, and it is about <em>when</em>, not <em>what</em>. Your audit write lives in one <code>onResponse</code> hook in <code>src/app.ts</code>, for a good reason you learned in lesson 18: it is the only place that knows both who asked and what the answer was.</p>
+<p>But look at the order of a successful delete:</p>
+<pre><code>onRequest   requireAuth              task 72493 exists
+preHandler  requirePermission        task 72493 exists
+handler     await deleteTask(...)    <b>task 72493 is now gone</b>
+            reply.code(204).send()
+onResponse  writeAudit(...)          <b>nothing left to copy</b></code></pre>
+<p>So if you put <code>await prisma.task.findUnique(...)</code> inside the hook to build the snapshot, it returns <code>null</code>. Every time. No error, no crash, a green test suite &mdash; and a <code>targetTitle</code> column full of <code>NULL</code> on exactly the rows you built the column for.</p>
+<div class="aside"><b>Your shape again.</b> That is the fifth &ldquo;bug with no error message&rdquo; in a row. Dead code (29), a runtime throw past a clean <code>tsc</code> (32), a click that sends nothing (33), a redact path that matches nothing (34), a test file the runner never got (35). Today: a read that is correct, and too late.</div>
+
+<h2>The fix: capture early, write late</h2>
+<p>Split the job in two. The <b>handler</b> is the only code that holds the task while it is still alive, so it captures. The <b>hook</b> still does the writing, so the &ldquo;one place writes audit rows&rdquo; rule survives.</p>
+<p>Three small pieces. One: a place to put the snapshot, declared once in <code>src/app.ts</code>.</p>
+<pre><code>// * A box the handler fills and the audit hook empties. Declared here
+// * because the hook owns the contract, not the route.
+app.decorateRequest("auditTarget", null);</code></pre>
+<p>Two: the store hands back what it deleted instead of only a count.</p>
+<pre><code>// src/store/task.store.ts
+export async function deleteTask(id: number, teamId: number) {
+  // ? deleteMany still returns a count, so a missing id is not a throw --
+  // ? but a count cannot be snapshotted. Fetch, then delete, in one transaction.
+  const [task] = await prisma.$transaction([
+    prisma.task.findFirst({ where: { id, teamId } }),
+    prisma.task.deleteMany({ where: { id, teamId } }),
+  ]);
+  return task ?? undefined;   // ! undefined still means 404, as before
+}</code></pre>
+<p>Three: the route puts the snapshot in the box.</p>
+<pre><code>const task = await deleteTask(id, teamId);
+if (!task) return reply.code(404).send({ error: "not found" });
+request.auditTarget = {
+  type: "task",
+  id: task.id,
+  snapshot: { title: task.title, status: task.status, teamId: task.teamId },
+};
+return reply.code(204).send();</code></pre>
+<p>And the hook copies the box into the row, if there is one. Routes that never fill it write <code>NULL</code>, which is honest.</p>
+
+<h2>The migration</h2>
+<p>Four columns. Note what is <em>not</em> there: no <code>@relation</code>, no foreign key, on purpose &mdash; the same reason as <code>userId</code>, and now for the target too.</p>
+<pre><code>model AuditLog {
+  // ... everything you already have ...
+
+  // * Snapshots. Copies, not pointers. Nothing else may ever update these.
+  // ! No @relation on targetId, for the same reason as userId: a cascade
+  // ! deletes the evidence at the moment it becomes evidence.
+  actorEmail   String? @db.VarChar(255)
+  targetType   String? @db.VarChar(30)
+  targetId     Int?
+  targetSnapshot Json?
+}</code></pre>
+<pre><code>npx prisma migrate dev --name audit_snapshot</code></pre>
+<p>All four are nullable, and they must be. 7,201 rows already exist and none of them can be given a value now &mdash; the facts are gone. A <code>NOT NULL</code> column here would need a backfill with invented data, and invented data in an audit log is worse than an empty column. You met this trade-off from the other side in <a href="./0010-a-task-belongs-to-a-team.html">lesson 10</a>.</p>
+<div class="word"><b>append-only</b> &mdash; a table that only ever receives <code>INSERT</code>. No <code>UPDATE</code>, no <code>DELETE</code>. Your code already treats <code>AuditLog</code> this way; nothing enforces it yet. Postgres can: <code>REVOKE UPDATE, DELETE ON "AuditLog" FROM tasks;</code> Do not run it today &mdash; your tests delete audit rows between fixtures. It goes in week 13 with retention.</div>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why can the <code>onResponse</code> hook not build the snapshot itself?</p>
+<button>The hook has no database connection there</button>
+<button>The handler already deleted the target row</button>
+<p class="why" hidden><code>onResponse</code> runs after the reply is sent, which is after the handler finished. For a delete, the row it would read is gone, so the read returns <code>null</code> and the column is silently <code>NULL</code>. The hook can still reach the database &mdash; that is how it writes the audit row. The problem is the clock, not the connection.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why is <code>targetId</code> a plain integer and not a relation?</p>
+<button>A cascade would delete the evidence</button>
+<button>A relation would slow the insert down</button>
+<p class="why" hidden>Your own answer from lesson 34. A foreign key with <code>ON DELETE CASCADE</code> removes the audit row at the exact moment somebody deletes the thing the audit row is about. Without the key, the id stays as a number that points nowhere &mdash; which is why the snapshot next to it is the part that carries the meaning.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">The task title changes next month. What should <code>targetSnapshot.title</code> show?</p>
+<button>The current title, kept in step</button>
+<button>The old title, frozen for good</button>
+<p class="why" hidden>The old one. An audit row describes one moment. If it followed the live row it would rewrite history: a task renamed from &ldquo;draft&rdquo; to &ldquo;approved&rdquo; would make every past row read as if it always said &ldquo;approved&rdquo;. That is why the copy is stored and never touched again, and why the table is append-only.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>Run the two queries and see your own numbers.</strong> In <code>server/</code>:
+<pre><code>U="$(grep -m1 DATABASE_URL .env | cut -d'"' -f2)"
+psql "$U" -c 'select count(*) from "AuditLog" a where a."userId" is not null
+  and not exists (select 1 from "User" u where u.id = a."userId");'</code></pre>
+<b>Expect a number in the thousands.</b> Every one of those rows would be gone if <code>userId</code> had a relation.</li>
+
+<li><strong>Prove the cascade claim instead of believing me.</strong> Do not touch <code>AuditLog</code>. Use <code>Session</code>, which <em>does</em> cascade from <code>User</code>:
+<pre><code>grep -n "onDelete" prisma/schema.prisma</code></pre>
+Six lines come back. Find the one on <code>Session.user</code> &mdash; it has a comment above it saying what happens. Then say out loud which table loses rows when a user is deleted, and which does not. <code>AuditLog</code> is not in that list, and that absence is deliberate.</li>
+
+<li><strong>Write the migration.</strong> Add the four columns above to <code>model AuditLog</code> in <code>prisma/schema.prisma</code>, then:
+<pre><code>npx prisma migrate dev --name audit_snapshot
+npm test</code></pre>
+<b>Expect 155 passing still.</b> A migration that adds nullable columns breaks nothing. Then read the generated SQL in <code>prisma/migrations/*_audit_snapshot/migration.sql</code> &mdash; four <code>ADD COLUMN</code> lines, no <code>FOREIGN KEY</code>. Check that with your eyes.</li>
+
+<li><strong>Wire the capture.</strong> The three pieces from the lesson: the decorator in <code>src/app.ts</code>, the changed <code>deleteTask</code>, the three lines in the delete route. Then extend the <code>onResponse</code> hook to pass <code>actorEmail</code> and the three target fields into <code>writeAudit</code>, and widen <code>AuditRow</code> to match. The hook only has <code>request.userId</code>; <code>readSession</code> never loaded the email. So you have to fetch it. Do that in the hook, not the route &mdash; the actor is the same for every route, so it is cross-cutting. <i>(And note the one route where that fetch hits the same timing trap as the target: delete-your-own-account. Leave it; it is a <code>// TODO:</code> for week 13.)</i></li>
+
+<li><strong>Watch it go red first.</strong> Add one test to <code>src/routes/audit.test.ts</code>: delete a task, then read the newest <code>AuditLog</code> row and assert <code>targetSnapshot.title</code> equals the title you created. Before you make it pass, run it and <b>see it fail</b>. Then wire step 4. This is the routine from lesson 35, now on every test you write.</li>
+
+<li><strong>The one that must stay broken.</strong> After step 5 passes, delete the same task <em>through a route with no capture</em> &mdash; for example delete a project. Check the audit row: <code>targetSnapshot</code> is <code>NULL</code>. That is not a bug today; it is the list of routes still to do. Write that list in <code>PLAN.md</code> under week 13.</li>
+
+<li><strong>One question, no code.</strong> Your <code>params</code> column already holds <code>{"id": 72493}</code>, and now <code>targetId</code> holds <code>72493</code> as well. Same number, twice. Is that duplication a mistake? Answer in one or two sentences &mdash; I want the reason, not the verdict. It decides whether the audit page filters on <code>params</code> or on <code>targetId</code>, and one of those two can use an index.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>One DELETE request, hook by hook. The task is alive for three of them and gone for the last one.</p>
+
+<figure class="fig">
+<pre class="mermaid">
+sequenceDiagram
+    participant C as Caller
+    participant H as Hooks
+    participant D as Handler
+    participant P as Postgres
+    C->>H: DELETE /teams/972/tasks/72493
+    H->>P: readSession -> userId 3504
+    Note over P: task 72493 ALIVE
+    H->>P: getRole -> OWNER
+    Note over P: task 72493 ALIVE
+    D->>P: deleteTask(72493)
+    P-->>D: the deleted row
+    Note over P: task 72493 GONE
+    D-->>C: 204
+    H->>P: writeAudit(...)
+    Note over P: nothing left to read
+</pre>
+<figcaption>The only moment the task and the decision both exist is inside the handler.</figcaption>
+</figure>
+
+<p class="takeaway">The hook knows who and what answer. The handler knows what was destroyed. Neither one knows all three.</p>
+
+<h2>What the row says today</h2>
+<div class="box">
+<div class="cap">AuditLog, one of 72 like it</div>
+<div class="body">
+<div>at      <span class="dim">2026-09-11 05:19:42</span></div>
+<div>userId  <span class="bad">3504</span>       <span class="dim">&lt;- user deleted, points nowhere</span></div>
+<div>route   /teams/:teamId/tasks/:id</div>
+<div>status  <span class="ok">204</span>        <span class="dim">&lt;- it definitely happened</span></div>
+<div>params  {"id": <span class="bad">72493</span>}  <span class="dim">&lt;- task deleted, points nowhere</span></div>
+<div><span class="dim">question: what was task 72493 called?  </span><span class="bad">unanswerable</span></div>
+</div>
+</div>
+
+<h2>Pointer vs copy, on the same row</h2>
+<div class="two">
+<div>
+<h4>pointer (today)</h4>
+<div class="box"><div class="body">
+<div>userId <span class="bad">3504</span>  <span class="dim">join -&gt; 0 rows</span></div>
+<div>params.id <span class="bad">72493</span> <span class="dim">join -&gt; 0 rows</span></div>
+<div><span class="dim">meaning today:</span> <span class="bad">none</span></div>
+</div></div>
+</div>
+<div>
+<h4>copy (after the migration)</h4>
+<div class="box"><div class="body">
+<div>actorEmail <span class="ok">"ana@x.com"</span></div>
+<div>targetType <span class="ok">"task"</span></div>
+<div>targetSnapshot <span class="ok">{title,status}</span></div>
+<div><span class="dim">meaning in ten years:</span> <span class="ok">same</span></div>
+</div></div>
+</div>
+</div>
+
+<h2>Where each piece is picked up</h2>
+<div class="box">
+<div class="cap">capture early, write once</div>
+<div class="body">
+<div><span class="acc">preHandler</span>  who      <span class="dim">request.userId</span></div>
+<div><span class="acc">handler</span>     what     <span class="dim">request.auditTarget = { type, id, snapshot }</span></div>
+<div><span class="acc">onResponse</span>  outcome  <span class="dim">reply.statusCode  ->  writeAudit(one row)</span></div>
+</div>
+</div>
+<p class="takeaway">Three places collect. One place writes. The rule from lesson 18 survives.</p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html">OWASP &mdash; Logging Cheat Sheet</a>. Read only the section &ldquo;Event attributes&rdquo;. It is a list of what every audit event should carry. Compare it with your columns and note what you are missing.</p>
+<p><b>Then this:</b> <a href="https://www.postgresql.org/docs/current/datatype-json.html">PostgreSQL &mdash; JSON types</a>, the first four paragraphs, on <code>json</code> versus <code>jsonb</code>. Prisma&rsquo;s <code>Json</code> maps to <code>jsonb</code>, and the reason matters for the page you are about to build.</p>
+<p><b>Reference card:</b> <a href="../reference/logging.html">Logging and audit</a> &mdash; updated today with the pointer-versus-snapshot rule and the capture timing.</p>
+<p><b>Ask the community:</b> <a href="https://dba.stackexchange.com/questions/tagged/audit">dba.stackexchange &mdash; the <code>audit</code> tag</a>. Search &ldquo;audit table foreign key&rdquo;. You will find people arguing both sides, which is worth reading: your reason has to survive the other side&rsquo;s argument.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0035-the-test-that-never-ran.html">&larr; Back</a>
+<a href="../reference/logging.html">Logging reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

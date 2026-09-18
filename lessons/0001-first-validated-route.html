@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 1 — Validating a route with zod</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 01 &middot; Week 1&ndash;2 &middot; API basics</p>
+<h1>Validating a route with zod</h1>
+<p class="lede">A server is a function that runs when a request arrives. Today you write one, and you make it refuse bad input.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>A server waits at a port. A request arrives, your function runs, you send a reply.</li>
+<li>Check the request <em>before</em> your code touches it.</li>
+<li>Then use the <strong>checked copy</strong>, never the raw one.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  R["request<br/>{ title: 42 }"] --> W{"check<br/>the shape"}
+  W -- "wrong" --> E["400<br/>reply, done"]
+  W -- "right" --> H["your code<br/>runs"]
+  H --> DB[("store")]
+</pre>
+<figcaption>The check is a wall in front of your code. Nothing wrong gets past it, so your code only ever sees good data.</figcaption>
+</figure>
+
+<h2>The idea</h2>
+<p>In the browser you validate a form so the user is not annoyed. On a server there is no user. There is whoever sent the bytes.</p>
+<p>They can send anything: a number where you wanted a string, a missing field, ten megabytes of nothing. If your code touches that directly, it crashes or it stores rubbish.</p>
+<p>So: one wall, at the door.</p>
+
+<div class="word"><b>zod</b> &mdash; a library where you write down the shape you want, and it tells you yes or no. Written down, not remembered.</div>
+
+<h2>The code</h2>
+<pre><code>// src/routes/task.routes.ts
+const CreateTask = z.object({
+  title: z.string().min(1).max(200),
+  done: z.boolean().optional(),
+});
+
+app.post("/tasks", async (request, reply) =&gt; {
+  const parsed = CreateTask.safeParse(request.body);
+  if (!parsed.success) return reply.code(400).send({ error: "bad input" });
+
+  // parsed.data, NOT request.body
+  return store.create(parsed.data);
+});</code></pre>
+
+<p class="takeaway">The front end validates to be kind to the user. The back end validates to stay alive.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">After a successful check, which object should your code use?</p>
+<button>Use <code>request.body</code>, the original</button>
+<button>Use <code>parsed.data</code>, the checked</button>
+<p class="why" hidden>The raw body still holds anything extra the caller sent. The checked copy holds only what you named. Always use the checked one.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li>Run the server. <code>curl -X POST localhost:3000/tasks -H 'content-type: application/json' -d '{"title":"hi"}'</code></li>
+<li>Now break it on purpose: <code>-d '{"title":42}'</code>. You want a 400.</li>
+<li>Try <code>-d '{}'</code>. Also a 400.</li>
+</ol>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://fastify.dev/docs/latest/Guides/Getting-Started/">Fastify, Getting Started</a> &mdash; the first two sections only.</p>
+<p><b>The long version:</b> <a href="./long/0001-first-validated-route.html">every detail and every command</a>.</p>
+<p>Any line unclear? Ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0002-schemas-at-the-door.html">Next: schemas at the door &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

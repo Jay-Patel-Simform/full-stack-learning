@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 55 &mdash; The database that is not on your laptop</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 55 &middot; Week 15&ndash;16 &middot; Docker + deploy</p>
+<h1>The database that is not on your laptop</h1>
+<p class="lede">You asked for the deploy. This is the first half of it, and it is the half that decides whether the second half works. Today your container stays on your Mac, but its database moves to the internet. Two things in your own files only work on this laptop, and you will find both. <b>Zero TypeScript changes. Suite stays at 172.</b></p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>The database moves first, the app moves second.</strong> A deploy that changes both at once gives you two suspects for every error. Lesson 56 moves the app.</li>
+<li><strong>A <dfn>managed Postgres</dfn> (a database someone else runs and backs up) gives you a URL, not a machine.</strong> We use <b>Neon</b>: free, permanent, no credit card, 0.5&nbsp;GB.</li>
+<li><strong>You get <em>two</em> URLs, and they are not interchangeable.</strong> One goes through a <dfn>connection pooler</dfn> (a middleman that shares a few real connections between many callers). One is <dfn>direct</dfn>, straight to Postgres. Migrations need the direct one.</li>
+<li><strong>Your <code>tasks_app.sql</code> has two names in it that exist only here:</strong> the database <code>tasks</code> and the role <code>tasks</code>. Two words fix it forever. <b>I ran the fix against your container.</b></li>
+<li><strong>Neon refuses the password <code>tasks_app</code>.</strong> It demands real entropy. The rotation I have asked for five times is now not my opinion, it is a wall.</li>
+<li><strong>The new password does not go in the SQL file.</strong> That file gets committed in lesson 56, and a secret committed once is in the history forever. psql&rsquo;s <code>\getenv</code> reads it from the environment instead &mdash; and <code>.env.docker</code>, which now holds two real credentials, goes into <code>.gitignore</code> today.</li>
+<li><strong>Streak intact: no new dependency, 55 lessons.</strong></li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<pre><code>server: npm test          <b>172 passing</b>
+server: Dockerfile + docker-entrypoint.sh    lesson 52 + 54
+server: compose.yml    db + api, both up right now
+server: .env.docker    two URLs, both pointing at <b>db:5432</b>
+Postgres: on your Mac, and in a container. <b>Nowhere else.</b></code></pre>
+<p>Nothing in <code>src/</code> is touched today. You edit one SQL file and one env file.</p>
+
+<h2>Why this is not the deploy</h2>
+<p>I planned lesson 55 as the whole deploy. Then I read your <code>prisma/sql/tasks_app.sql</code> again and found this line:</p>
+<pre><code>GRANT CONNECT ON DATABASE <b>tasks</b> TO tasks_app;</code></pre>
+<p>On Neon your database is called <code>neondb</code>. That line would fail. Four lines below it there is a second one:</p>
+<pre><code>ALTER DEFAULT PRIVILEGES FOR ROLE <b>tasks</b> IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO tasks_app;</code></pre>
+<p>On Neon the owner role is called <code>neondb_owner</code>. That line would <em>succeed</em> and do nothing, because it would describe a role that creates no tables. Your app would boot, read fine, and then fail on the first <code>INSERT</code> into any table a future migration adds.</p>
+<p class="takeaway"><b>Move one thing at a time.</b> If the app and the database both moved today, that second failure would arrive next month with a deploy to blame. Today there is only one suspect.</p>
+
+<h2>Step 1 &mdash; the free database</h2>
+<p>Go to <a href="https://neon.com">neon.com</a>, sign up, create a project. No card. Pick the region closest to you. You now have a database called <code>neondb</code> and a role called <code>neondb_owner</code>.</p>
+<p>On the project's <b>Connect</b> panel you get two connection strings. They differ by six characters:</p>
+<pre><code><span class="dim">pooled  </span> postgresql://neondb_owner:PASS@ep-cool-name-123<b>-pooler</b>.eu-central-1.aws.neon.tech/neondb?sslmode=require
+<span class="dim">direct  </span> postgresql://neondb_owner:PASS@ep-cool-name-123.eu-central-1.aws.neon.tech/neondb?sslmode=require</code></pre>
+<div class="scroll"><table>
+<tr><th>URL</th><th>What it is, and what it is for</th></tr>
+<tr><td><code>-pooler</code></td><td>Goes through <b>PgBouncer</b>, a connection pooler. Postgres can only hold a few hundred connections at once, and each one costs memory. The pooler holds those and lends them out per query. <b>This is what a web app should use.</b></td></tr>
+<tr><td>no <code>-pooler</code></td><td>A real, private connection to Postgres. Slower to open, but it is <em>yours</em> until you close it. <b>Migrations must use this.</b></td></tr>
+</table></div>
+<p>Why migrations must use the direct one is the thing you learned last lesson. <code>prisma migrate deploy</code> takes an <b>advisory lock</b> so that two containers cannot migrate at once. A lock belongs to a connection. Through a pooler, your next statement can arrive on a <em>different</em> connection, which does not hold the lock &mdash; so the safety net from lesson 54 quietly stops existing. <a href="https://neon.com/docs/guides/prisma">Neon says the same thing</a>, in one line, without the reason.</p>
+<p class="takeaway"><b>You already have two URLs, and they already split along this line.</b> <code>DATABASE_URL</code> is the owner, used by migrations. <code>APP_DATABASE_URL</code> is <code>tasks_app</code>, used by every request. Owner &rarr; direct. App &rarr; pooled. The decision lesson 42 made for security also happens to be the right one for pooling.</p>
+
+<h2>Step 2 &mdash; the two words that make your SQL portable</h2>
+<p>Open <code>server/prisma/sql/tasks_app.sql</code>. Change exactly two things:</p>
+<pre><code>GRANT CONNECT ON DATABASE <b>:"DBNAME"</b> TO tasks_app;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE <b>:"USER"</b> IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO tasks_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE <b>:"USER"</b> IN SCHEMA public
+  GRANT USAGE, SELECT ON SEQUENCES TO tasks_app;</code></pre>
+<p><code>DBNAME</code> and <code>USER</code> are <dfn>psql automatic variables</dfn> &mdash; values psql fills in from the connection you gave it. You set nothing. <code>:"NAME"</code> with the quotes inside means <em>put this in as an identifier</em>, so a database called <code>my-db</code> would not break the statement.</p>
+<p>This is measured, not guessed. I ran it against the container running on your Mac right now:</p>
+<pre><code>$ docker compose exec -T db psql -U tasks -d tasks -f - &lt; probe.sql
+ whoami |  db
+--------+-------
+ tasks  | tasks
+CREATE ROLE
+GRANT
+ALTER DEFAULT PRIVILEGES</code></pre>
+<p>Same file, two databases, no copy. The alternative was a second SQL file for Neon that drifts out of step with this one by next month.</p>
+<p class="dim">One caveat, and it is small: <code>:VARIABLES</code> are a psql feature, not a Postgres one. This file is already a psql file &mdash; lesson 53 mounts it into <code>docker-entrypoint-initdb.d</code>, which runs psql. Nothing else reads it.</p>
+
+<h2>Step 3 &mdash; the password, finally</h2>
+<p>I have asked five times. Neon asks once and means it: a role password needs about <b>60 bits of entropy</b>, roughly twelve mixed characters. <code>tasks_app</code> is rejected at <code>CREATE ROLE</code>. Generate one:</p>
+<pre><code>openssl rand -base64 18 | tr '+/' '-_'</code></pre>
+<p class="dim">The <code>tr</code> is not decoration. Base64 emits <code>+</code> and <code>/</code>, and this password has to survive being pasted into the middle of a URL, where <code>/</code> ends the host and <code>+</code> can mean a space. Swapping them for <code>-</code> and <code>_</code> costs no entropy and saves you an hour of reading a connection error that says nothing useful.</p>
+<p>That is 144 bits, and <code>openssl</code> is already on your Mac. Now stop before you paste it, because the obvious place is the wrong one.</p>
+
+<h3>The obvious place is a file you are about to commit</h3>
+<p>The line as written today is this:</p>
+<pre><code>CREATE ROLE tasks_app LOGIN PASSWORD 'tasks_app';</code></pre>
+<p>Replace <code>tasks_app</code> with a real secret and <code>prisma/sql/tasks_app.sql</code> becomes a file that carries a live credential. That file is <em>source</em>. It is mounted by compose, it belongs next to the schema, and lesson 56 puts this directory under git. A secret committed once is in the history forever &mdash; deleting the line later does not remove it, it only removes it from the tip. Rotating is then the only real fix, and you rotate by doing this whole step again.</p>
+<p>So the password never goes in the file. psql can read it from the environment at run time:</p>
+<pre><code><b>\getenv app_password APP_PASSWORD</b>
+CREATE ROLE tasks_app LOGIN PASSWORD <b>:'app_password'</b>;</code></pre>
+<p><code>\getenv <i>var</i> <i>ENVNAME</i></code> is a psql backslash command: it copies an environment variable into a psql variable. <code>:'name'</code> &mdash; quotes <em>outside</em> the colon &mdash; means <em>put this in as a string literal</em>, correctly escaped. Compare it with the <code>:"DBNAME"</code> from step 1: quotes inside is an <b>identifier</b>, quotes outside is a <b>literal</b>. A password is a literal. A database name is an identifier. The two forms are not interchangeable and psql will not guess for you.</p>
+<p class="takeaway"><b>Same trick as step 1, one rung further.</b> There, a value that was true only on your laptop came out of the file. Here, a value that must never be in <em>any</em> file comes out too. What is left is a file that describes privileges and names no environment and no secret &mdash; which is the only kind of file that is safe to commit.</p>
+
+<h3>Three places, not two</h3>
+<div class="scroll"><table>
+<tr><th>Where</th><th>What changes</th></tr>
+<tr><td><code>prisma/sql/tasks_app.sql</code></td><td>the two lines above &mdash; and delete the <code>!</code> comment about changing the password, because the file can no longer hold one.</td></tr>
+<tr><td><code>.env.docker</code></td><td>the password inside <code>APP_DATABASE_URL</code>, <b>and</b> a new <code>APP_PASSWORD=</code> line for <code>\getenv</code> to find.</td></tr>
+<tr><td><code>server/compose.yml</code></td><td><code>env_file: .env.docker</code> on the <code>db</code> service, so the init run has <code>APP_PASSWORD</code> in its environment.</td></tr>
+</table></div>
+<p>The compose change is the part that is easy to miss. The <code>db</code> service had no <code>env_file</code> &mdash; it set <code>POSTGRES_USER</code> and friends inline and needed nothing else. Now the SQL it runs at init reads an environment variable, so the variable has to be in that container. Add one line:</p>
+<pre><code>  db:
+    image: postgres:17
+    <b>env_file: .env.docker</b>
+    environment:
+      POSTGRES_USER: tasks</code></pre>
+<p class="dim">The inline <code>environment:</code> block still wins over <code>env_file</code> for anything named in both, so the Postgres settings are unaffected. The container also picks up <code>DATABASE_URL</code> and the rest, which Postgres ignores.</p>
+<p>Your local container database already has the old role. <code>docker compose down -v</code> and let the init file build it fresh &mdash; the volume matters much less after today.</p>
+
+<h3>And the file that <em>does</em> hold the secret</h3>
+<p>Check <code>.gitignore</code> at the repo root. Mine had three lines and <code>.env.docker</code> was not one of them:</p>
+<pre><code>.neon
+.env.local
+node_modules/
+<b>.env.docker</b></code></pre>
+<p class="takeaway"><b>Moving a secret does not protect it, it relocates it.</b> Everything above pushes the password out of a committed file into <code>.env.docker</code> &mdash; which accomplishes nothing at all unless <code>.env.docker</code> is ignored. It is already out of the <em>image</em> (<code>.dockerignore</code> has <code>.env.*</code>, and compose passes it at run time with <code>env_file</code>). Git is the other half, and lesson 56 is the one that introduces a repository. Do it now, while the file is still untracked and the fix costs one line.</p>
+
+<h2>Step 4 &mdash; run your file against Neon</h2>
+<p>One command. Use the <b>direct</b> URL, quoted, with the password in front of it as an environment variable &mdash; that is what <code>\getenv</code> reads:</p>
+<pre><code>cd server
+<b>APP_PASSWORD='&lt;new&gt;'</b> psql "postgresql://neondb_owner:PASS@ep-cool-name-123.eu-central-1.aws.neon.tech/neondb?sslmode=require" \
+  -f prisma/sql/tasks_app.sql</code></pre>
+<p class="dim">A variable written in front of a command like that exists only for that command &mdash; it is not exported, and it is not in your shell afterwards. It <em>is</em> in your shell history, which is the one hole left; a leading space suppresses that in zsh.</p>
+<p>Expect <code>CREATE ROLE</code>, three <code>GRANT</code>, two <code>ALTER DEFAULT PRIVILEGES</code>. The <code>GRANT ... ON ALL TABLES</code> lines will say <code>GRANT</code> while granting nothing, because there are no tables yet. That is correct and is exactly why the <code>ALTER DEFAULT PRIVILEGES</code> lines exist &mdash; they cover the tables your migrations are about to create.</p>
+<p class="dim">If <code>psql</code> is not on your PATH, you have it inside the container: <code>docker compose exec -T db psql "&lt;url&gt;" -f -</code> with the file piped in.</p>
+<p>One Neon detail worth knowing before it confuses you: a free database <b>scales to zero</b> after five minutes with no queries. The next query wakes it and takes about half a second. Nothing is lost. It is why the free plan can be permanent.</p>
+
+<h2>Step 5 &mdash; point the container at it</h2>
+<p><code>.env.docker</code>, the whole file. Two URLs change and one line is new, nothing else moves:</p>
+<pre><code>DATABASE_URL=postgresql://<b>neondb_owner</b>:OWNERPASS@ep-cool-name-123.eu-central-1.aws.neon.tech/neondb?sslmode=require
+APP_DATABASE_URL=postgresql://<b>tasks_app</b>:NEWPASS@ep-cool-name-123<b>-pooler</b>.eu-central-1.aws.neon.tech/neondb?sslmode=require
+<b>APP_PASSWORD=NEWPASS</b>
+NODE_ENV=development
+ALLOWED_ORIGINS=http://localhost:5173
+TRUST_PROXY=false
+HOST=0.0.0.0
+PORT=3000</code></pre>
+<p>Read those two lines against each other. Different role, different host, one database. The owner goes in the front door. The internet goes through the pooler and owns nothing.</p>
+<p><code>NODE_ENV</code> and <code>TRUST_PROXY</code> stay as they are. There is still no HTTPS and still no proxy in front of you. Lesson 56 changes both, and being honest about it today is the whole reason lesson 29's cookie bug is not waiting for you.</p>
+<p>Now start it:</p>
+<pre><code>docker compose up -d --build api
+docker compose logs api</code></pre>
+<p>What you should see is last lesson's log, with a different address in it:</p>
+<pre><code>api-1  | Datasource "db": PostgreSQL database "neondb" at "ep-cool-name-123...neon.tech"
+api-1  | 15 migrations found in prisma/migrations
+api-1  | Applying migration `20260901075820_init`
+<span class="dim">...</span>
+api-1  | Script executed successfully.
+api-1  | {"level":30,...,"msg":"Server listening at http://0.0.0.0:3000"}</code></pre>
+<p>Your entrypoint just built fifteen tables on a machine you will never see, and then revoked <code>DELETE</code> on the audit log there. You wrote that script last lesson. It did not change.</p>
+<p>Seed it once, by hand, exactly as before &mdash; and this is the last time it is harmless, because next lesson this database is the real one:</p>
+<pre><code>docker compose run --rm api npx prisma db seed</code></pre>
+<p>Then log in at <code>localhost:3000</code>. Same app, same container, and the rows are in Frankfurt.</p>
+
+<h2>The failure you should cause on purpose</h2>
+<p>Swap it: put the <code>-pooler</code> host into <code>DATABASE_URL</code>, rebuild, and watch the migration step. With fifteen migrations already applied you will most likely get away with it &mdash; and that is the point worth feeling. <b>A wrong URL here does not fail loudly.</b> It fails the day two containers start at once and both decide they are the one migrating.</p>
+<p>Put it back. Then read your <code>.env.docker</code> one more time and check which line has <code>-pooler</code> in it.</p>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why must <code>prisma migrate deploy</code> use the direct URL?</p>
+<button>The pooler rejects schema changes outright</button>
+<button>Its lock lives on one single connection</button>
+<p class="why" hidden>Prisma takes an advisory lock so two containers cannot migrate at once (lesson 54). A lock belongs to the connection that took it. A pooler can put your next statement on a different connection, so the lock stops protecting you &mdash; silently, and only under the exact conditions it existed for.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">What does <code>:"USER"</code> in the SQL file do?</p>
+<button>psql fills in the role you connected as</button>
+<button>Postgres looks up the current session user</button>
+<p class="why" hidden>It is a psql variable, replaced before Postgres ever sees the statement. psql sets <code>USER</code> and <code>DBNAME</code> from the connection string you gave it. So the same file says <code>tasks</code> on your Mac and <code>neondb_owner</code> on Neon, with nothing for you to remember.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why move the database before moving the app?</p>
+<button>The database takes much longer to copy</button>
+<button>One change at a time means one suspect</button>
+<p class="why" hidden>Two of your SQL lines named things that exist only on this laptop, and one of them would have failed silently. Found today, it is a two-word edit. Found during a deploy that also changed the host, the build, the env and the proxy, it is an evening.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>The same container as yesterday. Only the right-hand side moved.</p>
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  subgraph MAC["your Mac"]
+    EP["docker-entrypoint.sh"] --> APP["npm start"]
+  end
+  subgraph NEON["Neon &mdash; the internet"]
+    POOL["PgBouncer<br/>-pooler host"] --> PG[("neondb")]
+    DIR["direct host"] --> PG
+  end
+  EP -->|"DATABASE_URL<br/>neondb_owner<br/>migrate + lock"| DIR
+  APP -->|"APP_DATABASE_URL<br/>tasks_app<br/>every request"| POOL
+</pre>
+<figcaption>Two roles, two doors. The owner takes the direct door once at boot; the internet takes the pooled door forever after.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div>the deploy itself <span class="dim">lesson 56: a Render web service built from your <code>Dockerfile</code>, a git repository, secrets in a dashboard instead of a file, and a real HTTPS URL. Free, no card &mdash; it sleeps after 15 minutes idle and takes about a minute to wake.</span></div>
+<div><code>NODE_ENV=production</code> and <code>TRUST_PROXY=true</code> <span class="dim">both are wrong until there is actually a proxy and actually HTTPS. Setting them today would make cookies <code>secure</code> on a plain-HTTP localhost and log you out. Lesson 29 predicted this exact pairing.</span></div>
+<div>deleting the local Postgres <span class="dim"><code>npm test</code> still runs against the Mac's native Postgres, and should. Tests that need the internet are tests you stop running.</span></div>
+<div>connection limits and <code>?connection_limit=</code> <span class="dim">Prisma opens a pool of its own, behind Neon's pool. Two pools is one too many to reason about before there is traffic to measure. It becomes real when the app is up and something times out.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://neon.com/docs/connect/connection-pooling">Neon &mdash; connection pooling</a>, the short page on what the <code>-pooler</code> host actually changes. Then <a href="https://www.postgresql.org/docs/current/app-psql.html#APP-PSQL-VARIABLES">the psql manual, Variables</a> &mdash; search the page for <code>DBNAME</code> and read the three paragraphs around it.</p>
+<p><b>Then this:</b> ten minutes, two commands. Connect to Neon as <code>tasks_app</code> and try <code>DELETE FROM "AuditLog";</code>. It must be refused. That refusal was written on your laptop in lesson 41 and has now survived a move to another continent, which is the best evidence you will get that the rule lives in the database and not in your code.</p>
+<p><b>Reference card:</b> <a href="../reference/environment.html">Environment</a> &mdash; it needs a new row today: which URL is pooled, and which is not. <a href="../reference/prisma-postgres.html">Prisma + Postgres</a> has the migration commands.</p>
+<p><b>Ask the community:</b> <a href="https://community.neon.tech/">Neon's community forum</a>. Good question for them: <em>with Prisma behind PgBouncer, what should <code>connection_limit</code> be for a small app &mdash; and how would I know it is wrong?</em></p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0054-the-box-that-starts-itself.html">&larr; Back</a>
+<a href="../reference/environment.html">Environment reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

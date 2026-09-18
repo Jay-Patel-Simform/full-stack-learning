@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 37 &mdash; SQL NULL vs JSON null</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.box { font-family: var(--mono); font-size: 0.72rem; margin: 0.9rem 0;
+    border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  .box > .cap { background: var(--code-bg); color: var(--muted); font-size: 0.66rem;
+    padding: 0.35rem 0.7rem; border-bottom: 1px solid var(--rule); }
+  .box .body { padding: 0.6rem 0.7rem; overflow-x: auto; }
+  .box .body > div { padding: 0.12rem 0; white-space: nowrap; }
+  .bad { color: var(--bad); font-weight: 600; }
+  .ok { color: var(--ok); font-weight: 600; }
+  .dim { color: var(--muted); }
+  .acc { color: var(--accent); font-weight: 600; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; margin: 1.1rem 0; }
+  .two h4 { font-family: var(--mono); font-size: 0.66rem; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--muted); margin: 0 0 0.2rem; font-weight: 600; }
+  @media (max-width: 34rem) { .two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 37 &middot; Week 11 &middot; Real world</p>
+<h1>SQL NULL vs JSON null</h1>
+<p class="lede">Lesson 36 shipped. Your delete route now writes a snapshot, and I can see it in your database. Then I went to write the first filter the audit page needs &mdash; <em>show me the rows that have a snapshot</em> &mdash; and it came back with <b>216 rows that have no snapshot</b>. The filter is correct SQL. The column is correct. Postgres is right. <code>jsonb</code> can hold a value that <em>is</em> the word <code>null</code>, and that is not the same as an empty cell.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>A <code>jsonb</code> column has two kinds of nothing.</strong> <b>SQL NULL</b> = the cell is empty. <b>JSON null</b> = the cell holds a real value, and that value is the JSON word <code>null</code>.</li>
+<li><strong><code>IS NULL</code> only finds the first one.</strong> A row holding JSON <code>null</code> is a row with a value, so it fails <code>IS NULL</code> and passes <code>IS NOT NULL</code>.</li>
+<li><strong>Measured on your database right now: 216 audit rows hold JSON <code>null</code> in <code>targetSnapshot</code>, and 3,960 hold it in <code>params</code>.</strong> Not one <code>params</code> cell in the whole table is actually empty.</li>
+<li><strong>You wrote them that way yesterday.</strong> <code>params: row.params ?? null</code> looks like &ldquo;leave it empty&rdquo;. To Prisma, <code>null</code> on a <code>Json?</code> field means &ldquo;store the JSON word null&rdquo;.</li>
+<li><strong>Prisma makes you say which one</strong> &mdash; <code>Prisma.DbNull</code> for the empty cell, <code>Prisma.JsonNull</code> for the word. It refuses to guess, which is the good design; passing plain <code>null</code> is where it stopped being obvious.</li>
+<li><strong>Fix: <code>undefined</code>, not <code>null</code>.</strong> An omitted field takes the column default, which is SQL NULL. One word per line, then one backfill migration for the 4,176 rows already written.</li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<pre><code>server: npm test          <b>156 passing</b>   &lt;- was 155
+web:    npm test          <b>5 passing</b>
+server: npm run typecheck clean</code></pre>
+<p>Fifth clean hand-over in a row, and the second where the number moved because you added a test. Everything lesson 36 asked for is in: the migration <code>20260911054040_audit_snapshot</code>, the four columns with no foreign key, <code>decorateRequest("auditTarget", null)</code> in <code>src/app.ts</code>, the capture in the delete route, and the widened <code>AuditRow</code>. The <code>// TODO:</code> for delete-your-own-account is there too. I checked all of it before writing this.</p>
+<p>Homework 7 is still open and still yours &mdash; <code>params.id</code> versus <code>targetId</code>. Do not skip it; today makes it sharper, not softer.</p>
+
+<h2>The query that surprised me</h2>
+<p>I asked your database the most ordinary question a page ever asks:</p>
+<pre><code>select count(*) from "AuditLog" where "targetSnapshot" is not null;
+
+ count
+-------
+   <b>218</b></code></pre>
+<p>You have deleted <b>two</b> tasks since lesson 36. So where do 218 rows come from? Split the nothing in half:</p>
+<pre><code>select count(*) filter (where "targetSnapshot" is null)                        as sql_null,
+       count(*) filter (where "targetSnapshot" = 'null'::jsonb)                as json_null,
+       count(*) filter (where jsonb_typeof("targetSnapshot") = 'object')       as real_snapshot
+from "AuditLog";
+
+ sql_null | json_null | real_snapshot
+----------+-----------+---------------
+     <b>7203</b> |       <b>216</b> |             <b>2</b></code></pre>
+<p>Two real snapshots. 216 rows holding the JSON word <code>null</code>. And 7,203 genuinely empty cells &mdash; those are the old rows, made empty by <code>ADD COLUMN</code> itself, which is the one path that got it right.</p>
+<p>Now the same split on <code>params</code>, a column you have had since lesson 18:</p>
+<pre><code> p_sql_null | p_json_null
+------------+-------------
+          <b>0</b> |        <b>3960</b></code></pre>
+<p><b>Zero.</b> Not one empty cell in 7,421 rows. Every login, every register, every route with no params has been writing the word <code>null</code> into that column since the day you added it.</p>
+
+<h2>What the two nothings actually are</h2>
+<div class="word"><b>SQL NULL</b> &mdash; the cell has no value. It is the database saying &ldquo;nothing here&rdquo;. It matches <code>IS NULL</code>. It is never equal to anything, not even to another <code>NULL</code>.</div>
+<div class="word"><b>JSON null</b> &mdash; the cell has a value, and the value is the JSON literal <code>null</code>. It is four bytes of stored data. It matches <code>= 'null'::jsonb</code>. It fails <code>IS NULL</code>.</div>
+<p>Postgres is explicit about this, and it is worth reading in their words: <a href="https://www.postgresql.org/docs/current/functions-json.html">PostgreSQL &mdash; JSON functions</a> notes that a JSON <code>null</code> value is processed differently from a SQL <code>NULL</code>. The reason there are two is that JSON is a document format with its own <code>null</code>, and the column has to be able to store a document faithfully &mdash; including one whose value really is <code>null</code>.</p>
+<div class="vs">
+<div class="no"><h4>Row with JSON null</h4><pre><code>params = 'null'::jsonb
+
+IS NULL        -&gt; false
+IS NOT NULL    -&gt; <b>true</b>
+jsonb_typeof   -&gt; 'null'
+params-&gt;&gt;'id'  -&gt; NULL</code></pre></div>
+<div class="yes"><h4>Row with SQL NULL</h4><pre><code>params = NULL
+
+IS NULL        -&gt; <b>true</b>
+IS NOT NULL    -&gt; false
+jsonb_typeof   -&gt; NULL
+params-&gt;&gt;'id'  -&gt; NULL</code></pre></div>
+</div>
+<p>Look at the last line of each. <code>params-&gt;&gt;'id'</code> gives <code>NULL</code> either way. That is why nothing has ever complained: every read you have written so far happens to survive both. The first read that does <em>not</em> survive both is <code>IS NULL</code>, and that is the read the audit page needs.</p>
+
+<h2>Where it came from &mdash; one word in your code</h2>
+<p>Here is the line, in <code>src/audit/audit.ts</code>:</p>
+<pre><code>params: (row.params ?? null) as never,
+targetSnapshot: (row.targetSnapshot ?? null) as never,</code></pre>
+<p>Read that as English and it says &ldquo;if there is nothing, store nothing&rdquo;. Read it as Prisma and it says something else. For a <code>Json?</code> field, Prisma treats these three inputs as three different instructions:</p>
+<pre><code>{ params: undefined }            // ? don't set the column -> stays at its default -> <b>SQL NULL</b>
+{ params: Prisma.DbNull }        // ? set the column to <b>SQL NULL</b>, explicitly
+{ params: Prisma.JsonNull }      // ? set the column to the JSON word <b>null</b>
+{ params: null }                 // ! shorthand for JsonNull. This is the one you wrote.</code></pre>
+<p>Prisma documents this and even gives it a name &mdash; <a href="https://www.prisma.io/docs/orm/prisma-client/special-fields-and-types/working-with-json-fields#using-null-values">Working with <code>Json</code> fields &mdash; using <code>null</code> values</a>. It invented two sentinel values <em>because</em> plain <code>null</code> is ambiguous here. Two nothings in the database means the client needs two words for them.</p>
+<div class="aside"><b>And that <code>as never</code>.</b> It is on both lines. Prisma's type for that field is a union that does not include plain <code>null</code>, so TypeScript was going to tell you. <code>as never</code> is the cast that told it to be quiet. This is <a href="./0034-a-declared-type-is-believed-not-checked.html">lesson 34</a> again, from the other side: there, a declared type was believed without a check. Here, a real check was switched off by hand. The compiler knew.</p></div>
+<p class="takeaway">A cast is a promise you make to the compiler. When you break the promise, nobody tells you &mdash; that is the entire point of a cast.</p>
+
+<h2>The fix</h2>
+<p>Two words in <code>src/audit/audit.ts</code>. <code>undefined</code> means &ldquo;do not set this column&rdquo;, the column default is SQL NULL, and the casts come off because the types now agree:</p>
+<pre><code>params: row.params ?? undefined,
+actorEmail: row.actorEmail ?? null,      // ? String? -- plain null is fine and correct here
+targetType: row.targetType ?? null,
+targetId: row.targetId ?? null,
+targetSnapshot: row.targetSnapshot ?? undefined,</code></pre>
+<p>Only the two <code>Json</code> fields change. <code>String?</code> and <code>Int?</code> have one kind of nothing, so <code>null</code> was always right for them. The ambiguity is a <code>Json</code>-only problem.</p>
+<p>Then the 4,176 rows already written. This is a data migration, and it is the honest kind &mdash; it does not invent anything, it corrects a shape:</p>
+<pre><code>npx prisma migrate dev --create-only --name audit_json_null_to_sql_null</code></pre>
+<pre><code>-- prisma/migrations/*_audit_json_null_to_sql_null/migration.sql
+UPDATE "AuditLog" SET params = NULL          WHERE params = 'null'::jsonb;
+UPDATE "AuditLog" SET "targetSnapshot" = NULL WHERE "targetSnapshot" = 'null'::jsonb;</code></pre>
+<div class="aside"><b>Yes, this is an <code>UPDATE</code> on an append-only table.</b> Notice that it is allowed today only because you have <em>not</em> run the <code>REVOKE</code> from lesson 36. Do this correction now, while the table is still writable, and let that be the argument for why the revoke belongs at the <em>end</em> of week 13 rather than the start. It changes no fact in any row &mdash; both values already meant &ldquo;there was nothing&rdquo;.</div>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">A <code>jsonb</code> cell holds the value <code>null</code>. What does <code>IS NULL</code> answer?</p>
+<button>True, because the value is null</button>
+<button>False, because a value exists</button>
+<p class="why" hidden><code>IS NULL</code> asks about the cell, not about the contents. The cell holds four bytes of JSON, so it is not empty, so the answer is false. This is exactly why the count came back 218 when only 2 rows had a real snapshot.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">In Prisma, what does <code>{ params: undefined }</code> do to a <code>Json?</code> column?</p>
+<button>Leaves it out, so SQL NULL</button>
+<button>Writes the JSON word null</button>
+<p class="why" hidden><code>undefined</code> means &ldquo;this field is not part of my write&rdquo;. Prisma omits it from the <code>INSERT</code>, the column falls back to its default, and the default for a nullable column is SQL NULL. Plain <code>null</code> is the one that writes the JSON word.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why did no test ever catch these 3,960 rows?</p>
+<button>Nothing read the column that way</button>
+<button>The tests delete audit rows first</button>
+<p class="why" hidden>Every read you had written used <code>params-&gt;&gt;'id'</code> or read the value in JavaScript, and both give the same answer for the two nothings. A bug in stored data is invisible until a query asks the one question that can tell them apart. Your fixtures do delete rows, but that is not what hid this.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>See the split on your own data.</strong> In <code>server/</code>:
+<pre><code>U="$(grep -m1 DATABASE_URL .env | cut -d'"' -f2)"
+psql "$U" -c $'select count(*) filter (where params is null) sql_null,
+  count(*) filter (where params = \'null\'::jsonb) json_null from "AuditLog";'</code></pre>
+<b>Expect sql_null = 0.</b> If it is 0, the column has never once been empty. Read that number before you change anything.</li>
+
+<li><strong>Watch it go red first.</strong> Add one test to <code>src/routes/audit.test.ts</code>: log in (a route with no params), read the newest <code>AuditLog</code> row with <code>prisma.auditLog.findFirst</code>, and assert <code>row.params === null</code> &mdash; then assert with raw SQL that the cell is really empty:
+<pre><code>const [{ empty }] = await prisma.$queryRaw`
+  select (params is null) as empty from "AuditLog" where id = ${row.id}`;
+assert.equal(empty, true);</code></pre>
+<b>It must fail right now.</b> Prisma gives you JavaScript <code>null</code> for <em>both</em> nothings, so the first assert passes today and tells you nothing. The raw one is the only one that can fail. That is the point of the exercise: <b>pick the assertion that can tell the two cases apart.</b> Lesson 20's rule, on a new shape.</li>
+
+<li><strong>Make it pass.</strong> The two <code>undefined</code>s in <code>src/audit/audit.ts</code>, and delete both <code>as never</code> casts. Then <code>npm run typecheck</code>. <b>Expect clean.</b> If it complains, the cast was hiding something else too &mdash; read the message, do not re-add the cast.</li>
+
+<li><strong>Backfill the old rows.</strong> The <code>--create-only</code> migration above, then read the SQL with your eyes before running <code>npx prisma migrate dev</code>. <b>Expect 157 passing</b> and the query from step 1 to now say <code>sql_null = 3960, json_null = 0</code>.</li>
+
+<li><strong>Now hunt the same bug elsewhere.</strong> You have one other <code>Json</code> column path in the codebase. Find every place a <code>Json</code> field is written:
+<pre><code>grep -rn "Json" prisma/schema.prisma
+grep -rn "as never" src</code></pre>
+Each <code>as never</code> is a promise you made to the compiler. Check each one and say out loud what the promise was. <b>Expect the list to be short.</b> If it is empty after step 3, say so &mdash; that is a real answer.</li>
+
+<li><strong>One question, no code.</strong> Suppose the audit page wants &ldquo;rows where the caller sent no body&rdquo;. After today, an empty cell means that. But a route could legitimately receive the JSON body <code>null</code> from a caller, and storing that faithfully is the whole reason <code>jsonb</code> has two nothings. So: <b>is there any column in your schema where JSON <code>null</code> is the value you actually want to store?</b> One or two sentences, with the reason. If the answer is no, that is the argument for a <code>CHECK</code> constraint, and I want to hear you make it.</li>
+</ol>
+<p>Homework 7 from lesson 36 is still owed: <code>params.id</code> versus <code>targetId</code>, same number twice. That one gates the audit page.</p>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>One column. Two cells that both look empty. One query that can only see one of them.</p>
+
+<h2>The column, as Postgres stores it</h2>
+<div class="box">
+<div class="cap">AuditLog.params &mdash; jsonb</div>
+<div class="body">
+<div><span class="dim">id      route              params           bytes stored</span></div>
+<div>7419    /auth/login        <span class="bad">null</span>             <span class="bad">4</span>   <span class="dim">&lt;- JSON null: a value</span></div>
+<div>7420    /auth/register     <span class="bad">null</span>             <span class="bad">4</span>   <span class="dim">&lt;- JSON null: a value</span></div>
+<div>7421    /teams/1/tasks/9   {"id": 9}        9   <span class="dim">&lt;- a real object</span></div>
+<div>0001    <span class="dim">(pre-migration)</span>    <span class="ok">&lt;empty&gt;</span>          <span class="ok">0</span>   <span class="dim">&lt;- SQL NULL: no value</span></div>
+</div>
+</div>
+<p>Rows 7419 and 7420 print as <code>null</code> in <code>psql</code>. So does row 0001. <b>The terminal shows you the same thing for both.</b> That is why this hid for nineteen lessons.</p>
+
+<h2>The same question, four ways</h2>
+<div class="two">
+<div>
+<h4>Cell holds JSON null</h4>
+<div class="box"><div class="body">
+<div>params IS NULL          <span class="bad">false</span></div>
+<div>params IS NOT NULL      <span class="acc">true</span></div>
+<div>params = 'null'::jsonb  <span class="acc">true</span></div>
+<div>jsonb_typeof(params)    <span class="acc">'null'</span></div>
+<div>params-&gt;&gt;'id'           <span class="dim">NULL</span></div>
+</div></div>
+</div>
+<div>
+<h4>Cell is SQL NULL</h4>
+<div class="box"><div class="body">
+<div>params IS NULL          <span class="acc">true</span></div>
+<div>params IS NOT NULL      <span class="bad">false</span></div>
+<div>params = 'null'::jsonb  <span class="dim">NULL</span></div>
+<div>jsonb_typeof(params)    <span class="dim">NULL</span></div>
+<div>params-&gt;&gt;'id'           <span class="dim">NULL</span></div>
+</div></div>
+</div>
+</div>
+<p>The last row is identical. Every read you had written until today used that one. The four rows above it are where the two cases split apart.</p>
+
+<h2>Which word writes which cell</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+    A["params: undefined"] --> N["column omitted<br/>from the INSERT"]
+    N --> S["SQL NULL<br/>empty cell"]
+    B["params: Prisma.DbNull"] --> S
+    C["params: Prisma.JsonNull"] --> J["JSON null<br/>4 bytes stored"]
+    D["params: null"] --> J
+    style S fill:#1b3a1b,stroke:#4c9a4c,color:#d7f0d7
+    style J fill:#3a1b1b,stroke:#9a4c4c,color:#f0d7d7
+</pre>
+<figcaption>Four inputs, two outcomes. Plain <code>null</code> and <code>Prisma.JsonNull</code> land in the same place &mdash; the red one.</figcaption>
+</figure>
+
+<h2>Your numbers, today</h2>
+<div class="box">
+<div class="cap">7,421 rows in AuditLog</div>
+<div class="body">
+<div><span class="dim">params</span></div>
+<div>  SQL NULL     <span class="bad">    0</span>  <span class="dim">&lt;- should be 3,960</span></div>
+<div>  JSON null    <span class="bad"> 3960</span></div>
+<div>  real object       3461</div>
+<div>&nbsp;</div>
+<div><span class="dim">targetSnapshot</span></div>
+<div>  SQL NULL     <span class="ok"> 7203</span>  <span class="dim">&lt;- ADD COLUMN got it right</span></div>
+<div>  JSON null    <span class="bad">  216</span>  <span class="dim">&lt;- written since lesson 36</span></div>
+<div>  real object  <span class="acc">    2</span>  <span class="dim">&lt;- your two deleted tasks</span></div>
+</div>
+</div>
+<p>The 7,203 green rows were never written by your code. <code>ADD COLUMN</code> filled them, and the database's own default is the correct nothing. Your code only got it wrong on the rows it actually wrote.</p>
+
+<p class="takeaway">Two nothings in the store means two words in the client. When a library gives you two names for what looks like one thing, that is the library telling you the thing is not one thing.</p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://www.prisma.io/docs/orm/prisma-client/special-fields-and-types/working-with-json-fields#using-null-values">Prisma &mdash; working with <code>Json</code> fields, &ldquo;using <code>null</code> values&rdquo;</a>. It is one short section and it names both sentinels. This is the primary source for today.</p>
+<p><b>Then this:</b> <a href="https://www.postgresql.org/docs/current/functions-json.html">PostgreSQL &mdash; JSON functions and operators</a>. Skim for <code>jsonb_typeof</code>. It is the function that tells the two nothings apart, and it is how you will check your own work.</p>
+<p><b>Reference card:</b> <a href="../reference/prisma-postgres.html">Prisma and Postgres</a> &mdash; updated today with the two-nothings table.</p>
+<p><b>Ask the community:</b> <a href="https://github.com/prisma/prisma/discussions">Prisma GitHub Discussions</a>. Search &ldquo;DbNull JsonNull&rdquo;. Plenty of people hit this; read what they were building when they found it.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0036-the-row-that-outlives-the-row.html">&larr; Back</a>
+<a href="../reference/prisma-postgres.html">Prisma reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

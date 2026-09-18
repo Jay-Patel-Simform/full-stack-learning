@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 17 &mdash; The Key You Did Not Name</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 17 &middot; Week 7&ndash;8 &middot; API security &mdash; seventh one</p>
+<h1>The key you did not name</h1>
+<p class="lede">Your create handler does <code>data: { ...input, teamId, ownerId }</code>. It spreads the caller&rsquo;s JSON straight into a database write. That is the exact shape of a named vulnerability &mdash; and you are safe from it today for three reasons, <strong>none of which you chose</strong>.</p>
+
+<h2>Your homework, marked</h2>
+<div class="scroll">
+<table>
+<tr><th>The question</th><th>You said</th><th>Mark</th></tr>
+<tr><td>A forged write from a rate-limited IP gets <code>429</code>, not <code>403</code>. What does the attacker learn, and should the hook order change?</td><td>&mdash;</td><td>Not said.</td></tr>
+</table>
+</div>
+<p><strong>So I am answering it, one lesson early.</strong> Here is the answer, and then the thing I want you to notice about it.</p>
+<p>What they learn: <strong>almost nothing, and that is the point.</strong> A <code>429</code> says &ldquo;this IP is over its quota&rdquo;. It does not say whether the cookie was valid, whether the route exists, or whether the CSRF check would have passed. The order should <strong>not</strong> change. Two reasons: the rate limiter is cheaper than the CSRF check, and a <code>429</code> reveals strictly <em>less</em> than a <code>403</code>. When the cheap check also leaks less, there is no trade to make.</p>
+<div class="aside">
+<p><strong>Third time now, and I am changing tactics rather than repeating myself.</strong> In lessons 13 and 14 you answered the part with a knob and skipped the part without one. In lesson 16 I <em>labelled</em> the knobless question as knobless, hoping the label would be enough. It was not. So this lesson has <strong>one</strong> question at the end instead of two. Not a smaller question &mdash; a shorter list, so there is nothing to choose between. If that works, it stays.</p>
+</div>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>Mass assignment</strong>: the caller sends a key you never named, and your code passes it to the database anyway.</li>
+<li>You are already safe, because <code>z.object</code> <strong>strips</strong> unknown keys. You did not decide that. It is a default.</li>
+<li>Stripping is safe but <em>silent</em>. A front-end typo gets a <code>200</code> and changes nothing &mdash; the worst kind of bug to debug.</li>
+<li>Fix: four lines in <code>src/app.ts</code>, so every request <strong>body</strong> rejects an unnamed key with a <code>400</code>. Not params, not query.</li>
+<li><strong>No new dependency.</strong> Two lessons running again.</li>
+<li><code>npm test</code> = <strong>101</strong>, was 93. Eight new, all in <code>src/routes/mass-assignment.test.ts</code>.</li>
+</ul>
+</div>
+
+<h2>The attack has a name</h2>
+<p>Read your own handler in <code>src/routes/tasks.route.ts</code>:</p>
+<pre><code>const body = request.body as CreateTaskInput;
+const task = await createTask(body, teamId, request.userId!);</code></pre>
+<p>and the store it calls:</p>
+<pre><code>return prisma.task.create({
+  data: { ...input, teamId, ownerId },   // &lt;-- the caller's JSON, spread
+  include: { owner: true },
+});</code></pre>
+<p><a href="https://cheatsheetseries.owasp.org/cheatsheets/Mass_Assignment_Cheat_Sheet.html">OWASP calls this <strong>mass assignment</strong></a>: <em>&ldquo;Software frameworks sometimes allow developers to automatically bind HTTP request parameters into program code variables or objects to make using that framework easier on developers. This can sometimes cause harm.&rdquo;</em> Rails calls it mass assignment, Spring calls it <em>autobinding</em>, PHP calls it <em>object injection</em>. Same bug, three names, <a href="https://cwe.mitre.org/data/definitions/915.html">CWE-915</a>.</p>
+<p>In the <a href="https://owasp.org/API-Security/editions/2023/en/0xa3-broken-object-property-level-authorization/">2023 OWASP API Security Top 10</a> it is no longer its own entry. It was merged into <strong>API3:2023 Broken Object Property Level Authorization</strong>, defined as an endpoint that <em>&ldquo;allows a user to change, add/or delete the value of a sensitive object&rsquo;s property which the user should not be able to access.&rdquo;</em></p>
+<p>Read that definition next to the last four lessons. Lesson 8 gave you authorization per <strong>route</strong>. Lesson 9 gave you authorization per <strong>target</strong>. Lesson 10 gave you authorization per <strong>team</strong>. This is authorization per <strong>property</strong> &mdash; the same word, one level further down.</p>
+
+<h2>What is actually protecting you &mdash; count it</h2>
+<p>Send <code>POST /teams/7/tasks</code> with <code>{ "title": "x", "ownerId": 999 }</code> today. It does not work. Four things are standing in the way. Count how many you decided on purpose.</p>
+<div class="scroll">
+<table>
+<tr><th>What stops it</th><th>Where</th><th>Did you choose it?</th></tr>
+<tr><td><code>z.object</code> removes keys it does not know</td><td>zod&rsquo;s default behaviour</td><td><strong>No.</strong> <a href="https://zod.dev/api">&ldquo;By default, unrecognized keys are stripped from the parsed result.&rdquo;</a> A different library, or <code>z.looseObject</code>, and the hole is open.</td></tr>
+<tr><td><code>ownerId</code> is written <em>after</em> the spread</td><td><code>task.store.ts</code>, one line</td><td><strong>No.</strong> That is the order you happened to type. Swap the two halves and the caller&rsquo;s value wins.</td></tr>
+<tr><td>The reply never shows private columns</td><td>the serializer, lesson 2</td><td class="yes"><strong>Yes.</strong> This one is yours, and it is why <code>passwordHash</code> never leaks. It guards the way <em>out</em>, not the way in.</td></tr>
+<tr><td><code>patch as { title?: string; done?: boolean }</code></td><td><code>task.store.ts</code>, the update</td><td><strong>It is not a check at all.</strong> <code>as</code> is you telling TypeScript to stop asking. At runtime it does nothing.</td></tr>
+</table>
+</div>
+<p>One of four. This is the seventh time we have counted rows instead of arguing (lessons <a href="../0009-the-third-argument.html">9</a>, <a href="../0010-a-task-belongs-to-a-team.html">10</a>, <a href="../0011-five-tries-then-wait.html">11</a>, <a href="../0014-one-origin-no-question.html">14</a>, <a href="../0015-headers-for-json-not-pages.html">15</a>, <a href="../0016-who-asked-for-this-write.html">16</a>) &mdash; but notice this table runs the <em>opposite</em> way to lesson 16&rsquo;s. There, the accidents were <strong>defences</strong> you had for free. Here the accidents are what makes the hole <strong>invisible</strong>. Free protection you cannot see is protection you will delete by accident, on a Tuesday, for an unrelated reason.</p>
+
+<h2>Two words: strip and reject</h2>
+<p>Both refuse the unnamed key. They are not the same thing.</p>
+<div class="scroll">
+<table>
+<tr><th></th><th><strong>Strip</strong> (zod&rsquo;s default)</th><th><strong>Reject</strong> (strict)</th></tr>
+<tr><td>Attacker sends <code>ownerId</code></td><td>Dropped. Safe.</td><td class="yes">Dropped, and refused. <code>400</code>.</td></tr>
+<tr><td>Your React form sends <code>isDone</code> instead of <code>done</code></td><td><code>200 OK</code>. Nothing changed. You now debug your reducer for an hour.</td><td class="yes"><code>400: Unrecognized key: "isDone"</code>. You fix it in ten seconds.</td></tr>
+<tr><td>Somebody adds a column and forgets the schema</td><td>Silently ignored forever</td><td class="yes">Loud on the first request</td></tr>
+<tr><td>A client sends a harmless extra field</td><td>Works</td><td>Breaks. This is the real cost &mdash; see the last table.</td></tr>
+</table>
+</div>
+<p>Row two is the one that will actually happen to you, in week 9&ndash;10, when you wire the React front end. A silent strip means <strong>your server lies to your front end about success.</strong> That is worth more to you day-to-day than the attack is.</p>
+<p>This is your fourth word pair, after permission/scoping (<a href="../0010-a-task-belongs-to-a-team.html">10</a>), same-origin/same-site (<a href="../0013-same-site-is-not-same-origin.html">13</a>) and reading-is-CORS/writing-is-CSRF (<a href="../0016-who-asked-for-this-write.html">16</a>). <strong>Strip is safe. Reject is safe and honest.</strong></p>
+
+<h2>Where to put it &mdash; two options</h2>
+<p>Zod gives you <a href="https://zod.dev/api"><code>z.strictObject()</code> and <code>.strict()</code></a>. The only question is where they go. You have seven request bodies: <code>Register</code>, <code>Login</code>, <code>CreateTask</code>, <code>UpdateTask</code>, <code>CreateTeam</code>, <code>AddMember</code>, <code>CreateProject</code>.</p>
+<div class="scroll">
+<table>
+<tr><th>Option</th><th>What it costs you</th></tr>
+<tr><td><strong>A.</strong> Write <code>.strict()</code> on all seven schemas</td><td>Visible in the file you are reading. But it is seven places, and body number eight next month will not have it. A rule you must remember is a rule you will forget.</td></tr>
+<tr><td><strong>B.</strong> One check in the validator compiler in <code>app.ts</code></td><td>Four lines, one place, every future body included. But the rule is no longer visible in the schema file, so it needs a comment saying so.</td></tr>
+</table>
+</div>
+<p><strong>Take B.</strong> Same reason as <a href="../0007-one-place-that-says-no.html">lesson 7</a>&rsquo;s <code>can()</code> and <a href="../0015-headers-for-json-not-pages.html">lesson 15</a>&rsquo;s <code>no-store</code> hook: <em>a rule with no exceptions does not belong in each caller.</em> And it is the fifth outing for the frame you already own &mdash; <strong>make the safe thing the default and the unsafe thing deliberate.</strong> Under option A, strict is something you opt into. Under B, loose is something you would have to opt out of, in writing.</p>
+
+<h2>The code</h2>
+<p><code>src/app.ts</code>, inside the validator compiler you wrote in lesson 2:</p>
+<pre><code>app.setValidatorCompiler(({ schema, httpPart }) =&gt; {
+  const s = httpPart === "body" &amp;&amp; schema instanceof ZodObject
+    ? schema.strict()
+    : (schema as ZodType);
+
+  return (data) =&gt; {
+    const r = s.safeParse(data);
+    // ...unchanged from here down
+  };
+});</code></pre>
+<p>Three things in there are load-bearing:</p>
+<ul>
+<li><code>httpPart === "body"</code> &mdash; Fastify hands the compiler which part it is validating: <code>"body"</code>, <code>"params"</code>, <code>"querystring"</code> or <code>"headers"</code>. <strong>Only bodies get this</strong>, and the reason is the query string. A body is a thing your client composed on purpose. A query string collects junk it never asked for: <code>?utm_source=newsletter</code> from a marketing link, <code>?fbclid=&hellip;</code> added by Facebook, a cache-buster from a proxy. Make the query strict and a shared link becomes a <code>400</code>. I checked what strict params would break in <em>your</em> app today: <strong>nothing</strong> &mdash; your params objects hold exactly the URL segments you declared. So this line is not fixing a live break. It is scoping the rule to the one input that is fully under a client&rsquo;s control, before week 13&ndash;14 gives you your first <code>querystring</code> schema for pagination.</li>
+<li><code>schema instanceof ZodObject</code> &mdash; <code>.strict()</code> only exists on an object schema. A body that is an array or a string has no unknown keys to speak of, so it passes through.</li>
+<li><code>schema.strict()</code> returns a <strong>new</strong> schema; it does not mutate yours. And it happens once, at route-registration time, not per request. The per-request cost is zero.</li>
+</ul>
+<p>Then one line in <code>src/schemas/task.schema.ts</code>, for the other half of &ldquo;silent success&rdquo;:</p>
+<pre><code>export const UpdateTask = z
+  .object({ title: CreateTask.shape.title, done: z.boolean() })
+  .partial()
+  .refine((patch) =&gt; Object.keys(patch).length &gt; 0, {
+    message: "send at least one field to change",
+  });</code></pre>
+<p><code>.partial()</code> made every field optional, which is right for a <code>PATCH</code>. It also made <em>no</em> field acceptable, which is not: <code>PATCH</code> with <code>{}</code> used to answer <code>200</code> and change nothing. Same failure as the typo, different cause.</p>
+<p>And one comment in <code>src/store/task.store.ts</code>, on a line I did <strong>not</strong> change:</p>
+<pre><code>// ! This cast is a promise, and app.ts is what keeps it. Bodies are parsed
+// ! strictly, so `patch` cannot hold a key we never declared. Loosen that
+// ! and this line hands Prisma whatever the caller typed -- ownerId included.
+const data = patch as { title?: string; done?: boolean };</code></pre>
+<p>Row four of the counting table. An <code>as</code> cast is a claim about runtime that TypeScript cannot check. It is now true because of a rule four files away, so the comment says which rule. Same habit as the <code>ponytail:</code> comments in <a href="../0011-five-tries-then-wait.html">lesson 11</a>: <strong>a written-down assumption is a decision, an unwritten one is a future bug.</strong></p>
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  A["JSON body arrives"] --> B{"Is this the body?<br/>(httpPart)"}
+  B -- "no: params, query" --> P["Parse as written.<br/>Fastify's own keys survive."]
+  B -- yes --> C{"Is the schema<br/>a ZodObject?"}
+  C -- no --> P
+  C -- yes --> D["schema.strict()"]
+  D --> E{"Any key we<br/>never named?"}
+  E -- yes --> NO["400<br/>Unrecognized key: ownerId"]
+  E -- no --> F{"PATCH with<br/>zero fields?"}
+  F -- yes --> NO2["400<br/>send at least one field"]
+  F -- no --> OK["Handler runs.<br/>request.body holds<br/>only named keys."]
+  style OK fill:#d9ecdd,stroke:#2f6b3a,color:#14301b
+  style P fill:#d9ecdd,stroke:#2f6b3a,color:#14301b
+  style NO fill:#f8d7d5,stroke:#93231a,color:#3a1512
+  style NO2 fill:#f8d7d5,stroke:#93231a,color:#3a1512
+</pre>
+<figcaption>Two branches before the check even applies. Those two branches are why this is four lines and not a rewrite.</figcaption>
+</figure>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="0">
+<p class="q">You reorder the store call to <code>data: { teamId, ownerId, ...input }</code>, so the spread comes last. Bodies are strict now. What changes?</p>
+<button>Nothing today, danger later</button>
+<button>Nothing today, nothing later</button>
+<p class="why" hidden><strong>Danger later.</strong> Today nothing changes, because <code>ownerId</code> never survives validation, so there is nothing for the spread to overwrite. But you have just moved from <em>two</em> independent things stopping the attack to <em>one</em>. The day anyone loosens a schema, that reorder is the difference between a dropped key and a forged owner. Defence in depth is not about today.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Your React form has a stale field and posts <code>{ "title": "x", "createdAt": "2026-01-01" }</code> to create a task. What does the API answer?</p>
+<button>400, and it names createdAt</button>
+<button>201, and it drops createdAt</button>
+<p class="why" hidden><strong>400.</strong> The message is <code>(root): Unrecognized key: "createdAt"</code> &mdash; it names the key, so you fix the front end instead of hunting the server. Before this lesson it was the second answer: a <code>201</code>, a task created, and <code>createdAt</code> quietly ignored. Note that <code>createdAt</code> is a <em>real column</em>, so this is the harmless-looking version of the same bug as <code>ownerId</code>.</p>
+</div>
+
+<h2>What this does NOT fix</h2>
+<div class="scroll">
+<table>
+<tr><th>Hole</th><th>Status</th><th>When</th></tr>
+<tr><td>A field you <em>did</em> name but should not have</td><td><strong>Untouched.</strong> Strict checks whether you named a key, never whether naming it was wise. <code>AddMember</code> names <code>role</code> on purpose &mdash; what stops privilege escalation there is the rank rule in <code>can()</code>, from lesson 9.</td><td>Already done, and it is the more important half.</td></tr>
+<tr><td>A legitimate client that sends a harmless extra field</td><td>Now broken, on purpose. This is the real cost of strict, and it is why some teams refuse it.</td><td>Your call. You control the only client. Revisit if you ever have a client you do not.</td></tr>
+<tr><td>Nested objects</td><td>Strict applies at every level of a <code>ZodObject</code>, so a nested object is covered &mdash; but you have none yet, so nothing proves it.</td><td>Add a test the day you add a nested body.</td></tr>
+<tr><td><code>request.query</code> read by hand in a handler</td><td>Not covered. No route does this today. The day one does, it needs its own zod schema, per the rule from lesson 2.</td><td>Week 13&ndash;14, with pagination and filtering.</td></tr>
+<tr><td>The <code>as</code> casts everywhere else</td><td>Still casts. They are true only because a schema says so. Now at least the risky one says which schema.</td><td>Ongoing. Grep for <code>as CreateTaskInput</code> and read each one once.</td></tr>
+</table>
+</div>
+<p>Sixth security lesson with this table. The honest line this time is row one: <strong>strict is a check on your schema, not on your judgement.</strong> It stops keys you forgot to think about. It has nothing to say about keys you thought about and got wrong.</p>
+
+<h2>Read this</h2>
+<p><strong>Primary source:</strong> <a href="https://cheatsheetseries.owasp.org/cheatsheets/Mass_Assignment_Cheat_Sheet.html">OWASP &mdash; Mass Assignment Cheat Sheet</a>. Two pages, and it lists exactly three mitigations: allow-list the bindable fields, block-list the sensitive ones, or use a DTO. Read it and then notice something: <strong>you have been doing all three since lesson 2.</strong> Your zod schema <em>is</em> the allow-list. <code>TaskPublic</code> <em>is</em> the DTO. What you were missing was not a technique &mdash; it was making the allow-list say no out loud.</p>
+
+<h2>Do this now</h2>
+<pre><code>cd ~/learning/full-stack-learning/server
+npm test        # 101, was 93</code></pre>
+<p>Then see the attack refused for real. Start the server (<code>npm run dev</code>), log in, and in another terminal:</p>
+<pre><code># Log in and keep the cookie.
+curl -sc /tmp/c.txt -X POST localhost:3000/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"YOUR_EMAIL","password":"YOUR_PASSWORD"}' &gt; /dev/null
+
+# The attack. Refused, and the reply names the key.
+curl -sb /tmp/c.txt -X POST localhost:3000/teams/YOUR_TEAM_ID/tasks \
+  -H 'content-type: application/json' \
+  -d '{"title":"forged","ownerId":1}'
+# {"statusCode":400,...,"message":"(root): Unrecognized key: \"ownerId\""}
+
+# The typo. Also refused, which is the bit that saves you time.
+curl -sb /tmp/c.txt -X PATCH localhost:3000/teams/YOUR_TEAM_ID/tasks/1 \
+  -H 'content-type: application/json' -d '{"isDone":true}'</code></pre>
+<p>Then break it on purpose, the way you did in lessons 11 and 12. In <code>src/app.ts</code>, change <code>httpPart === "body"</code> to <code>httpPart === "params"</code> and run <code>npm test</code>.</p>
+<pre><code># tests 101
+# pass 96
+# fail 5</code></pre>
+<p><strong>Five failures, and every one of them is in <code>mass-assignment.test.ts</code>.</strong> That is the interesting result, and I want you to sit with it, because it is not the result I expected when I wrote the line.</p>
+<p>Strict params break <em>nothing</em> in your app right now. Your params objects contain exactly the segments you declared &mdash; <code>teamId</code>, <code>id</code>, <code>projectId</code> &mdash; so there is never an unnamed key to reject. The <code>httpPart === "body"</code> check is <strong>not</strong> holding back a disaster. It is scoping a rule to the input where it belongs, ahead of the query-string schema you do not have yet. I am telling you the measured number instead of the scary one, because a security rule you believe for the wrong reason is a rule you will apply in the wrong place. Put the line back.</p>
+
+<p>Then the question &mdash; there is only one this time:</p>
+<ol>
+<li><strong>Look at <code>AddMember</code> in <code>src/schemas/team.schema.ts</code>.</strong> It names <code>role</code>, so strict lets <code>{"userId": 4, "role": "OWNER"}</code> straight through to the handler. An <code>ADMIN</code> sending that is refused &mdash; but not by anything in this lesson. Name the exact file and the exact line that refuses it, and then say in one sentence why that check could never have been a schema&rsquo;s job. (This is the same question, asked backwards, as &ldquo;why is <code>can()</code> not a zod schema?&rdquo;)</li>
+</ol>
+
+<div class="takeaway">
+<p><strong>The one sentence.</strong> My zod schema is an allow-list of properties, and until today it enforced that list <em>silently</em> &mdash; which protected me from an attacker and lied to me about my own typos.</p>
+</div>
+
+<div class="aside">
+<p>Something unclear? Ask me &mdash; I am your teacher here, and I will re-teach it another way. The two words to keep straight: <strong>strip is safe, reject is safe and honest.</strong> They both stop the attack; only one of them tells you the truth about your own front end.</p>
+</div>
+
+<hr>
+<p class="nav">Back: <a href="../0016-who-asked-for-this-write.html">Lesson 16 &mdash; Who asked for this write</a> &middot; Keep for reference: <a href="../../reference/api-security-basics.html#mass-assignment">Mass assignment table</a> &middot; <a href="../../reference/api-security-basics.html">API security basics</a> &middot; The code: <a href="../../server/src/app.ts">server/src/app.ts</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

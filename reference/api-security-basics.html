@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference — API Security Basics</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<p class="kicker">Reference &middot; grows each lesson</p>
+<h1>API security basics</h1>
+<p class="lede">Quick-reference sheet. Print it. Lines get added as lessons land.</p>
+
+<h2>The one rule</h2>
+<p class="takeaway">Never trust input. Never trust the caller's identity claim. Check both, on the server, every request.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  C["Request from anyone"] --> L1["Global rate limit &mdash; key: IP<br/>lesson 12"]
+  L1 -- "over" --> R429["429"]
+  L1 --> L2["CORS reply headers<br/>lesson 13 &mdash; advice to a browser only"]
+  L2 --> L3["requireAuth &mdash; session cookie<br/>lesson 6"]
+  L3 -- "no / bad" --> R401["401"]
+  L3 --> L4["Input schemas: body, params, query<br/>lessons 1&ndash;2"]
+  L4 -- "bad shape" --> R400["400"]
+  L4 --> L5["requirePermission &rarr; can(role, action, resource)<br/>lessons 7&ndash;9"]
+  L5 -- "no" --> R403["403"]
+  L5 --> H["Handler + store<br/>where { id, teamId } &mdash; lesson 10"]
+  H -- "0 rows" --> R404["404"]
+  H --> L6["Response schema &mdash; drops unlisted fields<br/>lesson 2"]
+  L6 --> OUT["200 / 201 / 204"]
+</pre>
+<figcaption>Every lesson so far, as one pipeline. Cheap checks first, expensive work last, and a different status code for each kind of no.</figcaption>
+</figure>
+
+<h2>Status codes you will actually use</h2>
+<div class="scroll">
+<table>
+<tr><th>Code</th><th>Meaning</th><th>Use when</th></tr>
+<tr><td>200</td><td>OK</td><td>Read or update worked.</td></tr>
+<tr><td>201</td><td>Created</td><td>You made a new row.</td></tr>
+<tr><td>204</td><td>No content</td><td>Delete worked; nothing to return.</td></tr>
+<tr><td>400</td><td>Bad request</td><td>Input failed validation.</td></tr>
+<tr><td>401</td><td>Unauthenticated</td><td><em>Who are you?</em> No or bad credentials.</td></tr>
+<tr><td>403</td><td>Unauthorized</td><td><em>I know you, you may not.</em> Role lacks permission.</td></tr>
+<tr><td>404</td><td>Not found</td><td>No such row &mdash; or hiding a 403 on purpose.</td></tr>
+<tr><td>409</td><td>Conflict</td><td>Duplicate email, version clash.</td></tr>
+<tr><td>429</td><td>Too many requests</td><td>Rate limit tripped. Send <code>Retry-After</code> in seconds.</td></tr>
+</table>
+</div>
+<p class="aside"><strong>401 vs 403 in one line:</strong> 401 is about identity, 403 is about permission.</p>
+
+<h2>Validation snippets</h2>
+<pre><code>// Zod: validate, then use only parsed.data
+const Body = z.object({ title: z.string().min(1).max(200) });
+const parsed = Body.safeParse(request.body);
+if (!parsed.success) return reply.code(400).send({ error: "invalid body" });
+
+// Params are input too
+const Params = z.object({ id: z.coerce.number().int().positive() });</code></pre>
+
+<h2>Zod + Fastify wiring (declare, do not remember)</h2>
+<pre><code>// once, at app setup
+app.setValidatorCompiler(({ schema }) =&gt; (data) =&gt; {
+  const r = (schema as ZodType).safeParse(data);
+  if (r.success) return { value: r.data };
+  return { error: new Error(
+    r.error.issues.map((i) =&gt; `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")
+  ) };
+});
+app.setSerializerCompiler(({ schema }) =&gt; (data) =&gt;
+  JSON.stringify((schema as ZodType).parse(data)));
+
+// per route
+app.post("/tasks", { schema: {
+  body: CreateTask,            // input wall
+  params: TaskParams,          // path text is input too
+  querystring: TaskFilter,     // so is the query string
+  response: { 201: TaskPublic } // output whitelist: unlisted fields dropped
+}}, handler);</code></pre>
+<p>Rules: a compiler returns <code>{ value }</code> or <code>{ error }</code> and never throws. A failed input schema means the handler never runs (400). A response schema is a whitelist &mdash; the only reliable stop for leaked fields.</p>
+
+<h2>Rate limiting login (lesson 11)</h2>
+<p class="takeaway">Count the thing the attacker has only one of. That is the account, never the IP.</p>
+<div class="scroll">
+<table>
+<tr><th>Question</th><th>Answer</th><th>Because</th></tr>
+<tr><td>What is the key?</td><td>The email typed, lowercased.</td><td>A proxy network defeats per-IP. Skipping <code>toLowerCase</code> gives fresh tries per capitalisation.</td></tr>
+<tr><td>Known email only?</td><td>No &mdash; unknown emails throttle identically.</td><td>Otherwise 401-forever vs 429 says which accounts exist.</td></tr>
+<tr><td>Lockout or wait?</td><td>Exponential wait, capped.</td><td>A lockout is a DoS aimed at your own users.</td></tr>
+<tr><td>Where in the handler?</td><td>First. Before the query and the hash.</td><td>A blocked request must not cost 252 ms of scrypt.</td></tr>
+<tr><td>Clear it when?</td><td>On a correct password.</td><td>Humans fumble. Scripts do not recover.</td></tr>
+<tr><td>Does blocking add a strike?</td><td>No.</td><td>Refreshing while blocked should not dig deeper.</td></tr>
+</table>
+</div>
+<pre><code>// src/auth/throttle.ts -- five free tries, then 1s doubling to 15 min
+const key = email.toLowerCase();
+const waitMs = throttleCheck(key);
+if (waitMs &gt; 0) {
+  reply.header("retry-after", Math.ceil(waitMs / 1000));
+  return reply.code(429).send({ error: "too many attempts, try again later" });
+}
+// ...query, hash, compare...
+if (!user || !ok) { throttleFail(key); return reply.code(401).send({ error: "invalid email or password" }); }
+throttleReset(key);</code></pre>
+<p class="aside"><strong>Limits to remember:</strong> an in-memory <code>Map</code> dies on restart and is per-process. It also has to be size-capped, because anything keyed on caller input is a store the caller can fill. Real answer to patient guessing: <strong>MFA</strong>.</p>
+
+<h2>Rate limiting the whole API (lesson 12)</h2>
+<p class="takeaway">Two layers, two keys. The account stops guessing; the connection stops volume. Neither covers the other.</p>
+<pre><code>// src/app.ts -- BEFORE the routes. 100 requests per IP per minute.
+await app.register(rateLimit, {
+  global: false,                 // see the warning below
+  max: 100, timeWindow: "1 minute", cache: 5_000,
+});
+app.addHook("onRequest", app.rateLimit());   // app hooks run before route hooks</code></pre>
+<p class="aside"><strong>Why not <code>global: true</code>?</strong> The plugin's global mode attaches its check per route, <em>after</em> that route's own <code>onRequest</code>. So a route behind <code>requireAuth</code> would run the session query and answer 401 before counting &mdash; a blocked request still costs a query. One app-level hook runs first. <strong>The cheap check goes in front of the expensive work</strong>, every time.</p>
+<div class="scroll">
+<table>
+<tr><th>Question</th><th>Answer</th><th>Because</th></tr>
+<tr><td>What is the key?</td><td><code>request.ip</code>.</td><td>An unauthenticated flood has no account in it. Volume is what one address cannot spread away.</td></tr>
+<tr><td>Write it or install it?</td><td>Install.</td><td>Reject a library when its <em>defaults</em> are wrong. Take it when the problem has no decisions left.</td></tr>
+<tr><td>Headers you get</td><td><code>x-ratelimit-limit</code> / <code>-remaining</code> / <code>-reset</code>, plus <code>retry-after</code> on a 429.</td><td>A client can slow down before it is pushed.</td></tr>
+<tr><td>Turn it off for one route</td><td><code>config: { rateLimit: false }</code></td><td>Only with a reason written next to it.</td></tr>
+<tr><td>Behind a proxy?</td><td><code>trustProxy</code> &mdash; at deploy, not before.</td><td>Believe a header only when something you control writes it.</td></tr>
+<tr><td>What to test</td><td>The wiring, not the counting.</td><td>Test what you decided, not what you installed.</td></tr>
+</table>
+</div>
+<p class="aside"><strong>Limits to remember:</strong> in-process counters (restart forgets, two processes double the limit &mdash; the plugin takes a <code>redis</code> option); 100 requests can still be 100 huge bodies (<code>bodyLimit</code>) or 100 unpaginated queries; a real botnet is a layer above your app.</p>
+
+<h2>CORS (lesson 13)</h2>
+<p>CORS is advice to a <strong>browser</strong>. It does not stop curl, a script, or another server. Access control is <code>requireAuth</code> + <code>can()</code>.</p>
+<table>
+<tr><th></th><th>same-origin</th><th>same-site</th></tr>
+<tr><td>made of</td><td>scheme + host + <strong>port</strong></td><td>scheme + registrable domain</td></tr>
+<tr><td>used by</td><td>CORS</td><td><code>SameSite</code> cookies</td></tr>
+<tr><td>:5173 vs :3000</td><td>different</td><td>same</td></tr>
+<tr><td>app.co vs api.app.co</td><td>different</td><td>same</td></tr>
+</table>
+<pre><code>await app.register(cors, {
+  origin: ALLOWED_ORIGINS,   // exact strings, from env. Never true, never an unanchored regex.
+  credentials: true,         // needed for the session cookie
+  methods: ["GET", "POST", "PATCH", "DELETE"],
+});</code></pre>
+<ul>
+<li><code>origin: true</code> <strong>reflects</strong> the caller's Origin. With <code>credentials: true</code> that is an account-data leak.</li>
+<li><code>origin: "*"</code> is safe only because the browser refuses to send cookies to a wildcard.</li>
+<li>Preflight = an <code>OPTIONS</code> the browser sends first for writes. No preflight answer, no real request.</li>
+<li>A denied origin still gets <strong>200</strong> &mdash; just no <code>access-control-allow-origin</code> header.</li>
+</ul>
+<pre><code>curl -si -H 'Origin: https://evil.example' localhost:3000/health | head -8</code></pre>
+
+<h2 id="headers">Security headers for a JSON API (lesson 15)</h2>
+<p>Headers are advice to a <strong>browser</strong>, same as CORS. They stop nobody with curl. Helmet's defaults are written for an HTML <em>page</em> &mdash; four of thirteen apply to JSON.</p>
+<table>
+<tr><th>Header</th><th>Value we send</th><th>What it stops</th></tr>
+<tr><td><code>X-Content-Type-Options</code></td><td><code>nosniff</code></td><td>Browser guessing your JSON is HTML and running script in it.</td></tr>
+<tr><td><code>Content-Security-Policy</code></td><td><code>default-src 'none';frame-ancestors 'none'</code></td><td>Anything loading, if the reply is ever rendered. And framing.</td></tr>
+<tr><td><code>X-Frame-Options</code></td><td><code>DENY</code></td><td>Framing, for old browsers. Helmet's default is <code>SAMEORIGIN</code>.</td></tr>
+<tr><td><code>Cross-Origin-Resource-Policy</code></td><td><code>same-origin</code></td><td><code>&lt;script src&gt;</code> / <code>&lt;img&gt;</code> tricks. <strong>Not</strong> your front end's <code>fetch()</code> &mdash; that is CORS mode.</td></tr>
+<tr><td><code>Strict-Transport-Security</code></td><td><code>max-age=31536000; includeSubDomains</code>, <strong>production only</strong></td><td>A downgrade to plain http.</td></tr>
+<tr><td><code>Cache-Control</code></td><td><code>no-store</code> &mdash; hand-written, no plugin sets it</td><td>A cache keeping one user's private reply and serving the next person.</td></tr>
+</table>
+<pre><code>await app.register(helmet, {
+  contentSecurityPolicy: {
+    useDefaults: false,          // without this, default-src stays 'self'
+    directives: { "default-src": ["'none'"], "frame-ancestors": ["'none'"] },
+  },
+  xFrameOptions: { action: "deny" },
+  hsts: process.env.NODE_ENV === "production"
+    ? { maxAge: 31_536_000, includeSubDomains: true }
+    : false,                     // NEVER from localhost
+  crossOriginOpenerPolicy: false, originAgentCluster: false,
+  xDnsPrefetchControl: false, xDownloadOptions: false,
+  xPermittedCrossDomainPolicies: false,
+});
+
+app.addHook("onSend", async (_req, reply) =&gt; {
+  reply.header("cache-control", "no-store");   // onSend = every reply, incl. 400/403/404/429
+});</code></pre>
+<ul>
+<li><strong>HSTS on localhost is hard to undo.</strong> The browser writes it down per host and stops asking. You clear it by hand, per browser.</li>
+<li>Switched off, all page-only: <code>Cross-Origin-Opener-Policy</code>, <code>Origin-Agent-Cluster</code>, <code>X-DNS-Prefetch-Control</code>, <code>X-Download-Options</code>, <code>X-Permitted-Cross-Domain-Policies</code>. Helmet's <code>X-XSS-Protection: 0</code> and <code>X-Powered-By</code> removal are no-ops here.</li>
+<li>Your React page needs its <strong>own</strong> CSP, from nginx. This one only covers API replies.</li>
+</ul>
+<pre><code>curl -si localhost:3000/health | head -20</code></pre>
+
+<h3>The three dependency rules</h3>
+<table>
+<tr><td>Reject a library</td><td>when its <strong>default is the wrong decision</strong> (lesson 11)</td></tr>
+<tr><td>Take a library</td><td>when the problem has <strong>no decisions left</strong> (lessons 12, 13)</td></tr>
+<tr><td>Take it and turn it down</td><td>when it is <strong>right about facts, wrong about your situation</strong> (lesson 15)</td></tr>
+</table>
+
+<h2 id="csrf">CSRF &mdash; who asked for this write (lesson 16)</h2>
+<p><strong>Reading is CORS. Writing is CSRF.</strong> Different attacks, never the same defence. CSRF = another site's page makes your browser send a write with your cookie, and never reads the reply.</p>
+<p>Decision, <code>src/auth/csrf.ts</code>, in order:</p>
+<table>
+<tr><th>Check</th><th>Result</th><th>Why</th></tr>
+<tr><td>Method is <code>GET</code>/<code>HEAD</code>/<code>OPTIONS</code></td><td>Allow</td><td>Nothing to defend &mdash; <em>as long as no GET writes</em>. This line trusts you.</td></tr>
+<tr><td><code>Sec-Fetch-Site: same-origin</code></td><td>Allow</td><td>Our own page. Browser-written, page cannot forge it (<code>Sec-</code> = forbidden header name).</td></tr>
+<tr><td><code>Origin</code> in <code>ALLOWED_ORIGINS</code></td><td>Allow</td><td>Dev front end on another port: <em>same-site</em> but not same-origin. A sibling subdomain is same-site too, so trust the list, not the word.</td></tr>
+<tr><td>Any <code>Sec-Fetch-Site</code> at all</td><td><strong>403</strong></td><td>A browser spoke and it was not our page. 403 not 401 &mdash; the cookie was fine, the caller was not.</td></tr>
+<tr><td>Neither header</td><td>Allow (our call)</td><td>Not a browser: curl, Postman, cron. No victim cookie exists. OWASP recommends blocking; one-line switch, marked <code>ponytail:</code>.</td></tr>
+</table>
+<p><code>Sec-Fetch-Site</code> values: <code>same-origin</code> / <code>same-site</code> / <code>cross-site</code> / <code>none</code> (user typed it, bookmark). Baseline in all browsers since March 2023.</p>
+<ul>
+<li><code>SameSite=Lax</code> is <strong>defence in depth, not the defence.</strong> It blocks unsafe methods only, so a state-changing <code>GET</code> walks through. And one word changed to <code>None</code> removes it silently.</li>
+<li>When Lax is a browser <em>default</em> it is looser: cookies also ride a cross-site <code>POST</code> for two minutes after being set. Write <code>SameSite=Lax</code> explicitly and that grace does not apply.</li>
+<li>An HTML form has POSTed cross-site since 1995. <strong>No preflight.</strong> Preflight only happens for non-simple requests, so CORS never sees the classic attack.</li>
+<li>Hook lives at app level in <code>onRequest</code>, before <code>requireAuth</code>: a forged write pays two string compares, not a session query.</li>
+</ul>
+<pre><code># refused
+curl -si -X POST localhost:3000/auth/logout \
+  -H 'Sec-Fetch-Site: cross-site' -H 'Origin: https://evil.example' | head -1
+# allowed
+curl -si -X POST localhost:3000/auth/logout -H 'Sec-Fetch-Site: same-origin' | head -1</code></pre>
+
+<h2 id="mass-assignment">Mass assignment &mdash; the key you did not name (lesson 17)</h2>
+<p><strong>Strip is safe. Reject is safe and honest.</strong> Both refuse an unnamed key; only one tells you it happened. Also called <em>autobinding</em> (Spring), <em>object injection</em> (PHP). <a href="https://cwe.mitre.org/data/definitions/915.html">CWE-915</a>; merged into <strong>API3:2023 Broken Object Property Level Authorization</strong>.</p>
+<p>The rule, <code>src/app.ts</code>, inside the validator compiler:</p>
+<pre><code>app.setValidatorCompiler(({ schema, httpPart }) =&gt; {
+  const s = httpPart === "body" &amp;&amp; schema instanceof ZodObject
+    ? schema.strict()
+    : (schema as ZodType);
+  return (data) =&gt; { /* safeParse as before */ };
+});</code></pre>
+<table>
+<tr><th>Input</th><th>Strict?</th><th>Why</th></tr>
+<tr><td>Request <strong>body</strong></td><td class="yes"><strong>Yes</strong></td><td>The client composed it on purpose. An unnamed key is an attack or a typo, and both deserve a 400.</td></tr>
+<tr><td>Request <strong>querystring</strong></td><td>No</td><td>Collects keys nobody asked for: <code>utm_source</code>, <code>fbclid</code>, proxy cache-busters. Strict here turns a shared link into a 400.</td></tr>
+<tr><td>Request <strong>params</strong></td><td>No</td><td>Measured: strict params break nothing today &mdash; params hold exactly the declared URL segments. Left out for consistency with the query.</td></tr>
+</table>
+<p>Zod behaviour worth memorising (<a href="https://zod.dev/api">docs</a>):</p>
+<table>
+<tr><th>Form</th><th>Unknown key</th></tr>
+<tr><td><code>z.object({...})</code></td><td><strong>Stripped, silently.</strong> The default. Safe, mute.</td></tr>
+<tr><td><code>z.strictObject({...})</code> / <code>.strict()</code></td><td>Rejected: <code>Unrecognized key: "x"</code></td></tr>
+<tr><td><code>z.looseObject({...})</code></td><td>Passed through. This is the hole.</td></tr>
+</table>
+<ul>
+<li><code>.partial()</code> makes every field optional <em>and</em> allows <strong>none</strong>. Add <code>.refine((p) =&gt; Object.keys(p).length &gt; 0)</code> or an empty <code>PATCH</code> answers 200 and changes nothing.</li>
+<li><code>schema.strict()</code> returns a new schema and runs once at route registration. Zero per-request cost.</li>
+<li><strong>An <code>as</code> cast is not a check.</strong> <code>patch as {title?: string}</code> is true only because bodies are strict. Say which rule keeps the promise, in a comment.</li>
+<li>Strict checks whether you <em>named</em> a key, never whether naming it was wise. <code>AddMember</code> names <code>role</code> on purpose; what stops escalation is the rank rule in <code>can()</code>.</li>
+<li>Your zod schema <strong>is</strong> the allow-list and <code>TaskPublic</code> <strong>is</strong> the DTO &mdash; two of OWASP's three mitigations, since lesson 2.</li>
+</ul>
+<pre><code># refused, and it names the key
+curl -sb /tmp/c.txt -X POST localhost:3000/teams/1/tasks \
+  -H 'content-type: application/json' -d '{"title":"forged","ownerId":1}'
+# {"statusCode":400,...,"message":"(root): Unrecognized key: \"ownerId\""}</code></pre>
+
+<h2 id="enumeration">User enumeration &mdash; the reply that says who exists (lesson 18)</h2>
+<p><strong>Hide it, or charge for it.</strong> Those are the only two moves. An oracle is any reply that tells a stranger whether an account exists. <a href="https://owasp.org/www-project-web-security-testing-guide/latest/4-Web_Application_Security_Testing/03-Identity_Management_Testing/04-Testing_for_Account_Enumeration_and_Guessable_User_Account">OWASP WSTG-IDNT-04</a>.</p>
+<p><strong>Three channels. Check all three, every time.</strong></p>
+<table>
+<tr><th>Channel</th><th>The leak</th><th>The close</th></tr>
+<tr><td>Message</td><td>&ldquo;wrong password&rdquo; vs &ldquo;no such user&rdquo;</td><td>One string for both. Byte-identical.</td></tr>
+<tr><td>Status code</td><td><code>409</code> vs <code>201</code>; <code>404</code> vs <code>403</code>; a real email flipping to <code>429</code> while a fake one stays <code>401</code></td><td>Same code for both, and key the throttle on the <strong>typed</strong> email so an unknown address throttles too.</td></tr>
+<tr><td>Clock</td><td>No user &rarr; skip the hash &rarr; answer in 2 ms instead of 237 ms</td><td>Hash anyway, against <code>DUMMY_HASH</code>.</td></tr>
+</table>
+<pre><code>// auth/password.ts -- a hash of nothing, with the real settings
+export const DUMMY_HASH =
+  `scrypt$${N}$${r}$${p}$${Buffer.alloc(16).toString("base64")}$${Buffer.alloc(64).toString("base64")}`;
+
+// auth.route.ts -- no branch on `user` before the hash
+const user = await findUserByEmail(email);
+const ok = await verifyPassword(password, user?.passwordHash ?? DUMMY_HASH);
+if (!user || !ok) { throttleFail(key); return reply.code(401).send({ error: "invalid email or password" }); }</code></pre>
+<p><strong>Where enumeration survives:</strong> login is the route everyone hardens. Register, forgot-password, and invite-by-email are the ones that leak. Audit a new route against the rules you already wrote &mdash; and note that rules living in an app-level hook (CSRF, strict bodies) are inherited for free, while rules living in a handler (one message, throttle) are not.</p>
+<p><strong>The two designs, and there are only two:</strong></p>
+<table>
+<tr><th></th><th>Reply</th><th>Leak</th><th>Cost</th></tr>
+<tr><td>A &mdash; hide it</td><td><code>202 "check your email"</code>, always</td><td class="yes">None</td><td>Needs a mailer, a token table, unverified accounts</td></tr>
+<tr><td>B &mdash; charge for it</td><td><code>201</code> / <code>409</code>, throttled per email</td><td>Full, but slow and logged</td><td>Nine lines. Bulk attacks die; five probes stay free.</td></tr>
+</table>
+<p><strong>Timing rule that reads backwards:</strong> &ldquo;cheap check first&rdquo; (lesson 12) holds only when the cheap check leaks <em>less</em>. On register, checking the email before hashing would be faster <em>and</em> would open a timing oracle. A wasted hash can be load-bearing.</p>
+<p><strong>One address, one account.</strong> Normalise at the door, never at the query:</p>
+<pre><code>// schemas/auth.schema.ts -- validation goes on the RIGHT of .pipe()
+const emailField = z.string().trim().toLowerCase();
+export const Register = z.object({ email: emailField.pipe(z.email().max(254)), ... });</code></pre>
+<ul>
+<li><strong>Zod chains run left to right.</strong> <code>z.email().trim()</code> validates the untrimmed string, so a pasted <code>&quot;&nbsp;a@b.com&nbsp;&quot;</code> is a 400. Clean first, then <code>.pipe()</code> into the check.</li>
+<li><strong>Half a normalisation is worse than none.</strong> Lower-casing the throttle key but not the lookup gave two accounts for one person <em>and</em> a green test claiming case was handled.</li>
+<li>Backfill old rows in a data-only migration: <code>UPDATE "User" SET email = lower(email) WHERE email &lt;&gt; lower(email);</code>. Let it hit the <code>@unique</code> and roll back if duplicates exist &mdash; only a human can pick which row is the real person. Find them with <code>SELECT lower(email), count(*) FROM "User" GROUP BY 1 HAVING count(*) &gt; 1;</code>.</li>
+<li><code>toLowerCase()</code> is not a Unicode normaliser. <code>j&#1072;y@x.com</code> (Cyrillic <code>&#1072;</code>) stays a separate row.</li>
+</ul>
+<p><strong>Testing a timing defence:</strong> assert <em>both paths are slow</em> (<code>&gt; 100 ms</code>), never that the two times are close. A loaded laptop makes identical paths differ by 200 ms; it cannot make scrypt free. A flaky security test gets deleted, which leaves no test at all.</p>
+
+<h2 id="audit">Audit log &mdash; who did what, when (lesson 19)</h2>
+<p><strong>A request log is about the server. An audit log is about a person.</strong> Neither replaces the other. <a href="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html">OWASP Logging Cheat Sheet</a>, <a href="https://owasp.org/Top10/A09_2021-Security_Logging_and_Monitoring_Failures/">A09:2021</a>.</p>
+<table>
+<tr><th></th><th>Request log (<code>logger: true</code>)</th><th>Audit log (a table)</th></tr>
+<tr><td>Knows <em>who</em></td><td class="no">No &mdash; the line is written before auth resolves</td><td class="yes">Yes &mdash; <code>request.userId</code></td></tr>
+<tr><td>Queryable</td><td class="no">grep</td><td class="yes"><code>where "userId" = 7 order by at desc</code></td></tr>
+<tr><td>Kept</td><td class="no">Days, then rotated</td><td class="yes">As long as you decide</td></tr>
+</table>
+<p><strong>Write it in one <code>onResponse</code> hook, never in a handler.</strong> It is the only hook that knows both halves of the row &mdash; <em>who asked</em> (<code>requireAuth</code> set <code>request.userId</code> upstream) and <em>what the answer was</em> (<code>reply.statusCode</code>). A <code>401</code> or <code>403</code> never reaches a handler, so a log line in a handler records only the requests that were <em>allowed</em>. That is the opposite of an audit log.</p>
+<pre><code>// audit/audit.ts -- the decision, three lines, its own test file
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+const REFUSALS = new Set([401, 403, 429]);
+export function shouldAudit(method: string, status: number): boolean {
+  return !SAFE_METHODS.has(method) || REFUSALS.has(status);
+}
+
+// app.ts -- step 9, after everything
+app.addHook("onResponse", async (request, reply) =&gt; {
+  if (!shouldAudit(request.method, reply.statusCode)) return;
+  await writeAudit({
+    userId: request.userId,                              // undefined on a 401
+    route: request.routeOptions.url ?? "(no route)",     // the PATTERN, not request.url
+    status: reply.statusCode, method: request.method, ip: request.ip,
+    params: request.params,
+  });
+});</code></pre>
+<ul>
+<li><strong>Every write, plus every refusal &mdash; never every read.</strong> A refused <code>GET</code> is not a read, it is an attempt: a walk through <code>/teams/1..500</code> makes no writes at all. But one row per successful <code>GET</code> is 40 million rows of nothing a month, so the table gets truncated and then there is no audit log at all. Third use of <em>a store keyed on caller input is a store the caller can fill</em>.</li>
+<li><strong>Store the route pattern, never <code>request.url</code>.</strong> <code>/teams/:teamId/tasks</code> is one of a short fixed list. A URL is caller input: 8 KB long if they like, and it may carry a token somebody pasted into a query string. Put the ids in their own JSON column.</li>
+<li><strong>No <code>@relation</code> to <code>User</code>.</strong> The one model that must not cascade &mdash; <code>onDelete: Cascade</code> would delete the evidence the moment the account it accuses is deleted. Nullable too, because a <code>401</code> has no user and is still a row worth having.<br>
+<code>userId Int?  // a plain Int. No relation, so no cascade.</code></li>
+<li><strong>The write is free to the caller.</strong> <code>onResponse</code> fires after the reply is flushed. Measured: a <code>401</code> answered in 1.3 ms and still left a row.</li>
+<li><strong>Testing it:</strong> <code>app.inject()</code> resolves <em>before</em> <code>onResponse</code> finishes, so poll for the row &mdash; never <code>sleep</code>. The polling is the proof the caller does not wait.</li>
+<li><strong>Gotcha:</strong> <code>request.params</code> holds raw <em>strings</em> until zod coerces them. A <code>401</code> row records <code>{"teamId":"249"}</code>; a <code>403</code> row records <code>{"teamId":999999}</code>. Same column, two JSON types.</li>
+<li><strong>Still not solved:</strong> nobody reads it. A log with no alert is archaeology. And nothing prunes it &mdash; the table only grows.</li>
+</ul>
+
+<h2>Named mistakes</h2>
+<div class="scroll">
+<table>
+<tr><th>Name</th><th>What it is</th><th>The fix</th></tr>
+<tr><td>Mass assignment</td><td>Caller sets a field you never exposed (<code>isAdmin</code>, <code>ownerId</code>).</td><td>Strict bodies: an unnamed key is a 400. See <a href="#mass-assignment">above</a>.</td></tr>
+<tr><td>IDOR / BOLA</td><td>Caller swaps an id and reads someone else's row.</td><td>Scope every query by the caller's team or ownership, not just by id.</td></tr>
+<tr><td>Silent coercion</td><td>Bad type gets converted instead of rejected.</td><td>Strict schemas. Return 400.</td></tr>
+<tr><td>Secrets in logs</td><td>A whole object goes to the logger and takes a password, hash, session id or token with it. The reply stays clean, so nothing fails.</td><td>Log the fields you chose, plus a <code>redact</code> list as the net. See <a href="./logging.html">logging and redaction</a>.</td></tr>
+<tr><td>Credential stuffing</td><td>Leaked email+password pairs replayed once each, over many IPs.</td><td>Throttle per account, not per IP. MFA above that.</td></tr>
+<tr><td>Lockout DoS</td><td>Attacker freezes a stranger's account by failing on purpose.</td><td>Backoff, never a hard lockout.</td></tr>
+<tr><td>Unauthenticated expensive work</td><td>Free requests that each cost you a slow hash.</td><td>Cheap check first; reject before the cost.</td></tr>
+<tr><td>CSRF</td><td>Another site's page makes the victim's browser send a write, with the victim's cookie.</td><td>Refuse a write unless <code>Sec-Fetch-Site: same-origin</code> or the <code>Origin</code> is on the list. See <a href="#csrf">above</a>.</td></tr>
+<tr><td>State-changing GET</td><td>A <code>GET</code> that deletes. <code>SameSite=Lax</code> sends the cookie on a clicked cross-site link, so nothing stops it.</td><td>Never write in a <code>GET</code>. There is no header that saves you from this one.</td></tr>
+<tr><td>User enumeration</td><td>A reply that says whether an account exists. Register and forgot-password leak it long after login stops.</td><td>Same code, same words, same time &mdash; or accept the leak and throttle it per email. See <a href="#enumeration">above</a>.</td></tr>
+<tr><td>Client-side-only checks</td><td>Hidden button treated as security.</td><td>Server re-checks every rule. UI hiding is cosmetic.</td></tr>
+</table>
+</div>
+<p>Full list, with detail: <a href="https://owasp.org/www-project-api-security/">OWASP API Security Top 10</a>.</p>
+
+<h2>curl kit</h2>
+<pre><code>curl -i localhost:3000/health
+curl -i -X POST localhost:3000/tasks -H 'content-type: application/json' -d '{"title":"x"}'
+curl -i -X PATCH localhost:3000/tasks/1 -H 'content-type: application/json' -d '{"done":true}'
+curl -c /tmp/jar -X POST localhost:3000/auth/login \
+  -H 'content-type: application/json' -d '{"email":"a@e.com","password":"..."}'
+curl -i -b /tmp/jar localhost:3000/teams/1/tasks   # -c saves cookies, -b sends them</code></pre>
+<p class="aside"><code>-i</code> prints the status line and headers. Always use it while learning.</p>
+
+<hr>
+<footer>
+<p>From <a href="../lessons/0001-first-validated-route.html">Lesson 1</a>. Sources: <a href="../RESOURCES.md">RESOURCES.md</a>. Questions go to your teacher &mdash; ask in the session.</p>
+</footer>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

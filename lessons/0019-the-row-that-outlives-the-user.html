@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 19 — Audit rows that survive deletion</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+/* Three paths through the app, drawn as lanes. */
+.lanes { margin: 1.4rem 0 1rem; }
+.lane { display: grid; grid-template-columns: 4.6rem repeat(3, 1fr) 5.4rem;
+  gap: .3rem; align-items: stretch; margin-bottom: .35rem; font-size: .78rem; }
+.lane > * { padding: .55rem .6rem; border-radius: 4px; line-height: 1.4; }
+.lane .who { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); display: flex;
+  align-items: center; padding-left: 0; }
+.lane .step { border: 1px solid var(--rule); background: var(--code-bg); }
+.lane .stop { border: 1px solid var(--bad); color: var(--bad); font-weight: 600; }
+.lane .skip { border: 1px dashed var(--rule); color: var(--muted);
+  font-style: italic; opacity: .55; }
+.lane .end { border: 1px solid var(--ok); color: var(--ok); font-weight: 600;
+  display: flex; align-items: center; }
+.lane.head > * { border: 0; background: none; padding: 0 .6rem .25rem;
+  font-family: var(--mono); font-size: .64rem; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--muted); }
+
+.rule { font-size: .95rem; padding: .8rem 1rem; border-left: 3px solid var(--accent);
+  background: var(--code-bg); border-radius: 0 4px 4px 0; margin: 1.4rem 0 2.2rem; }
+
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.2rem 0 2.2rem; }
+.two > div { border: 1px solid var(--rule); border-radius: 6px; padding: 1rem 1.1rem; }
+.two h3 { margin: 0 0 .6rem; font-size: .95rem; }
+.two p { margin: .5rem 0 0; font-size: .82rem; color: var(--muted); line-height: 1.55; }
+.two .tag { font-family: var(--mono); font-size: .66rem; letter-spacing: .12em;
+  text-transform: uppercase; display: block; margin-bottom: .5rem; }
+.good { border-color: #b6d3ba; background: #f7faf6; }
+.good .tag { color: var(--ok); }
+.bad { border-style: dashed; }
+.bad .tag { color: var(--bad); }
+
+/* The cascade sketch. */
+.casc { list-style: none; padding: 0; margin: 1.2rem 0 1rem; font-size: .84rem; }
+.casc li { display: grid; grid-template-columns: 8.5rem 1fr; gap: .9rem;
+  padding: .5rem .7rem; border: 1px solid var(--rule); border-radius: 4px;
+  margin-bottom: .3rem; align-items: center; }
+.casc code { font-size: .78rem; }
+.casc .keep { border-color: var(--ok); }
+.casc .keep span:last-child { color: var(--ok); }
+.casc .drop { color: var(--muted); }
+
+pre { font-size: .78rem; }
+h2 { margin-top: 2.6rem; }
+@media (max-width: 34rem) {
+  .lane, .two, .casc li { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 19 &middot; Week 7&ndash;8 &middot; API security</p>
+<h1>Audit rows that survive deletion</h1>
+<p class="lede">Lesson 18 promised that the <code>429</code>s would &ldquo;land in the logs, so the attempt becomes visible&rdquo;. Nothing writes them down. Today that becomes true.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>Your <strong>request log</strong> (<code>logger: true</code>) cannot answer &ldquo;who deleted task 41?&rdquo; An <strong>audit log</strong> is a table: one row per <em>write</em> and per <em>refusal</em>.</li>
+<li>It goes in <strong>one <code>onResponse</code> hook</strong> &mdash; the only place that knows both <em>who asked</em> and <em>what the answer was</em>.</li>
+<li>A <code>403</code> is the row you most want, and <strong>no handler ever runs to write it</strong>.</li>
+<li><code>AuditLog</code> is the one model with <strong>no relation to <code>User</code></strong>. Cascade would delete the evidence.</li>
+</ul>
+</div>
+
+<h2>The picture &mdash; why the hook, and why this hook</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  REQ["request"] --> AUTH["requireAuth<br/>sets request.userId"]
+  AUTH -->|401| RESP["onResponse"]
+  AUTH --> GATE["requirePermission<br/>can(role, action)"]
+  GATE -->|403| RESP
+  GATE --> H["the handler<br/>writes to Postgres"]
+  H --> RESP
+  RESP --> ROW["one AuditLog row<br/>who + what + status"]
+  H -.->|"a log line here<br/>never sees the 401 or the 403"| MISS["the rows you needed most"]
+</pre>
+<figcaption>Two of the three paths never reach the handler. <code>onResponse</code> is downstream of all three, and it runs after <code>requireAuth</code> has set <code>request.userId</code> &mdash; so it is the only place that knows the person <em>and</em> the verdict.</figcaption>
+</figure>
+
+<h2>You have logs. Why a table?</h2>
+<p>Word pair for today. A <span class="word">request log</span> is a text stream about <em>the server</em>: this URL, this status, this many milliseconds. An <span class="word">audit log</span> is a table about <em>a person</em>: this human, this team, this action, this answer.</p>
+
+<table>
+<tr><th></th><th>Request log</th><th>Audit log</th></tr>
+<tr><td>Knows who</td><td class="no">no &mdash; written before auth resolves</td><td class="yes">yes &mdash; <code>request.userId</code></td></tr>
+<tr><td>Queryable</td><td class="no">grep</td><td class="yes"><code>where "userId" = 7</code></td></tr>
+<tr><td>Kept</td><td class="no">days, then rotated</td><td class="yes">as long as you decide</td></tr>
+</table>
+
+<h2>The code &mdash; one hook, three lines of decision</h2>
+<pre><code>// src/audit/audit.ts — the decision
+const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+const REFUSALS = new Set([401, 403, 429]);
+
+export function shouldAudit(method: string, status: number): boolean {
+  return !SAFE_METHODS.has(method) || REFUSALS.has(status);
+}</code></pre>
+
+<p>Every write, whatever the outcome. Plus every refusal, <em>even on a read</em> &mdash; a stranger walking <code>/teams/1</code> to <code>/teams/500</code> makes no writes at all, and that walk is only visible here.</p>
+
+<p>And not every read. That is the cap, and it is deliberate:</p>
+<p>And <em>not</em> every read. That is the cap, and it is deliberate. Log every request and you get 40 million rows a month, 99% of them &ldquo;someone looked at a list&rdquo; &mdash; a table so expensive and so useless that it gets truncated by March, leaving you with no audit log at all. Log writes and refusals and every row answers a question somebody actually asks.</p>
+
+<p class="takeaway">A store keyed on caller input is a store the caller can fill. Cap it as you create it &mdash; lesson 11's rule, third use.</p>
+
+<h2>Two details that are the whole craft</h2>
+<p><b>1. Store the route <em>pattern</em>, never <code>request.url</code>.</b> <code>/teams/:teamId/tasks</code> is one of a short fixed list. A URL is caller input: it can be 8 KB long, and it can carry a token somebody pasted into a query string. You would be writing an attacker's text into your evidence table.</p>
+
+<pre><code>route: request.routeOptions.url ?? "(no route)",   // the pattern
+params: request.params,                            // the ids, separately</code></pre>
+
+<p><b>2. <code>AuditLog</code> has no <code>@relation</code> to <code>User</code>.</b> Every other model in your schema cascades &mdash; delete the team, the tasks go. Here that is exactly wrong:</p>
+
+<pre><code>// prisma/schema.prisma
+// Null = nobody was logged in. A 401 is a row worth having.
+userId Int?     // ← a plain Int. No relation, so no cascade.</code></pre>
+
+<p class="takeaway">An audit row that vanishes with the person it accuses is not evidence.</p>
+
+<h2>What it looks like when it runs</h2>
+<p>Four requests, measured just now:</p>
+<pre><code>GET  tasks (read)        200   20.0 ms
+POST task (write)        201   14.3 ms
+POST task, no cookie     401    1.3 ms
+POST task, wrong team    403   15.2 ms
+
+rows: 3
+userId  teamId    method  route                     status  params
+911     249       POST    /teams/:teamId/tasks      201     {"teamId":249}
+null    249       POST    /teams/:teamId/tasks      401     {"teamId":"249"}
+911     999999    POST    /teams/:teamId/tasks      403     {"teamId":999999}</code></pre>
+
+<p>Three things to notice. The <code>200</code> wrote nothing. The <code>401</code> answered in <strong>1.3 ms</strong> and <em>still</em> left a row &mdash; because <code>onResponse</code> runs after the reply is already on the wire, so the caller waits for none of it. And <code>teamId</code> is the string <code>"249"</code> on that row: the <code>401</code> was answered before zod ever coerced the URL. Params are raw strings until validation runs.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">Why can a log line inside the handler not record a 403?</p>
+<button>Because a 403 has no user id attached</button>
+<button>Because the handler never runs at all</button>
+<p class="why" hidden>The gate replies and the request ends there. Anything written in the handler records only the requests that were allowed &mdash; which is the opposite of what an audit log is for.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why does <code>AuditLog.userId</code> avoid a relation?</p>
+<button>So deleting the user keeps the row</button>
+<button>So the write does not need a lookup</button>
+<p class="why" hidden>A foreign key with <code>onDelete: Cascade</code> would delete every audit row belonging to an account the moment that account is deleted. The rows about the worst behaviour are exactly the ones you would lose.</p>
+</div>
+
+<h2>What this does NOT fix</h2>
+<table>
+<tr><th>Gap</th><th>Why it is still open</th></tr>
+<tr><td>Nobody reads it</td><td>A log with no alert is archaeology, not defence. <a href="https://owasp.org/Top10/A09_2021-Security_Logging_and_Monitoring_Failures/">A09:2021</a> is about exactly this.</td></tr>
+<tr><td>No retention job</td><td>The table only grows. Week 13&ndash;14, with the background jobs.</td></tr>
+<tr><td>An admin can edit it</td><td>Same database, same credentials. Real tamper-proofing means shipping rows off the box.</td></tr>
+</table>
+
+<h2>Do this</h2>
+<ol>
+<li><code>npm test</code> &mdash; <strong>117</strong> tests, eight new: three in <code>src/audit/audit.test.ts</code> (the decision), five in <code>src/routes/audit.test.ts</code> (the enforcement).</li>
+<li>Read your own log: <code>cd server &amp;&amp; npm run log</code> (a new script; it feeds <code>.env</code>'s URL to <code>psql</code>). Straight after <code>npm test</code> you should see rows like these &mdash; including the <code>429</code> lesson 18 said would become visible:
+<pre><code>          at            | userId | teamId | method |     route                      | status
+ 2026-09-08 05:25:42.438 |    995 |    273 | DELETE | /teams/:teamId                 |    204
+ 2026-09-08 05:25:42.427 |    998 |    273 | POST   | /teams/:teamId/members         |    403
+ 2026-09-08 05:25:43.543 |        |        | POST   | /auth/login                    |    429</code></pre>
+Two things worth noticing: the login rows have an empty <code>userId</code>, because there is no session yet when login answers. And every <code>route</code> is a pattern.</li>
+<li>Break it on purpose: in <code>src/app.ts</code>, change <code>route: request.routeOptions.url ?? "(no route)"</code> to <code>route: request.url,</code>. Run <code>npm test</code>. <strong>Exactly one</strong> test fails &mdash; <em>a write lands a row naming the person and the team</em> &mdash; and its message names the rule. Then put it back.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Three requests, three paths. Only one of them reaches the handler.</p>
+
+<div class="lanes">
+<div class="lane head"><span></span><span>requireAuth</span><span>can()</span><span>handler</span><span>onResponse</span></div>
+
+<div class="lane">
+<span class="who">stranger</span>
+<span class="stop">401 &#8594; reply</span>
+<span class="skip">never runs</span>
+<span class="skip">never runs</span>
+<span class="end">row</span>
+</div>
+
+<div class="lane">
+<span class="who">viewer</span>
+<span class="step">userId = 42</span>
+<span class="stop">403 &#8594; reply</span>
+<span class="skip">never runs</span>
+<span class="end">row</span>
+</div>
+
+<div class="lane">
+<span class="who">owner</span>
+<span class="step">userId = 7</span>
+<span class="step">MEMBER, allowed</span>
+<span class="step">writes the task</span>
+<span class="end">row</span>
+</div>
+</div>
+
+<p>Read the <em>handler</em> column. It is empty on two of the three rows &mdash; and those two rows are the ones an audit log exists for. A <code>console.log</code> in the handler cannot record a refusal, because there is no handler to put it in.</p>
+
+<p class="rule">A log line in a handler records only the requests that were <strong>allowed</strong>. That is the opposite of an audit log.</p>
+
+<h2>Why this hook and no other</h2>
+<p>The row needs two facts, and they are known at two different moments.</p>
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  A["requireAuth<br/>sets request.userId"] -->|"knows WHO<br/>not yet the verdict"| B["can()"]
+  B -->|"decides the verdict<br/>then replies and stops"| C["handler"]
+  C --> D["onResponse<br/>request.userId<br/>+ reply.statusCode"]
+  B -.->|403| D
+  A -.->|401| D
+  D --> E["AuditLog row"]
+</pre>
+<figcaption><code>requireAuth</code> knows who but not the answer. <code>can()</code> knows the answer but replies and stops. <code>onResponse</code> is downstream of all three exits, and <code>request</code> still carries the <code>userId</code> set upstream. It is the only place both facts exist at once.</figcaption>
+</figure>
+
+<h2>The one model that must not cascade</h2>
+<p>You have written <code>onDelete: Cascade</code> six times, and it was right six times. Delete the user, their rows go with them:</p>
+
+<ul class="casc">
+<li><span><code>Session</code></span><span class="drop">goes &mdash; a ticket for a person who no longer exists</span></li>
+<li><span><code>Membership</code></span><span class="drop">goes &mdash; a role in a team for nobody</span></li>
+<li><span><code>Task.owner</code></span><span class="drop"><code>RESTRICT</code> &mdash; the delete is refused while tasks exist</span></li>
+<li class="keep"><span><code>AuditLog</code></span><span>stays &mdash; <strong>no relation at all</strong></span></li>
+</ul>
+
+<div class="two">
+<div class="bad">
+<span class="tag">The instinct</span>
+<pre><code>user   User @relation(
+  fields: [userId],
+  references: [id],
+  onDelete: Cascade)
+userId Int</code></pre>
+<p>Delete the account, and every row describing what that account did is deleted in the same statement. The worse the behaviour, the more certain the account gets deleted.</p>
+</div>
+<div class="good">
+<span class="tag">Correct</span>
+<pre><code>// a plain Int.
+// No relation, so no cascade.
+userId Int?</code></pre>
+<p>It keeps pointing at an id that may no longer exist. Nullable as well &mdash; a <code>401</code> has no user at all, and that is still a row worth having.</p>
+</div>
+</div>
+
+<p class="rule">An audit row that vanishes with the person it accuses is not evidence.</p>
+
+<h2>What three requests actually leave behind</h2>
+<pre><code>userId  teamId    method  route                     status  params
+911     249       POST    /teams/:teamId/tasks      201     {"teamId":249}
+null    249       POST    /teams/:teamId/tasks      401     {"teamId":"249"}
+911     999999    POST    /teams/:teamId/tasks      403     {"teamId":999999}</code></pre>
+<p>The <code>route</code> column is the <strong>pattern</strong>, never <code>request.url</code> &mdash; a URL is caller input, and evidence written from caller input is not evidence. And look at the <code>401</code>: <code>"249"</code> in quotes. Its reply was sent before zod ever coerced the URL, so params are still strings there.</p>
+
+<hr>
+<p class="nav">The lesson: <a href="./0019-the-row-that-outlives-the-user.html">Lesson 19 &mdash; The row that outlives the user</a> &middot; Reference: <a href="../reference/api-security-basics.html#audit">Audit log</a></p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html">OWASP, Logging Cheat Sheet</a> &mdash; the &ldquo;which events to log&rdquo; list is the part to read.</p>
+<p><b>Also:</b> <a href="https://fastify.dev/docs/latest/Reference/Hooks/#onresponse">Fastify, <code>onResponse</code></a>. Note what it says about the reply already being sent.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/node/">r/node</a> &mdash; do they audit reads as well as writes, and what made them change their mind? There is no right answer here; there are war stories.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0018-the-route-nobody-audited.html">&larr; Back</a>
+<a href="../reference/the-whole-arc.html">The whole arc, one page &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

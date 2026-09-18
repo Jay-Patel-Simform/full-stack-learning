@@ -1,0 +1,417 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 51 &mdash; The resource nobody can see</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 51 &middot; Week 11&ndash;12 &middot; Real world</p>
+<h1>The resource nobody can see</h1>
+<p class="lede">You built <code>Project</code> in week 5&ndash;6. It has a Prisma model, a migration, a store, two routes, a permission rule and <b>six passing tests</b>. I counted the rows in your database this morning: <b>0</b>. Not one project has ever existed. Today you find out why, and the reason is a single missing verb. Suite goes <b>170 &rarr; 172</b>.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>You can create a project and delete a project. You cannot read one.</strong> There is no <code>GET</code> route and no <code>project:read</code> action. A resource with no read is a resource with no screen, and a resource with no screen gets no rows.</li>
+<li><strong>The permission table was written from the routes that existed.</strong> <code>ACTIONS</code> has <code>project:create</code> and <code>project:delete</code> because those were the two routes you wrote. Nothing has ever compared that list against the resource it is supposed to describe.</li>
+<li><strong>Not every list route needs the gate &mdash; this one does.</strong> <code>GET /teams</code> has no <code>requirePermission</code> on purpose. <code>GET /teams/:teamId/projects</code> must have one. The difference is one word: where the scope came from.</li>
+<li><strong>Widening a role breaks two tests, and that is the tests working.</strong> Measured: adding one word to <code>VIEWER</code> turns <b>170 pass</b> into <b>168 pass, 2 fail</b>. You will watch that happen before you fix it.</li>
+<li><strong>Streak intact: no new dependency, 51 lessons.</strong></li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<pre><code>server: npm test          <b>170 passing</b>
+server: npm run typecheck <b>2 errors</b>  &larr; pre-existing, see below
+web:    npm test          4 passing
+psql:   "Project"         <b>0 rows</b>, model added week 5-6</code></pre>
+<p>Two things before the lesson proper.</p>
+<p><b>Your typecheck is red</b>, and has been since lesson 43: <code>src/audit/retention.test.ts:49</code>, twice, <code>TS18048: 'row' is possibly 'undefined'</code>. It is a test file indexing an array, so the tests pass and only <code>tsc</code> notices. This is the fifth member of the &ldquo;no failing state&rdquo; family you have collected, except this one <em>does</em> have a failing state and nobody has looked at it. One <code>assert.ok(row)</code> above line 49 fixes both errors. It is step 0 today.</p>
+<p><b>The suite is 170, not 169.</b> The plan said 169 after lesson 43. You added one somewhere and did not tell me. Good.</p>
+
+<h2>The thing that has been true for forty lessons</h2>
+<p>Here is every route that exists for <code>Project</code>, straight out of <code>src/routes/projects.route.ts</code>:</p>
+<pre><code>POST   /teams/:teamId/projects              project:create
+DELETE /teams/:teamId/projects/:projectId   project:delete</code></pre>
+<p>And here is <code>ACTIONS</code>, the complete vocabulary of your permission system:</p>
+<pre><code>"task:read", "task:create", "task:update", "task:delete",
+<b>"project:create", "project:delete",</b>
+"member:invite", "member:remove", "team:delete", "audit:read"</code></pre>
+<p>Read those two blocks next to each other. <code>Task</code> has four verbs and the first one is <code>read</code>. <code>Project</code> has two verbs and neither one is <code>read</code>. Nothing in TypeScript, Zod, Prisma or your 170 tests can see that, because <b>every one of them checks the code against itself</b>. The route calls an action that exists. The action is in the table. The test asserts the gate refuses a Viewer. All true, all green, and the feature does not work.</p>
+<p class="takeaway"><b>A permission table is a list of the verbs you happened to write, not a list of the verbs the resource has.</b> The gap is invisible to every tool you own. You find it by putting the two lists side by side and reading, which is what you just did.</p>
+
+<h2>Why zero rows is the proof</h2>
+<p>You could have created a project at any point in the last six weeks. The route works &mdash; <code>projects.test.ts</code> creates them constantly. But you have never created one from the app, because the app has never had a reason to: there is nothing to look at afterwards. A <code>POST</code> whose result you cannot see is a button nobody presses twice.</p>
+<p>So <code>0</code> is not neglect. It is the honest output of a resource that is write-only.</p>
+
+<h2>The decision: which role gets <code>project:read</code>?</h2>
+<p>Your roles nest, so the question is only &ldquo;how far down does it go&rdquo;. Compare it to the two reads you already placed:</p>
+<div class="scroll"><table>
+<tr><th>Action</th><th>Lowest role</th><th>Why there</th></tr>
+<tr><td><code>task:read</code></td><td>VIEWER</td><td>Seeing the work is the whole point of being a Viewer.</td></tr>
+<tr><td><code>audit:read</code></td><td>ADMIN</td><td>The rows name who did what. A curious member should not browse them (lesson 38).</td></tr>
+<tr><td><b><code>project:read</code></b></td><td><b>VIEWER</b></td><td>A project is a name and an id. It is the same class of fact as a task &mdash; the work, not who touched it.</td></tr>
+</table></div>
+<p>So <code>project:read</code> goes next to <code>task:read</code> in <code>VIEWER</code>, and every role inherits it. That is one word in one line, and it is the only real decision in today's lesson. Everything after it is mechanics.</p>
+
+<h2>Now watch two tests fail</h2>
+<p>Add the word, run nothing else, and run the suite. Measured on your machine:</p>
+<pre><code>npm test
+<b># tests 170</b>
+<b># pass 168</b>
+<b># fail 2</b>
+
+not ok - a viewer can read and nothing else        <span class="dim">src/auth/can.test.ts</span>
+not ok - the viewer gets the same team with a shorter can list   <span class="dim">src/routes/team-list.test.ts</span></code></pre>
+<p>Both failures are correct and both are the same shape. Look at what <code>can.test.ts</code> actually asserts:</p>
+<pre><code>assert.equal(can("VIEWER", "task:read"), true);
+for (const action of ACTIONS) {
+  if (action === "task:read") continue;
+  assert.equal(can("VIEWER", action), false, `viewer allowed ${action}`);
+}</code></pre>
+<p>That loop says <b>&ldquo;everything except this one name is refused&rdquo;</b>. It is written against <code>ACTIONS</code>, so every action you ever add is automatically denied to a Viewer unless you come back to this test and say otherwise. And <code>team-list.test.ts</code> does the same job over the wire: <code>assert.deepEqual(mine.can, ["task:read"])</code> &mdash; the exact list, not <code>includes</code>.</p>
+<p class="takeaway"><b>A permission test should fail when you widen a role.</b> This is the allowlist from lesson 34 wearing its fourth costume. The fix is never to loosen the loop &mdash; it is to name the second thing you meant to allow.</p>
+<p>So the fix is to name both reads, and let the loop keep guarding everything else:</p>
+<pre><code>// src/auth/can.test.ts
+<b>const READS = ["task:read", "project:read"] as const;
+for (const action of READS) assert.equal(can("VIEWER", action), true);</b>
+for (const action of ACTIONS) {
+  <b>if ((READS as readonly string[]).includes(action)) continue;</b>
+  assert.equal(can("VIEWER", action), false, `viewer allowed ${action}`);
+}
+
+// src/routes/team-list.test.ts
+assert.deepEqual(mine.can, <b>["task:read", "project:read"]</b>);</code></pre>
+<p>Back to 170. Note the order matters in that second one: <code>deepEqual</code> on an array compares position by position, and <code>can</code> comes from <code>allowedActions(role)</code>, which is your <code>VIEWER</code> tuple in the order you wrote it.</p>
+
+<h2>The route, and the one decision inside it</h2>
+<p>The store gets a list function. Nothing new here except the <code>where</code>:</p>
+<pre><code>// src/store/project.store.ts  &mdash; new function, above createProject
+export function listProjects(teamId: number) {
+  return prisma.project.findMany({
+    where: { teamId },
+    orderBy: { id: "asc" },
+    <span class="dim">// Name the columns. TaskPublic taught this in lesson 30 --
+    // a field the serializer drops is a field you should not select.</span>
+    select: { id: true, name: true, teamId: true },
+  });
+}</code></pre>
+<p>One line of schema:</p>
+<pre><code>// src/schemas/project.schema.ts
+export const ProjectList = z.array(ProjectPublic);</code></pre>
+<p>And the route:</p>
+<pre><code>// src/routes/projects.route.ts  &mdash; first route in the plugin
+app.get(
+  "/teams/:teamId/projects",
+  {
+    schema: { params: TeamParams, response: { 200: ProjectList, 403: ErrorReply } },
+    <b>preHandler: requirePermission("project:read"),</b>
+  },
+  async (request) => {
+    const { teamId } = request.params as TeamParamsInput;
+    return listProjects(teamId);
+  },
+);</code></pre>
+<p>No cursor, no <code>take</code>, no <code>nextCursor</code>. Tasks are paged because a team accumulates thousands of them; a team has a handful of projects, and paging a handful is code you would have to keep working forever in exchange for nothing. When a real team hits 200 projects, lesson 30 is still on disk.</p>
+
+<h2>The bit worth slowing down for</h2>
+<p>That <code>preHandler</code> line is the whole lesson in one word. You have a list route with <b>no</b> gate, and you were right to write it that way:</p>
+<pre><code>// src/routes/teams.route.ts
+app.get("/teams", ..., async (request) => {
+  const rows = await listMemberships(<b>request.userId!</b>);
+  ...
+});</code></pre>
+<p>Lesson 23 gave you the rule: <b>a list-shaped route needs no gate when the <code>where</code> clause is the scope</b>. <code>where: { userId }</code> cannot return a row you may not see, because the id came from your session cookie. There is nothing to refuse.</p>
+<p>Today's route looks identical &mdash; a list, one <code>where</code>, no ids in the body &mdash; and the rule does not apply, because of one word:</p>
+<div class="box">
+<div class="cap">where did the scope come from?</div>
+<div class="body">
+<div>GET /teams            where: { userId } &nbsp; <span class="ok">from your session</span> &nbsp;&rarr; no gate needed</div>
+<div>GET /teams/:teamId/projects   where: { teamId } &nbsp; <span class="bad">from the URL</span> &nbsp;&rarr; gate required</div>
+<div>&nbsp;</div>
+<div><span class="dim">Same query shape. The caller can type any teamId they like.</span></div>
+<div><span class="dim">Without the gate: change one number, read another team's projects. IDOR.</span></div>
+</div>
+</div>
+<p class="takeaway"><b>A <code>where</code> clause is a scope only when you chose its value.</b> Scope from the session scopes. Scope from the URL is a request, and a request gets checked. This is the same sentence as the <code>deleteMany({ where: { id, teamId } })</code> comment you already have in <code>project.store.ts</code> &mdash; you wrote it for the delete and it is just as true for the read.</p>
+
+<h2>Two tests, and what they are each for</h2>
+<pre><code>// src/routes/projects.test.ts  &mdash; helper, next to `remove`
+const list = (who: string, team = teamId) =>
+  app.inject({ method: "GET", url: `/teams/${team}/projects`,
+               headers: { cookie: cookies[who]! } });
+
+// ...and two tests, ABOVE "projects cascade away with the team"
+// (that one deletes the team, and node:test runs a file top to bottom)
+
+test("a viewer may list, and sees only this team's projects", async () => {
+  const mine = (await create("member", teamId, `listed-${stamp}`)).json().id;
+  await create("outsider", otherTeamId, `hidden-${stamp}`);
+
+  const r = await list("viewer");
+  assert.equal(r.statusCode, 200);
+  const names = r.json().map((p: { name: string }) => p.name);
+  assert.ok(names.includes(`listed-${stamp}`));
+  <b>assert.ok(!names.includes(`hidden-${stamp}`));</b>
+  assert.ok(r.json().every((p: { teamId: number }) => p.teamId === teamId));
+  await prisma.project.delete({ where: { id: mine } });
+});
+
+test("an outsider gets 403, not an empty list", async () => {
+  <b>assert.equal((await list("outsider")).statusCode, 403);</b>
+});</code></pre>
+<p>The first proves the <code>where</code> does its job &mdash; a project that exists, in a team you are not in, does not appear. The second proves the gate does its job. One test per mistake: with the gate gone, an outsider gets <code>200 []</code>, and the test fails. With the <code>where</code> gone, the viewer sees <code>hidden-</code>, and the first test fails. Measured here: <b>172 pass, 0 fail</b>.</p>
+<p>And note what the two answers are: an outsider asking <code>GET /teams</code> gets <b>an empty list</b>, an outsider asking <code>GET /teams/:teamId/projects</code> gets <b>403</b>. Both are correct. The first never says a team exists; the second was asked about a specific team and has to answer.</p>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why does <code>GET /teams/:teamId/projects</code> need a gate when <code>GET /teams</code> does not?</p>
+<button>A nested route is always a guarded route</button>
+<button>The caller chose the id being scoped on</button>
+<p class="why" hidden><code>where: { userId }</code> uses an id from your session &mdash; you cannot ask it about someone else. <code>where: { teamId }</code> uses a number typed into the URL, so without the gate, changing that number reads another team's rows. Nesting is a URL convention; it guards nothing by itself.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Adding <code>project:read</code> to VIEWER failed two tests. What does that mean?</p>
+<button>The tests are doing exactly their job</button>
+<button>The tests are too brittle to be useful</button>
+<p class="why" hidden>Both assert a Viewer's <em>whole</em> permission list, not that one entry is present. That is an allowlist, the same rule as pino's <code>redact</code> in lesson 34 and <code>TaskPublic</code> in lesson 30. A permission test that stays green while a role gets wider is a test that will not notice the day you widen it by accident.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Two list routes, same shape, one gate. The fork is where the <code>where</code> value came from.</p>
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+    A["GET /teams"] --> B["where: { userId }<br/>id from the session cookie"]
+    B --> C["no requirePermission<br/>nothing to refuse"]
+    C --> D[("rows you are in")]
+
+    E["GET /teams/:teamId/projects"] --> F["where: { teamId }<br/>id typed into the URL"]
+    F --> G{"requirePermission<br/>project:read"}
+    G -->|"no membership row"| H["403"]
+    G -->|"VIEWER or above"| I[("that team's projects")]
+</pre>
+<figcaption>Left path: the scope is a fact about you. Right path: the scope is a claim you made.</figcaption>
+</figure>
+
+<h2>The screen</h2>
+<p>Two new files and three small edits. Reviewed, not executed &mdash; I do not run your front end.</p>
+
+<h3><code>web/src/features/projects/projects.ts</code></h3>
+<pre><code>import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api } from "@/lib/api";
+
+export type Project = { id: number; name: string; teamId: number };
+
+// The key mirrors the URL, same as tasksScope. One entry per team.
+export const projectsKey = (teamId: number) =>
+  ["teams", teamId, "projects"] as const;
+
+export function useProjects(teamId: number) {
+  return useQuery({
+    queryKey: projectsKey(teamId),
+    queryFn: async () =>
+      (await api.get&lt;Project[]&gt;(`/teams/${teamId}/projects`)).data,
+  });
+}
+
+export function useCreateProject(teamId: number) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: async (name: string) =>
+      (await api.post&lt;Project&gt;(`/teams/${teamId}/projects`, { name })).data,
+    <span class="dim">// Not a hand-written cache append. The server orders by id and it is
+    // the only thing that knows the new id -- lesson 26's rule, and there is
+    // no paging here to make a refetch expensive.</span>
+    onSuccess: () =&gt; client.invalidateQueries({ queryKey: projectsKey(teamId) }),
+  });
+}</code></pre>
+
+<h3><code>web/src/features/projects/projects-panel.tsx</code></h3>
+<pre><code>import { useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import type { Action } from "@/features/teams/teams";
+import { useCreateProject, useProjects } from "./projects";
+
+function ProjectRow({ name }: { name: string }) {
+  return &lt;li className="font-mono text-sm"&gt;{name}&lt;/li&gt;;
+}
+
+export function ProjectsPanel({
+  teamId,
+  can,
+}: {
+  teamId: number;
+  can: Action[];
+}) {
+  const { data, isPending, error } = useProjects(teamId);
+  const createProject = useCreateProject(teamId);
+  <span class="dim">// The words live in state; the request happens on submit. The form IS
+  // the debounce -- lesson 33, and still zero useEffect in the app.</span>
+  const [name, setName] = useState("");
+
+  if (isPending) return &lt;p className="text-muted-foreground text-sm"&gt;Asking…&lt;/p&gt;;
+  if (error !== null)
+    return &lt;p className="text-muted-foreground text-sm"&gt;Could not load projects.&lt;/p&gt;;
+
+  return (
+    &lt;div className="grid gap-2"&gt;
+      {data.length === 0 ? (
+        &lt;p className="text-muted-foreground text-sm"&gt;No projects yet.&lt;/p&gt;
+      ) : (
+        &lt;ul className="grid gap-1"&gt;
+          {data.map((p) =&gt; (
+            &lt;ProjectRow key={p.id} name={p.name} /&gt;
+          ))}
+        &lt;/ul&gt;
+      )}
+
+      {can.includes("project:create") ? (
+        &lt;form
+          className="flex gap-2"
+          onSubmit={(e) =&gt; {
+            e.preventDefault();
+            if (name.trim() === "") return;
+            createProject.mutate(name, { onSuccess: () =&gt; setName("") });
+          }}
+        &gt;
+          &lt;Input
+            value={name}
+            onChange={(e) =&gt; setName(e.target.value)}
+            placeholder="New project"
+          /&gt;
+          &lt;Button size="sm" type="submit" disabled={createProject.isPending}&gt;
+            {createProject.isPending ? "Saving…" : "Add"}
+          &lt;/Button&gt;
+        &lt;/form&gt;
+      ) : null}
+    &lt;/div&gt;
+  );
+}</code></pre>
+
+<h3>Three edits</h3>
+<pre><code>// web/src/features/teams/teams.ts  -- the Action union, which is a TYPE only
+export type Action =
+  | "task:read"
+  <b>| "project:read"</b>
+  | "task:create"
+  ...
+
+// web/src/features/teams/teams-card.tsx  -- import it
+<b>import { ProjectsPanel } from "@/features/projects/projects-panel";</b>
+
+// ...and inside TeamRow, next to the tasks block
+<b>{team.can.includes("project:read") &amp;&amp; (
+  &lt;div className="grid gap-1"&gt;
+    &lt;Button size="sm" variant="ghost" onClick={() =&gt; setProjOpen((o) =&gt; !o)}&gt;
+      {projOpen ? "Hide projects" : "Show projects"}
+    &lt;/Button&gt;
+    {projOpen ? &lt;ProjectsPanel teamId={team.id} can={team.can} /&gt; : null}
+  &lt;/div&gt;
+)}</b>
+<span class="dim">// plus: const [projOpen, setProjOpen] = useState(false);</span></code></pre>
+<p>That <code>Action</code> union is worth one sentence. It is a second copy of a list the server owns &mdash; and it is allowed, because it is a <code>type</code>. It is erased at build time, it decides nothing, and the array it describes still arrives from <code>allowedActions(role)</code> on every request. Forget to add <code>"project:read"</code> to it and <code>tsc</code> refuses the <code>includes</code> call. That is a copy that cannot silently drift.</p>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>Step 0: make <code>tsc</code> green again.</strong> <code>src/audit/retention.test.ts:49</code>. Add <code>assert.ok(row);</code> on the line above. <code>npm run typecheck</code> &rarr; <b>clean</b>. Do not skip this &mdash; you are about to use type errors as a guide, and they are useless in a pile of old ones.</li>
+
+<li><strong>Add the word and watch it fail.</strong> <code>"project:read"</code> into <code>ACTIONS</code> and into <code>VIEWER</code>, nothing else.
+<pre><code>npm test</code></pre>
+<b>Expect 168 pass, 2 fail</b>, and read both names before you fix anything.</li>
+
+<li><strong>Fix the two assertions</strong> as shown above &mdash; name the reads, keep the loop. <b>Expect 170.</b></li>
+
+<li><strong>Store, schema, route.</strong> The three blocks above. <code>npm run typecheck</code> clean, <code>npm test</code> <b>still 170</b> &mdash; you just shipped a route no test touches, which is the state every route you write starts in.</li>
+
+<li><strong>Then the two tests.</strong> Helper plus both cases, above the cascade test. <b>Expect 172.</b> Now break each one on purpose: delete the <code>preHandler</code> line (the outsider test fails), put it back, delete <code>where: { teamId }</code> (the viewer test fails). Put it back. A test you have never seen fail is not a test &mdash; lesson 35, and this is the cheapest place you will ever practise it.</li>
+
+<li><strong>The front end.</strong> Two new files, three edits, then <code>npm run dev</code> in <code>web</code> and <b>create the first project that has ever existed in your database.</b> Log in as your Viewer and check: the list is there, the form is not.</li>
+
+<li><strong>Owed, third ask:</strong> rotate the <code>tasks_app</code> password in <code>APP_DATABASE_URL</code>. It is still the literal word <code>tasks_app</code>. Two minutes: <code>ALTER ROLE tasks_app WITH PASSWORD '…'</code> and one line in <code>.env</code>.</li>
+</ol>
+
+<h2>The delete button</h2>
+<p>You asked for it, so here it is &mdash; and it is small because the server did the work already: <code>DELETE /teams/:teamId/projects/:projectId</code> exists, sits behind <code>requirePermission("project:delete")</code>, and is tested. Nothing new on the server. Two edits on the screen.</p>
+
+<h3><code>web/src/features/projects/projects.ts</code> &mdash; append</h3>
+<pre><code>export function useDeleteProject(teamId: number) {
+  const client = useQueryClient();
+  return useMutation({
+    <span class="dim">// 204: nothing comes back, so nothing to type. Same shape as useDeleteTask.</span>
+    mutationFn: async (id: number) =&gt; {
+      await api.delete(`/teams/${teamId}/projects/${id}`);
+    },
+    <span class="dim">// useDeleteTask filters the row out of the cache by hand because tasks are
+    // paged and a refetch there costs pages. Projects are one unpaged list --
+    // invalidate, same as useCreateProject, and let the server be the answer.</span>
+    onSuccess: () =&gt; client.invalidateQueries({ queryKey: projectsKey(teamId) }),
+  });
+}</code></pre>
+
+<h3><code>web/src/features/projects/projects-panel.tsx</code> &mdash; three edits</h3>
+<pre><code>import { useCreateProject, <b>useDeleteProject,</b> useProjects } from "./projects";
+
+<span class="dim">// The row does not ask whether you may delete. The panel already knows, and a
+// row that asks is a second place the permission has to be right.</span>
+function ProjectRow({ name, <b>onDelete</b> }: { name: string; <b>onDelete?: () =&gt; void</b> }) {
+  return (
+    &lt;li className="flex items-center justify-between gap-2 font-mono text-sm"&gt;
+      {name}
+      <b>{onDelete ? (
+        &lt;Button size="sm" variant="ghost" onClick={onDelete}&gt;Delete&lt;/Button&gt;
+      ) : null}</b>
+    &lt;/li&gt;
+  );
+}</code></pre>
+<p>Then in <code>ProjectsPanel</code>, next to <code>createProject</code>:</p>
+<pre><code>const deleteProject = useDeleteProject(teamId);</code></pre>
+<p>and in the map &mdash; the <code>can</code> check lives here, beside the one guarding the form:</p>
+<pre><code>&lt;ProjectRow
+  key={p.id}
+  name={p.name}
+  <b>onDelete={
+    can.includes("project:delete")
+      ? () =&gt; deleteProject.mutate(p.id)
+      : undefined
+  }</b>
+/&gt;</code></pre>
+<p>No confirm dialog, no optimistic removal, no per-row pending state. A delete that is one round trip against a list of five rows does not need any of them &mdash; and if you add the confirm later, add it because someone deleted the wrong project, not because the button looked dangerous.</p>
+<p><b>Check it the way you checked the route:</b> log in as your Viewer. The list renders, the form is absent, and now the Delete buttons are absent too &mdash; because <code>can</code> came from the server and the Viewer never had <code>project:delete</code>.</p>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div>paging         <span class="dim">a team has a handful of projects. Lesson 30 is on disk for the day it does not.</span></div>
+<div>tasks in projects <span class="dim">Task has no projectId. That is a schema decision, and a whole lesson.</span></div>
+<div>rename           <span class="dim">no project:update action. Same gap as today, and now you know how to spot it.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html">OWASP &mdash; Insecure Direct Object Reference Prevention</a>. Short. It is the formal name for &ldquo;the caller chose the id&rdquo;, and it is the single most common real-world API bug. You have now written the fix twice in one file.</p>
+<p><b>Then this:</b> your own <code>src/auth/can.ts</code>, top to bottom, out loud. Ten actions for four resources. Ask of each resource: which of its verbs are missing, and is that on purpose?</p>
+<p><b>Reference card:</b> <a href="../reference/rbac-permissions.html">Roles and permissions</a> &mdash; the <code>VIEWER</code> row changes today.</p>
+<p><b>Ask the community:</b> <a href="https://stackoverflow.com/questions/tagged/rbac">Stack Overflow, <code>rbac</code></a>. Good question for them: <em>do you version your permission vocabulary, or is adding an action always a free change?</em> You just saw it cost two tests.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0043-deleting-the-audit-log-on-purpose.html">&larr; Back</a>
+<a href="../reference/rbac-permissions.html">RBAC reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

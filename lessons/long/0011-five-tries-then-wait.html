@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 11 — Five Tries, Then Wait</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 11 &middot; Week 7&ndash;8 &middot; API security &mdash; first one</p>
+<h1>Five tries, then wait</h1>
+<p class="lede">Every route in your API is behind a gate now. Except the one that hands out the keys. <code>POST /auth/login</code> will answer a stranger as many times as they like, as fast as they like, forever. Today you put a floor under it &mdash; and the interesting part is <em>what you count</em>.</p>
+
+<div class="aside">
+<p><strong>Housekeeping.</strong> <code>Project</code> got built between sessions, so week 5&ndash;6 is closed. <code>project:create</code> and <code>project:delete</code> now have routes: <code>POST /teams/:teamId/projects</code> and <code>DELETE /teams/:teamId/projects/:projectId</code>, both behind <code>requirePermission</code>, no loader. Nothing in <code>can()</code> is unwired any more. Skim <code>server/src/routes/projects.route.ts</code> &mdash; it is 50 lines and it should read as boring. If it does not, that is a question for me.</p>
+</div>
+
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>Login is the one route with no gate, and it does 252 ms of expensive work per try.</li>
+<li>Counting per IP does not work &mdash; an attacker rents thousands of them.</li>
+<li>Count the thing they have <strong>one</strong> of: the email.</li>
+<li>Do not lock the account. That is a free denial-of-service button aimed at your users.</li>
+<li>Double the wait each failure. Check <em>before</em> the hash, so a blocked try costs you nothing.</li>
+</ul>
+</div>
+
+<h2>Count the cost of one wrong password</h2>
+<p>Your login handler does this, in this order:</p>
+<pre><code>const user = await findUserByEmail(email);           // 1 query
+const ok = await verifyPassword(password, hash);      // 252 ms, 128 MiB</code></pre>
+<p>That second line is <a href="../0005-passwords-you-cannot-read-back.html">lesson 5</a>'s scrypt, and those are the real numbers you measured on this Mac. Deliberately slow, deliberately memory-hungry, so that a stolen database is not worth cracking.</p>
+<p>Now read it as an attacker. Every request they send costs <em>them</em> nothing and costs <em>you</em> 252 ms of CPU and 128 MiB of RAM. A hundred at once is 12.8 GB. They do not even need to guess your password &mdash; they can just knock.</p>
+<blockquote>An unauthenticated route that does expensive work is two holes, not one: a guessing hole and a bill.</blockquote>
+<p>So the check has to happen <strong>before</strong> the hash. Hold that thought, it decides where the code goes.</p>
+
+<h2>The bad version, which is also the default</h2>
+<p>Here is what almost everybody reaches for. <code>@fastify/rate-limit</code>, one line, done:</p>
+<pre><code>// its default key, straight from the docs
+keyGenerator: (request) =&gt; request.ip</code></pre>
+<p>Count requests per IP address, block the noisy ones. It sounds obviously right. Kill it with two named attacks.</p>
+<div class="scroll">
+<table>
+<tr><th>attack</th><th>what they do</th><th>per-IP counter says</th></tr>
+<tr><td>Credential stuffing</td><td>Take 10 million leaked email+password pairs. Try each <em>once</em>, spread over a proxy network.</td><td>Nothing. Two requests per IP.</td></tr>
+<tr><td>Password spraying</td><td>Take one popular password. Try it against every email you have.</td><td>Nothing. Same shape.</td></tr>
+</table>
+</div>
+<p>A stuffing kit ships with proxy support built in. OWASP is blunt about it: IP blocking &ldquo;should not be used as the sole or primary defense due to the ease in circumvention&hellip; per IP request volume may remain relatively low, even on high volume attacks.&rdquo;</p>
+<p>Now flip the question. What does the attacker have <em>only one of?</em></p>
+<blockquote>They have thousands of IP addresses. They have one email per victim. So count the email.</blockquote>
+<p>That is the whole lesson, and it is OWASP's rule word for word: <strong>&ldquo;The counter of failed logins should be associated with the account itself, rather than the source IP address.&rdquo;</strong></p>
+<p>Notice what just happened. The plugin was not wrong. Its <em>default key</em> was wrong for this one route, and a plugin you install in one line is a plugin whose default you never read. Same reason you hand-wrote the cookie flags in <a href="../0006-a-door-that-stays-open.html">lesson 6</a>: here, the key <em>is</em> the security content.</p>
+
+<div class="quiz" data-answer="1">
+<p class="q">An attacker has 40,000 email+password pairs and 5,000 proxy IPs. Why does a per-account counter stop them when a per-IP one does not?</p>
+<button>Because each proxy IP is slower than a direct connection would be</button>
+<button>Because they hold many addresses but only one email per victim</button>
+<p class="why" hidden>Right. Rate limiting works when you count the thing the attacker cannot get more of. They can rent another IP for pennies. They cannot rent a second email address for your user.</p>
+</div>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  ATT["One attacker"] --> P1["proxy IP 1"]
+  ATT --> P2["proxy IP 2"]
+  ATT --> P3["...5,000 more"]
+  P1 --> V["jay@example.com"]
+  P2 --> V
+  P3 --> V
+  V --> K1["per-IP counter:<br/>2 tries each &mdash; sees nothing"]
+  V --> K2["per-email counter:<br/>15,000 tries &mdash; wall"]
+</pre>
+<figcaption>Rate limiting only works when you count the thing the attacker cannot buy more of. Another IP costs pennies. A second email for your user does not exist.</figcaption>
+</figure>
+
+<h2>Do not lock the account</h2>
+<p>The obvious next step is a lockout: five wrong, account frozen for ten minutes. Do not. Read it from the other side.</p>
+<p>I know your email. I type it with a wrong password five times. You are now locked out of your own account, and it cost me five requests. Your security feature is my denial-of-service button, aimed at anyone whose email I can guess.</p>
+<p>OWASP's alternative, and what you built: <strong>exponential backoff</strong>. The wait doubles with each failure, so a human who fumbles pays nothing and a script hits a wall almost immediately.</p>
+<div class="scroll">
+<table>
+<tr><th>wrong passwords</th><th>then you wait</th></tr>
+<tr><td>1&ndash;4</td><td>nothing</td></tr>
+<tr><td>5</td><td>1 second</td></tr>
+<tr><td>6</td><td>2 seconds</td></tr>
+<tr><td>7</td><td>4 seconds</td></tr>
+<tr><td>15 and up</td><td>15 minutes (the cap)</td></tr>
+</table>
+</div>
+<p>Doubling is the point. Ten more guesses and the attacker is down to about 96 tries a day; you were still typing normally at guess four. Nobody is ever locked out &mdash; there is only ever a wait, and one correct password clears it completely.</p>
+<p>Two small mercies in the design. The wait is capped at 15 minutes, so a bad day still ends. And a blocked request does <em>not</em> count as another failure, so hammering refresh while locked out does not dig you deeper.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  IN["POST /auth/login"] --> T{"throttleCheck(email)<br/>a Map lookup, free"}
+  T -- "still waiting" --> R429["429 + retry-after<br/>no query, no hash, no cost"]
+  T -- "clear" --> Q["findUserByEmail"]
+  Q --> H["verifyPassword<br/>252 ms, 128 MiB"]
+  H -- "wrong" --> FAIL["throttleFail<br/>wait doubles"] --> R401["401"]
+  H -- "right" --> RST["throttleReset<br/>slate wiped"] --> OK["200 + cookie"]
+</pre>
+<figcaption>Order is the whole design. The cheap check runs first, so a blocked attacker pays your server nothing &mdash; and cannot unlock a key by finally guessing right.</figcaption>
+</figure>
+
+<h2>The code: three functions and a Map</h2>
+<p>New file, <code>server/src/auth/throttle.ts</code>. No table, no migration, no dependency &mdash; a <code>Map</code> in memory.</p>
+<pre><code>const FREE_TRIES = 5;
+const BASE_MS = 1_000;
+const MAX_MS = 15 * 60 * 1_000;
+const MAX_KEYS = 10_000;
+
+type Entry = { fails: number; until: number };
+const attempts = new Map&lt;string, Entry&gt;();
+
+// ms this key must still wait. 0 means go ahead.
+export function throttleCheck(key: string): number {
+  const wait = (attempts.get(key)?.until ?? 0) - Date.now();
+  return wait &gt; 0 ? wait : 0;
+}
+
+export function throttleFail(key: string): void {
+  const entry = attempts.get(key) ?? { fails: 0, until: 0 };
+  entry.fails += 1;
+  const over = entry.fails - FREE_TRIES + 1;
+  entry.until = over &gt; 0
+    ? Date.now() + Math.min(BASE_MS * 2 ** (over - 1), MAX_MS)
+    : 0;
+  attempts.delete(key);   // delete then set, so this key is now the newest
+  attempts.set(key, entry);
+  if (attempts.size &gt; MAX_KEYS) attempts.delete(attempts.keys().next().value!);
+}
+
+export function throttleReset(key: string): void {
+  attempts.delete(key);
+}</code></pre>
+<p>Two lines deserve a second look.</p>
+<p><code>attempts.delete(key)</code> immediately before <code>set</code> looks pointless. It is not. A JavaScript <code>Map</code> remembers <em>insertion order</em>, so re-inserting moves this key to the back of the queue. That makes the last line a working eviction rule: when the map is full, <code>attempts.keys().next().value</code> is the coldest key, and out it goes.</p>
+<p>Why bother? Because the map only ever grows on failure, and failures come from strangers. Without a cap, <code>for email in wordlist: login(email, "x")</code> is a memory leak you built for them. Twenty-five lines of security code, and one of them is there purely because the other twenty-four are attacker-fed.</p>
+<blockquote>Any store keyed on something the caller types is a store the caller can fill. Cap it in the same breath as you create it.</blockquote>
+
+<h2>Where it goes in the handler</h2>
+<pre><code>const key = email.toLowerCase();
+
+const waitMs = throttleCheck(key);
+if (waitMs &gt; 0) {
+  reply.header("retry-after", Math.ceil(waitMs / 1000));
+  return reply.code(429).send({ error: "too many attempts, try again later" });
+}
+
+const user = await findUserByEmail(email);
+const ok = await verifyPassword(password, user?.passwordHash ?? DUMMY_HASH);
+
+if (!user || !ok) {
+  throttleFail(key);
+  return reply.code(401).send({ error: "invalid email or password" });
+}
+
+throttleReset(key);   // a right answer wipes the slate</code></pre>
+<p>Three decisions are hiding in there.</p>
+<p><strong>The check is first.</strong> Before the query, before the hash. That is the CPU bill from the top of the lesson &mdash; a blocked request must cost you a <code>Map</code> lookup, not 252 ms. It also closes a subtler hole: a locked-out key cannot be unlocked by finally guessing right, because the password is never even read.</p>
+<p><strong>The key is <code>.toLowerCase()</code>.</strong> Skip that and <code>Jay@x.com</code>, <code>jay@X.com</code> and <code>JAY@x.com</code> are three different counters. Five free tries each, and there are 2<sup>13</sup> ways to capitalise a thirteen-letter address. There is a test for this one.</p>
+<p><strong>The key is the email the caller typed, not a user id.</strong> Often there is no user &mdash; and that matters more than it looks, which is the next quiz.</p>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why must an email that was never registered get throttled exactly like a real one?</p>
+<button>Otherwise 401 forever versus 429 tells an attacker which emails have accounts</button>
+<button>Otherwise the counter map grows without any limit on its total size</button>
+<p class="why" hidden>Right, and it is <a href="../0006-a-door-that-stays-open.html">lesson 6</a>'s rule wearing a status code. You were careful to send one message for both failures &mdash; then a shortcut here would leak the same fact through the shape of the response instead. Every new reply is a new chance to answer two different questions differently.</p>
+</div>
+
+<h2>What it cost, and what it does not fix</h2>
+<p><strong>Zero new dependencies. Eleven lessons running.</strong> <code>@fastify/rate-limit</code> would have been a dependency, a 5,000-entry LRU cache, and a default key that does not stop the attack you actually face. You wrote 25 lines and you can say what every one does.</p>
+<p>Now the honest limits, because a defence you cannot describe the edge of is a defence you will over-trust:</p>
+<div class="scroll">
+<table>
+<tr><th>hole</th><th>why it is still open</th><th>when you close it</th></tr>
+<tr><td>Restart forgets everything</td><td>The <code>Map</code> lives in one Node process.</td><td>Homework, below.</td></tr>
+<tr><td>Two processes, two counters</td><td>Each keeps its own map, so the real limit doubles.</td><td>Week 11&ndash;12, at deploy.</td></tr>
+<tr><td>Junk emails can evict a victim's counter</td><td>The 10,000-key cap has to drop <em>something</em>.</td><td>Same fix as the row above.</td></tr>
+<tr><td>Slow, patient guessing</td><td>Four tries an hour never trips anything.</td><td>Only MFA really answers this.</td></tr>
+<tr><td>Nothing else in the API is limited</td><td>This is one route, not a policy.</td><td>Week 7&ndash;8, a global per-IP layer on top.</td></tr>
+</table>
+</div>
+<p>That first one is marked in the file with a <code>ponytail:</code> comment naming the ceiling and the upgrade path. Get in the habit: a deliberate shortcut you wrote down is a decision, and the same shortcut undocumented is a bug waiting to surprise you.</p>
+<p>And keep the ranking straight. OWASP says MFA &ldquo;is by far the best defense against the majority of password-related attacks&rdquo; &mdash; one analysis puts it at 99.9% of account compromises stopped. Throttling is the floor, not the ceiling.</p>
+
+<h2>The tests</h2>
+<p><code>npm test</code> is now <strong>66 passing</strong>, up from 56. The new file keeps <a href="../0008-a-role-is-a-row.html">lesson 8</a>'s split:</p>
+<ul>
+<li><strong>Decisions</strong> &mdash; no server, no database. Four failures are free; the fifth starts the wait; it doubles; it is capped; one key never blocks another.</li>
+<li><strong>Enforcement</strong> &mdash; the real route via <code>app.inject()</code>. Five 401s then a 429 with <code>retry-after</code>; the wall ignores a correct password; an unregistered email throttles identically; capitalisation is not a side door.</li>
+</ul>
+<p>Read the four enforcement names out loud. Each one is an attack, written down.</p>
+
+<h2>Read this</h2>
+<p><strong>Primary source:</strong> <a href="https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html">OWASP &mdash; Authentication Cheat Sheet</a>. Read &ldquo;Protect Against Automated Attacks&rdquo;. Every number and every warning in this lesson comes from that section.</p>
+<p>Then the attack itself: <a href="https://cheatsheetseries.owasp.org/cheatsheets/Credential_Stuffing_Prevention_Cheat_Sheet.html">OWASP &mdash; Credential Stuffing Prevention</a>. Short, and it is where the proxy-network quote lives.</p>
+<p>And the road not taken, so you know what you skipped: <a href="https://github.com/fastify/fastify-rate-limit">@fastify/rate-limit</a>. Read only its <code>keyGenerator</code> default and its store section.</p>
+
+<h2>Do this before lesson 12</h2>
+<ol>
+<li>Run <code>cd server &amp;&amp; npm test</code>. 66 pass.</li>
+<li>Break it on purpose. In <code>src/auth/throttle.ts</code> change <code>FREE_TRIES</code> to <code>50</code> and run the tests. Read which ones fail and which do not &mdash; the decision tests and the enforcement tests should fail for visibly different reasons. Put it back.</li>
+<li>Now break it the dangerous way. Delete <code>.toLowerCase()</code> from the key in <code>src/routes/auth.route.ts</code>. One test fails. That test is worth more than the twenty-four lines it guards.</li>
+<li>Attack it with <code>curl</code>. Start the server, then:
+<pre><code>for i in $(seq 1 7); do
+  curl -s -o /dev/null -w "%{http_code} " -X POST localhost:3000/auth/login \
+    -H 'content-type: application/json' \
+    -d '{"email":"nobody@example.com","password":"wrong"}'
+done; echo</code></pre>
+You want <code>401 401 401 401 401 429 429</code>. Then run it again with a different email in the same second and watch it start from 401. Save the command with your others.</li>
+<li>Time it. Put <code>-w "%{http_code} %{time_total}s\n"</code> in that loop and look at the 401s versus the 429. The gap is the 252 ms you are no longer paying.</li>
+</ol>
+<p>Then two questions to bring me:</p>
+<ol>
+<li>Restart the server and try to log in wrong six times. You get six 401s, because the <code>Map</code> died with the process. So <strong>where does the counter have to live</strong> instead? You already own two things it could live in. Name both, and say what each one costs on <em>every single login</em>, not just the failed ones. One of the two answers is going to bother you.</li>
+<li>Opinion, and I do not think there is a clean answer: after backoff, the usual next rungs are a CAPTCHA, an email &ldquo;someone tried to log in&rdquo; alert, or forcing MFA. Pick the order you would add them in for a small work app and defend it. Then post it to <a href="https://security.stackexchange.com/">Security StackExchange</a> or <a href="https://www.reddit.com/r/node/">r/node</a> and see who disagrees. This one is a real design argument, not a fact to look up &mdash; which is exactly why it goes to practitioners and not to me.</li>
+</ol>
+
+<div class="aside">
+<p>Stuck, or something felt hand-wavy? Ask me. I am your teacher here &mdash; say what confused you and I will re-teach it another way. The bit most people wave through is <em>why the key choice matters more than the limit</em>, so start there if you are unsure.</p>
+</div>
+
+<hr>
+<p class="nav">Back: <a href="../0010-a-task-belongs-to-a-team.html">Lesson 10 &mdash; A task belongs to a team</a> &middot; Keep for reference: <a href="../../reference/api-security-basics.html">API security basics</a> &middot; <a href="../../reference/password-hashing.html">Password hashing</a> &middot; <a href="../../reference/sessions-and-cookies.html">Sessions &amp; cookies</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a> &middot; Sources: <a href="../../RESOURCES.md">RESOURCES.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

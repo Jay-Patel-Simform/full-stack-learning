@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference &mdash; Environment and config</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<p class="kicker">Reference &middot; Deploy</p>
+<h1>Environment and config</h1>
+<p class="lede">Every variable the server reads, what it decides, and what a wrong value costs. Open this during a deploy. From <a href="../lessons/0027-the-default-that-hides-the-typo.html">lesson 27</a> and <a href="../lessons/0029-the-logout-that-keeps-the-session.html">lesson 29</a>.</p>
+
+<h2>The rule</h2>
+<p class="takeaway">A <code>.default()</code> is a place a typo can hide. Give one only where being wrong is visible in a second.</p>
+<div class="word"><b>fail fast</b> &mdash; refuse to start when the setup is wrong. The error lands in the deploy log.</div>
+<div class="word"><b>fail quiet</b> &mdash; start with a fallback. The error lands in an incident report.</div>
+<p class="takeaway">And the second rule, from <a href="../lessons/0029-the-logout-that-keeps-the-session.html">lesson 29</a>: <b>one fact, one reader.</b> <code>config.ts</code> is the only file that may touch <code>process.env</code>. Everywhere else imports <code>config</code>.</p>
+<div class="word"><b>snapshot</b> &mdash; a copy taken once. <code>config</code> is one: read at import, never re-read.</div>
+<div class="word"><b>live read</b> &mdash; going back to the source each time. <code>process.env.X</code> is one, and <code>process.env</code> is mutable, so the two can disagree inside a single running process.</div>
+
+<h2>The table</h2>
+<div class="scroll">
+<table>
+<tr><th>Name</th><th>Type after parsing</th><th>Default</th><th>Decides</th><th>Wrong value costs</th></tr>
+<tr><td><code>DATABASE_URL</code></td><td><code>string</code> (url)</td><td><b>none</b></td><td>Which Postgres, as the <em>owner</em> role. Migrations, seeds, <code>npm test</code>.</td><td>Nothing starts. Loud.</td></tr>
+<tr><td><code>APP_DATABASE_URL</code></td><td><code>string</code> (url)</td><td><b>none</b></td><td>Which login the <em>running server</em> uses. The owner stays on <code>DATABASE_URL</code> for migrations, seeds and tests.</td><td>Nothing starts. A default here would silently be the owner again &mdash; the exact bug it prevents.</td></tr>
+<tr><td><code>NODE_ENV</code></td><td><code>"development" | "test" | "production"</code></td><td><b>none</b></td><td>HSTS, and the <code>Secure</code> flag on the session cookie.</td><td>Session cookie travels over plain http.</td></tr>
+<tr><td><code>ALLOWED_ORIGINS</code></td><td><code>string[]</code> (comma separated)</td><td><b>none</b></td><td>CORS read list, and the CSRF <code>Origin</code> fallback.</td><td>Your own front end is blocked; looks like a CORS bug.</td></tr>
+<tr><td><code>TRUST_PROXY</code></td><td><code>boolean</code></td><td><b>none</b></td><td>Whether <code>request.ip</code> comes from <code>X-Forwarded-For</code>.</td><td>Off behind a proxy: one rate-limit bucket for the internet. On with no proxy: the caller picks their own bucket.</td></tr>
+<tr><td><code>PORT</code></td><td><code>number</code> 1&ndash;65535</td><td><code>3000</code></td><td>Where it listens.</td><td>Visible in a second.</td></tr>
+<tr><td><code>HOST</code></td><td><code>string</code></td><td><code>127.0.0.1</code></td><td>Which interface. Never <code>0.0.0.0</code> behind nginx.</td><td>Visible in a second &mdash; unless it is <code>0.0.0.0</code>, which puts the API on the internet with no TLS.</td></tr>
+<tr><td><code>AUDIT_RETENTION_DAYS</code></td><td><code>int</code>, min 1</td><td><code>90</code></td><td>How many days an audit row is kept. Read only by the prune job (lesson 43), never by a route.</td><td>Nothing &mdash; 90 is a sane answer. <b>0 would delete every row</b>, so <code>min(1)</code> is the real guard, and the function throws again on its own.</td></tr>
+<tr><td><code>LOG_LEVEL</code></td><td><code>silent|error|warn|info|debug|trace</code></td><td><code>info</code></td><td>How loud.</td><td>Visible in a second.</td></tr>
+</table>
+</div>
+
+<h2>The shape</h2>
+<pre><code>// src/config.ts - parsed once, at boot, before anything else runs.
+try { process.loadEnvFile(); } catch { /* no file in production */ }
+
+const Env = z.object({ /* … */ });
+const parsed = Env.safeParse(process.env);
+
+if (!parsed.success) {
+  console.error("Bad environment:\n" + z.prettifyError(parsed.error));
+  process.exit(1);          // the exit code is what the host reads
+}
+
+export const config = parsed.data;   // typed. Never read process.env again.</code></pre>
+
+<h2>zod pieces worth remembering</h2>
+<div class="scroll">
+<table>
+<tr><th>Piece</th><th>Does</th><th>Note</th></tr>
+<tr><td><code>z.coerce.number()</code></td><td><code>"8080"</code> &rarr; <code>8080</code></td><td><code>"abc"</code> &rarr; <code>NaN</code>, and <code>.int()</code> refuses it.</td></tr>
+<tr><td><code>z.stringbool()</code></td><td><code>true 1 yes on y enabled</code> / <code>false 0 no off n disabled</code></td><td><b>Refuses anything else</b>, including <code>""</code>. <code>=== "true"</code> accepted everything and answered false.</td></tr>
+<tr><td><code>z.enum([...])</code></td><td>A closed list of literals</td><td>The reason <code>NODE_ENV=Production</code> is now an error.</td></tr>
+<tr><td><code>.transform()</code></td><td>Split/trim a comma list into <code>string[]</code></td><td>Parse once at the door, not at every read.</td></tr>
+<tr><td><code>safeParse</code> + <code>z.prettifyError</code></td><td>Every problem at once, one readable block</td><td>One restart to fix four things.</td></tr>
+</table>
+</div>
+
+<h2>The leftovers checklist</h2>
+<p>Adding a validated config is two jobs, and the second is easy to skip. Run these four after any config refactor:</p>
+<div class="scroll">
+<table>
+<tr><th>Look for</th><th>Command</th><th>Why it is wrong</th></tr>
+<tr><td>A second reader</td><td><code>grep -rn "process\.env" src/ --include="*.ts" | grep -v generated</code></td><td>Only <code>config.ts</code> and tests may appear. A snapshot and a live read of one fact will drift.</td></tr>
+<tr><td>A second default</td><td><code>grep -n "config\.[A-Z_]* ??" src/</code></td><td><code>??</code> on a value zod already defaulted is dead code that <em>reads</em> like a safety net. It also lies about the type.</td></tr>
+<tr><td>A second <code>loadEnvFile</code></td><td><code>grep -rn "loadEnvFile" src/</code></td><td>One call, in <code>config.ts</code>. A module&rsquo;s imports all finish before its own body runs, so importing <code>config</code> is enough.</td></tr>
+<tr><td>A missing example</td><td><code>diff &lt;(grep -oE "^[A-Z_]+" .env | sort) &lt;(grep -oE "^[A-Z_]+" .env.example | sort)</code></td><td>No output means the committed file lists every name. <code>.env</code> is gitignored, so this file is the only documentation.</td></tr>
+</table>
+</div>
+<p class="takeaway">None of the four is visible to <code>tsc</code> or to a passing test suite. The program behaves identically with and without them. <b>There is no green light that will ever turn red</b> &mdash; so these are found by grep, then locked down by a test.</p>
+
+<h2>Hosted Postgres: which URL goes where <span class="dim">(lesson 55)</span></h2>
+<p>A managed Postgres such as Neon hands you two connection strings for one database. They differ only by <code>-pooler</code> in the host name, and they are not interchangeable.</p>
+<div class="scroll">
+<table>
+<tr><th>Variable</th><th>Role</th><th>Endpoint</th><th>Why that one</th></tr>
+<tr><td><code>DATABASE_URL</code></td><td>owner</td><td><b>direct</b> <span class="dim">(no <code>-pooler</code>)</span></td><td><code>prisma migrate deploy</code> takes an <b>advisory lock</b>, and a lock belongs to one connection. A pooler may put the next statement on a different one, so the lock stops protecting you &mdash; silently, and only when two containers start at once.</td></tr>
+<tr><td><code>APP_DATABASE_URL</code></td><td><code>tasks_app</code></td><td><b><code>-pooler</code></b></td><td>Every request, short-lived. Postgres holds only a few hundred connections and each costs memory; PgBouncer lends a small set out per query.</td></tr>
+</table></div>
+<p class="takeaway">The owner/app split from lesson 42 was made for security. It turns out to be exactly the split pooling needs. One decision, paid twice.</p>
+<p>A role password on a hosted database needs real entropy &mdash; Neon requires about 60 bits and refuses anything weaker at <code>CREATE ROLE</code>. Generate one with <code>openssl rand -base64 18</code>.</p>
+
+<h2><code>.env.example</code>, the shape</h2>
+<pre><code># Copy to .env and fill in. The first five have NO default: no value, no boot.
+# Values here are placeholders, never real secrets.
+
+# The owner. Migrations, seeds, npm test.
+DATABASE_URL=postgres://tasks:CHANGEME@localhost:5432/tasks
+# The login the running server uses. Owns nothing, cannot delete an audit row.
+APP_DATABASE_URL=postgres://tasks_app:CHANGEME@localhost:5432/tasks
+NODE_ENV=development                      # development | test | production
+ALLOWED_ORIGINS=http://localhost:5173     # comma separated
+TRUST_PROXY=false                         # true/1/yes/on or false/0/no/off
+
+# Optional - config.ts has a default for each of these three.
+# PORT=3000
+# HOST=127.0.0.1
+# LOG_LEVEL=info</code></pre>
+<p>Keep the required block and the commented-out optional block visually apart. That split <em>is</em> the lesson-27 rule, made readable by someone who never opens <code>config.ts</code>.</p>
+
+<h2>Two logins, one app</h2>
+<p>New in lesson 42. The login is chosen by the <b>job</b>, not by the file. One line in <code>src/db.ts</code>:</p>
+<pre><code>const connectionString =
+  config.NODE_ENV === "test" ? config.DATABASE_URL : config.APP_DATABASE_URL;</code></pre>
+<div class="scroll"><table>
+<tr><th>Job</th><th>Login</th><th>Why</th></tr>
+<tr><td><code>npm start</code> / <code>npm run dev</code></td><td><code>tasks_app</code></td><td>the only one the internet can reach</td></tr>
+<tr><td><code>npx prisma migrate</code></td><td><code>tasks</code></td><td>CREATE and ALTER belong to the owner. Prisma&rsquo;s CLI reads <code>DATABASE_URL</code> itself, so it never passes through that line</td></tr>
+<tr><td><code>npm test</code></td><td><code>tasks</code></td><td>cleanup deletes audit rows; a test is not a web request</td></tr>
+</table></div>
+<p><b>Measured, lesson 42.</b> A shell variable beats <code>.env</code>. <code>process.loadEnvFile()</code> only fills in what is missing, so <code>NODE_ENV=test npm test</code> works even though <code>.env</code> says <code>development</code>. Same reason <code>LOG_LEVEL=silent</code> has worked since lesson 6.</p>
+<p class="takeaway">Least privilege applies to the <b>exposed path</b>, not to your terminal. Locking down your own commands costs an hour a week and buys nothing.</p>
+
+<h2>The cookie-flag trap</h2>
+<p><code>sessionCookie()</code> and <code>clearCookie()</code> both decide on <code>Secure</code> from <code>NODE_ENV</code>. If they read it from different places they can disagree:</p>
+<pre><code>set-cookie   : session=abc; HttpOnly; SameSite=Lax; Path=/; Expires=...
+clear-cookie : session=;    HttpOnly; SameSite=Lax; Path=/; Max-Age=0<b>; Secure</b>
+                                                                  ^ mismatch</code></pre>
+<p>An <code>http:</code> site <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie#secure">cannot set a <code>Secure</code> cookie at all</a>, so the browser drops that whole header. Logout answers <code>200</code>, the server row is gone, and the browser still holds a cookie. <b>The flags on a clearing cookie must match the cookie being cleared, <code>Secure</code> included.</b> The regression test lives in <code>src/auth/session.test.ts</code>.</p>
+
+<h2>Deploy checklist</h2>
+<ol>
+<li><code>.env</code> is in <code>.gitignore</code>. <code>.env.example</code> is committed and lists every name.</li>
+<li>Production sets all four required names. No file &mdash; the host&rsquo;s secret store.</li>
+<li><code>NODE_ENV=production</code>, lowercase. Check the reply carries <code>strict-transport-security</code>.</li>
+<li><code>TRUST_PROXY=true</code> <em>only</em> where a proxy you control is the only way in.</li>
+<li><code>HOST=127.0.0.1</code> when nginx fronts it. <code>0.0.0.0</code> only where the platform terminates TLS for you.</li>
+<li><code>ALLOWED_ORIGINS</code> can be empty of foreign origins when the front end is same-origin (<a href="../lessons/0014-one-origin-no-question.html">lesson 14</a>) &mdash; but the variable itself must still be set.</li>
+<li>Boot once with a deliberately wrong value and confirm the deploy <em>fails</em>. A safety net you have never tested is a decoration.</li>
+</ol>
+
+<h2>What config cannot check</h2>
+<ul>
+<li>A misspelled <b>optional</b> name. <code>process.env</code> holds hundreds of keys, so the schema must ignore unknown ones. Removing the default is the defence, not the schema.</li>
+<li>Whether the values are <em>true</em>. <code>z.url()</code> says &ldquo;shaped like a URL&rdquo;, not &ldquo;a database answers there&rdquo;. That is a health check.</li>
+<li>Whether a secret leaked. That is <code>.gitignore</code> and rotation.</li>
+<li>That the rest of the app actually <em>uses</em> it. A validated schema plus a <code>?? "default"</code> somewhere else is worse than no schema, because it looks finished. A written rule in <code>CLAUDE.md</code> is not enforcement either; the two things that enforce are refusing to boot, and a failing test.</li>
+</ul>
+
+<p class="nav"><a href="../lessons/0027-the-default-that-hides-the-typo.html">Lesson 27</a> &middot; <a href="../lessons/0029-the-logout-that-keeps-the-session.html">Lesson 29</a> &middot; <a href="../lessons/0012-the-floor-under-everything.html">Lesson 12</a> &middot; <a href="../lessons/0014-one-origin-no-question.html">Lesson 14</a> &middot; <a href="./sessions-and-cookies.html">Sessions &amp; cookies</a> &middot; <a href="./api-security-basics.html">API security basics</a> &middot; <a href="./the-whole-arc.html">The whole arc</a></p>
+
+</body>
+</html>

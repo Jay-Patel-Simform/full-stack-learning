@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 20 — SQL injection and sort columns</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.lead { font-size: 1rem; color: var(--muted); line-height: 1.6; }
+.lead b { color: var(--fg); }
+
+/* Three delivery routes to the same server door. */
+.routes { list-style: none; padding: 0; margin: 1.4rem 0 2.2rem; }
+.routes li { border: 1px solid var(--rule); border-radius: 6px; padding: .95rem 1.1rem;
+  margin-bottom: .7rem; }
+.routes .tag { font-family: var(--mono); font-size: .66rem; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--accent); display: block; margin-bottom: .45rem; }
+.routes code { font-size: .78rem; }
+.routes p { margin: .5rem 0 0; font-size: .82rem; color: var(--muted); line-height: 1.55; }
+
+.arrow { text-align: center; color: var(--muted); font-size: 1.4rem; margin: -.3rem 0 1rem; }
+
+/* The fork: same payload, two fates, decided only by the server. */
+.fork { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.2rem 0 2.4rem; }
+.fork > div { border: 1px solid var(--rule); border-radius: 6px; padding: 1rem 1.1rem; }
+.fork h3 { margin: 0 0 .55rem; font-size: .92rem; }
+.fork .tag { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
+  text-transform: uppercase; display: block; margin-bottom: .5rem; }
+.fork pre { margin: .5rem 0; font-size: .72rem; }
+.fork p { margin: .5rem 0 0; font-size: .8rem; color: var(--muted); line-height: 1.5; }
+.fork .safe { border-color: #b6d3ba; }
+.fork .safe .tag { color: var(--ok); }
+.fork .hole { border-style: dashed; border-color: #e0b3aa; }
+.fork .hole .tag { color: var(--bad); }
+
+.rule { font-size: .95rem; padding: .8rem 1rem; border-left: 3px solid var(--accent);
+  background: var(--code-bg); border-radius: 0 4px 4px 0; margin: 1.4rem 0 2.2rem; }
+
+.try { font-family: var(--mono); font-size: .76rem; background: var(--code-bg);
+  border-radius: 6px; padding: 1rem 1.1rem; overflow-x: auto; line-height: 1.7; }
+.try .out { color: var(--muted); }
+.try .ok { color: var(--ok); }
+.try .bad { color: var(--bad); }
+
+h2 { margin-top: 2.6rem; }
+@media (max-width: 34rem) { .fork { grid-template-columns: 1fr; } }
+/* One query, drawn as slots. */
+.query { font-family: var(--mono); font-size: .84rem; background: var(--code-bg);
+  border-radius: 6px; padding: 1.2rem 1.1rem 1rem; margin: 1.4rem 0 .6rem;
+  line-height: 2.5; overflow-x: auto; white-space: nowrap; }
+.slot { border-radius: 3px; padding: .3rem .45rem; position: relative; }
+.slot b { display: block; position: absolute; top: -1.05rem; left: 0;
+  font-size: .58rem; letter-spacing: .1em; text-transform: uppercase; font-weight: 500; }
+.val { background: #dceadf; color: #1c3a22; border: 1px solid #b6d3ba; }
+.val b { color: var(--ok); }
+.ident { background: #f6ddd8; color: #5c1f18; border: 1px solid #e0b3aa; border-style: dashed; }
+.ident b { color: var(--bad); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .val { background: #1d3324; color: #cfe6d4; border-color: #385c40; }
+  :root:not([data-theme="light"]) .ident { background: #3a201c; color: #f0cdc5; border-color: #6b3a31; }
+}
+.legend { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.6rem 0 2.2rem; }
+.legend > div { border: 1px solid var(--rule); border-radius: 6px; padding: .9rem 1rem; font-size: .82rem; }
+.legend h3 { margin: 0 0 .5rem; font-size: .9rem; }
+.legend p { margin: .4rem 0 0; color: var(--muted); line-height: 1.55; }
+.legend .how { font-family: var(--mono); font-size: .72rem; margin-top: .6rem;
+  padding-top: .5rem; border-top: 1px solid var(--rule); }
+.legend .v { border-color: #b6d3ba; }
+.legend .v .how { color: var(--ok); }
+.legend .i { border-color: #e0b3aa; }
+.legend .i .how { color: var(--bad); }
+
+.rule { font-size: .95rem; padding: .8rem 1rem; border-left: 3px solid var(--accent);
+  background: var(--code-bg); border-radius: 0 4px 4px 0; margin: 1.4rem 0 2.2rem; }
+
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.2rem 0 2.2rem; }
+.two > div { border: 1px solid var(--rule); border-radius: 6px; padding: 1rem 1.1rem; }
+.two h3 { margin: 0 0 .6rem; font-size: .95rem; }
+.two p { margin: .5rem 0 0; font-size: .82rem; color: var(--muted); line-height: 1.55; }
+.two .tag { font-family: var(--mono); font-size: .66rem; letter-spacing: .12em;
+  text-transform: uppercase; display: block; margin-bottom: .5rem; }
+.two .good { border-color: #b6d3ba; }
+.two .good .tag { color: var(--ok); }
+.two .bad { border-style: dashed; }
+.two .bad .tag { color: var(--bad); }
+
+/* Silent-failure pairs: two inputs, one identical outcome. */
+.silent { list-style: none; padding: 0; margin: 1.2rem 0 1rem; font-size: .82rem; }
+.silent li { border: 1px solid var(--rule); border-radius: 5px; padding: .75rem .9rem;
+  margin-bottom: .5rem; }
+.silent .h { font-family: var(--mono); font-size: .68rem; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--bad); margin-bottom: .5rem; }
+.silent pre { margin: 0; font-size: .74rem; background: var(--code-bg); }
+.silent .note { margin: .55rem 0 0; color: var(--muted); line-height: 1.5; }
+
+pre { font-size: .78rem; }
+h2 { margin-top: 2.6rem; }
+@media (max-width: 34rem) { .legend, .two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 20 &middot; Week 7&ndash;8 &middot; API security</p>
+<h1>SQL injection and sort columns</h1>
+<p class="lede">Last item in week 7&ndash;8. You have written no SQL, so you have written no SQL injection. Today: why you are safe, and the one input that safety does not cover.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>A <strong>parameter</strong> sends your value to Postgres <em>beside</em> the query, never inside it. Quotes stop being punctuation.</li>
+<li>Prisma parameterises everything &mdash; the builder <em>and</em> <code>$queryRaw</code>. Only <code>$queryRawUnsafe</code> with glued-in text can be injected.</li>
+<li><strong>Parameters protect values. They cannot carry a column name.</strong> So a caller-chosen column has no escaping trick &mdash; only a <strong>fixed list</strong>.</li>
+<li>You shipped one: <code>?sort=</code> is a zod <code>enum</code>. And the honest reason it matters is <em>not</em> injection. Keep reading.</li>
+</ul>
+</div>
+
+<h2>The word pair</h2>
+<div class="word"><b>value</b> &mdash; the <em>data</em> a query asks about. <code>WHERE title = 'Buy milk'</code>. Postgres accepts any value, so it lets you send it separately.</div>
+<div class="word"><b>identifier</b> &mdash; the <em>name of a thing</em>: a table, a column, <code>ASC</code>. Postgres must know these to plan the query at all.</div>
+<p class="takeaway">A value can travel beside the query. An identifier has to be part of it.</p>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  IN["caller sends<br/>' OR 1=1 --"] --> Q{"where does it land<br/>in the query?"}
+  Q -->|"a VALUE"| P["goes as a parameter<br/>WHERE title = $1"]
+  P --> SAFE["compared to the text<br/>of a title: 0 rows"]
+  Q -->|"an IDENTIFIER"| N["no parameter exists<br/>ORDER BY ???"]
+  N --> LIST["so: a list you wrote<br/>z.enum(['id','title','createdAt'])"]
+  LIST --> DOOR["not on the list = 400<br/>nothing downstream runs"]
+</pre>
+<figcaption>One question picks your defence. For a value the database defends you for free. For an identifier, nothing does &mdash; except a list.</figcaption>
+</figure>
+
+<h2>Measured, on your five rows</h2>
+<pre><code>1  builder,         where: { title: hostile }     -> 0 rows
+2  $queryRaw,       WHERE title = ${hostile}      -> 0 rows
+3  $queryRawUnsafe, WHERE title = '${hostile}'    -> 5 rows   &lt;-- all of them</code></pre>
+<p>Lines 1 and 2 are the <em>same</em> defence, not two. <code>$queryRaw</code> is a <a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Template_literals#tagged_templates">tagged template</a>: it receives the fixed text and the <code>${}</code> values as <strong>separate arrays</strong> and cannot mix them up. Line 3 is the only injectable shape in all of Prisma, and it is spelled <code>Unsafe</code> for a reason.</p>
+<div class="aside"><strong>Read line 3 out loud.</strong> The SQL sent was <code>WHERE title = '' OR 1=1 --'</code>. The caller's quote closed the string early, <code>OR 1=1</code> became <em>logic</em>, and <code>--</code> commented out the leftover quote. That is the entire trick: <strong>data crossed the line into syntax.</strong></div>
+
+<h2>Now try it with a column</h2>
+<p>You want <code>?sort=title</code> &mdash; a caller choosing a column. In raw SQL, parameterise it and watch:</p>
+<pre><code>4a  real     ORDER BY title              -> ["Add zod validation","Buy milk","Learn Prisma migrations"]
+4b  param    ORDER BY ${"title"}         -> ["Add zod validation","Write the tasks routes","Buy milk"]
+4c  param    ORDER BY ${"nonsense!!"}    -> ["Add zod validation","Write the tasks routes","Buy milk"]</code></pre>
+<p><strong>4b and 4c are identical, and neither is sorted.</strong> A parameter is a value, so Postgres ordered every row by the same constant &mdash; which is no order at all. No error. <code>"title"</code> and <code>"nonsense!!"</code> behave exactly the same: both do nothing, quietly.</p>
+<p class="takeaway">A parameter in the wrong slot does not fail loudly. It fails silently, which is worse.</p>
+
+<h2>What you shipped</h2>
+<p>No escaping, no parameter &mdash; so the column comes from a list you wrote. You already have the place for that: the wall at the door, from <a href="./0002-schemas-at-the-door.html">lesson 2</a>.</p>
+<div class="vs">
+<div class="no"><h4>never write this</h4>
+<pre><code>sort: z.string()
+
+// then, in the store:
+orderBy: { [sort]: dir }</code></pre></div>
+<div class="yes"><h4>src/schemas/task.schema.ts</h4>
+<pre><code>sort: z.enum([
+  "id", "title", "createdAt",
+]).default("id"),
+dir: z.enum(["asc","desc"])
+  .default("asc"),</code></pre></div>
+</div>
+<p>The <code>enum</code> <em>is</em> the allowlist. Nothing re-checks <code>sort</code> in the store, and nothing should. By the time <code>listTasks</code> runs it is one of three strings, or the request was a <code>400</code>.</p>
+
+<h2>The honest part</h2>
+<p>Here is what I found by actually widening it to <code>z.string()</code> and asking for <code>?sort=passwordHash</code>. Prisma does <strong>not</strong> build that SQL. It refuses the unknown key before any query exists:</p>
+<pre><code>Unknown argument `passwordHash`. Available options are marked with ?.</code></pre>
+<p>So the builder is a second wall you did not write, and on this route the enum is <em>not</em> what stands between you and a stolen password hash. What the enum actually buys you is this &mdash; the reply that widened version sends to the caller:</p>
+<pre><code>HTTP 500
+{"statusCode":500,"error":"Internal Server Error","message":"\nInvalid
+`prisma.task.findMany()` invocation in\n/Users/jay/learning/full-stack-
+learning/server/src/store/task.store.ts:18:22\n\n  15 // ! only because
+TaskQuery already narrowed it to one of three strings...</code></pre>
+<p>Your absolute file paths, your line numbers, and <em>your source comments</em>, handed to anyone who can type a query string. That is <a href="https://cheatsheetseries.owasp.org/cheatsheets/Error_Handling_Cheat_Sheet.html">A05: security misconfiguration</a>, not injection &mdash; and it is a real hole, in your app, today.</p>
+<p>The allowlist version answers this instead, and it names your list on purpose &mdash; that is the API contract, not an internal:</p>
+<pre><code>HTTP 400
+{"message":"sort: Invalid option: expected one of \"id\"|\"title\"|\"createdAt\""}</code></pre>
+<div class="aside"><strong>One more thing I got wrong and fixed.</strong> My first version declared <code>400: ErrorReply</code> in the route's <code>response</code> map. A <code>400</code> is Fastify's <em>own</em> reply, shaped <code>{ statusCode, error, message }</code> &mdash; so the response serializer from <a href="./0002-schemas-at-the-door.html">lesson 2</a> dutifully dropped <code>message</code>, and every validation error became a bare <code>{"error":"Bad Request"}</code>. The serializer that keeps <code>passwordHash</code> private will just as happily throw away the one line telling you what you typed wrong. <strong>Declare response schemas for the replies you write, not for the ones the framework writes.</strong></div>
+<p class="takeaway">The allowlist turns a <code>500</code> that describes your code into a <code>400</code> that describes nothing. And it is still the right wall the day someone swaps the builder for raw SQL.</p>
+
+<div class="aside"><strong>Fastify gotcha, and it cost me twenty minutes.</strong> Add <code>querystring: TaskQuery</code> to the route <code>schema</code> or the whole thing is <em>ignored</em>: <code>?sort=nope</code> answers <code>200</code>, unsorted. No throw &mdash; one <code>FSTWRN001</code> line in the log. Third silent failure on this page.</div>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">Why can a column name not be sent as a parameter?</p>
+<button>Because Postgres only parameterises strings</button>
+<button>Because the plan needs it before values bind</button>
+<p class="why" hidden>Postgres parses and plans first, then binds values. A column name decides <em>what the plan is</em>, so it must be in the SQL text. Types are irrelevant &mdash; a string value parameterises fine.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">With Prisma's builder, what does <code>sort: z.string()</code> actually cost?</p>
+<button>A 500 that prints your source code</button>
+<button>A query that reads another table</button>
+<p class="why" hidden>Prisma refuses an unknown <code>orderBy</code> key before building SQL, so there is no injection on this route. The cost is the unhandled error: Fastify sends Prisma's message, and it carries your file paths, line numbers and comments.</p>
+</div>
+
+<h2>What this does NOT fix</h2>
+<table>
+<tr><th>Gap</th><th>Why it is still open</th></tr>
+<tr><td><strong>A 500 leaks your source</strong></td><td>The allowlist stops <em>this</em> route reaching it. Any other unhandled throw still replies with the message. You have no error handler. Next lesson.</td></tr>
+<tr><td>No <code>LIMIT</code> on the list</td><td><code>GET /tasks</code> returns every task in the team. Fine at 5 rows, not at 50,000. Pagination, week 9&ndash;10.</td></tr>
+<tr><td><code>$queryRawUnsafe</code> still exists</td><td>Nothing stops you typing it. The name is the only guard.</td></tr>
+</table>
+
+<h2>Do this</h2>
+<ol>
+<li><code>cd server &amp;&amp; npm test</code> &mdash; <strong>125</strong> tests, eight new in <code>src/routes/task-sort.test.ts</code>. Four are one hostile <code>?sort=</code> each.</li>
+<li>Read the fixture in that file and the comment above <code>TITLES</code>. The three titles are <code>cherry, apple, banana</code> on purpose: <strong>id order and title order must disagree</strong>, or a sort test passes even when sorting is silently ignored. That is 4c, in test form.</li>
+<li>Break it on purpose: in <code>src/schemas/task.schema.ts</code> change <code>sort</code> to <code>z.string().default("id")</code>, then <code>npm test</code>. <strong>Four</strong> fail &mdash; and note what they say: <code>500 !== 400</code>, not a leaked row. Note harder that the three <em>sorting</em> tests still pass. A green suite is not what keeps you safe. Then put it back.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn &mdash; SQL injection and sort columns</h2>
+<p class="crumb">Show me &middot; Lesson 20</p>
+
+<p>The frontend is never the vulnerability. It is just a keyboard. Injection happens
+at the <b>server</b>, inside a SQL string &mdash; so the real question is only ever
+<b>what the server does with your input</b>, not where you typed it.</p>
+
+<h2>Step 1 &mdash; get your payload to the server</h2>
+<p>Three routes, all equal. An attacker picks whichever is easiest &mdash; and they are never
+stopped by your React form&rsquo;s validation, because two of the three don&rsquo;t touch it.</p>
+
+<ul class="routes">
+  <li>
+    <span class="tag">route A &middot; the form field</span>
+    <code>&lt;input&gt;</code> a search box, a title &mdash; type <code>' OR 1=1 --</code> and submit.
+    <p>The obvious one. Also the <em>least</em> useful to an attacker: your client-side checks
+    can block it, so it proves nothing about the server.</p>
+  </li>
+  <li>
+    <span class="tag">route B &middot; the address bar</span>
+    Edit the URL directly: <code>/teams/1/tasks?sort=title;DROP&nbsp;TABLE&nbsp;"Task"--</code>
+    <p>No form, no JavaScript, no validation ran. The query string is caller-controlled text
+    that lands straight in your route. This is the <code>?sort=</code> slot from the lesson.</p>
+  </li>
+  <li>
+    <span class="tag">route C &middot; skip the frontend entirely</span>
+    DevTools &rarr; Network &rarr; <em>Copy as fetch</em>, edit, replay. Or just <code>curl</code>.
+    <p>The important one. The attacker throws your UI away and talks to the API raw. Every
+    check that lived in the browser is now invisible. <b>Only server-side walls exist.</b></p>
+  </li>
+</ul>
+
+<div class="arrow">&darr;</div>
+<p style="text-align:center;font-family:var(--mono);font-size:.8rem;color:var(--muted);">
+  all three arrive as the same bytes at <code>POST /…</code> or <code>GET /…?…</code></p>
+
+<h2>Step 2 &mdash; the server decides everything</h2>
+<p>Same hostile string. Its fate is set entirely by how the handler builds the SQL.</p>
+
+<div class="fork">
+  <div class="safe">
+    <span class="tag">parameterised &mdash; your whole app</span>
+    <h3>Nothing happens</h3>
+    <pre><code>where: { title: input }
+// or  ${input} in $queryRaw</code></pre>
+    <p>The value travels <em>beside</em> the query. <code>' OR 1=1 --</code> is compared as
+    literal text to a title. <b>0 rows.</b> There is no attack surface here to find.</p>
+  </div>
+  <div class="hole">
+    <span class="tag">concatenated &mdash; $queryRawUnsafe</span>
+    <h3>Injection</h3>
+    <pre><code>`WHERE title = '${input}'`</code></pre>
+    <p>The quote in your input closes the string early; the rest becomes syntax. This is the
+    <em>only</em> injectable shape in Prisma, and it is spelled <code>Unsafe</code>. Your app
+    contains zero of them.</p>
+  </div>
+</div>
+
+<div class="rule">So &ldquo;how do I inject from the frontend&rdquo; has an honest answer for <em>your</em>
+app: <b>you can&rsquo;t</b> &mdash; every value is a parameter. Injection needs a raw string you
+glue input into. The frontend can only deliver the payload; the server has to volunteer the hole.</div>
+
+<h2>Step 3 &mdash; try it against your own <code>?sort=</code></h2>
+<p>This is the one caller-chosen <em>identifier</em>, so no parameter can carry it &mdash; the
+place you&rsquo;d actually probe. Paste each into the address bar:</p>
+
+<div class="try">
+GET /teams/1/tasks?sort=title<span class="out">          &rarr; 200, sorted        (allowed)</span><br>
+GET /teams/1/tasks?sort=passwordHash<span class="out">   &rarr; </span><span class="bad">400</span><span class="out">, &ldquo;expected one of id|title|createdAt&rdquo;</span><br>
+GET /teams/1/tasks?sort=id;DROP&nbsp;TABLE...<span class="out">  &rarr; </span><span class="bad">400</span><span class="out">, same message</span><br>
+<br>
+<span class="out"># the enum rejects everything not on the list, before any SQL exists.</span><br>
+<span class="ok"># the wall is z.enum in task.schema.ts &mdash; not cleverness in the store.</span>
+</div>
+
+<hr>
+<p class="nav">The lesson: <a href="./0020-the-column-that-cannot-be-a-parameter.html">Lesson 20 &mdash; The column that cannot be a parameter</a>
+&middot; Reference: <a href="../reference/sql-injection.html">SQL injection and allowlists</a></p>
+
+<h2>See it drawn &mdash; SQL injection and sort columns</h2>
+<p>One query. Caller input can land in two kinds of slot, and each kind gets a completely different defence.</p>
+
+<div class="query">
+SELECT * FROM <span class="slot ident"><b>identifier</b>"Task"</span>
+WHERE title = <span class="slot val"><b>value</b>'Buy milk'</span>
+ORDER BY <span class="slot ident"><b>identifier</b>title</span>
+<span class="slot ident"><b>identifier</b>ASC</span>
+LIMIT <span class="slot val"><b>value</b>20</span>
+</div>
+
+<div class="legend">
+<div class="v">
+<h3>Green slots: values</h3>
+<p>The <em>data</em> the query asks about. Postgres will accept any value here, so it lets you send it separately &mdash; beside the SQL, never inside it.</p>
+<p class="how">defence: a parameter. free, automatic.</p>
+</div>
+<div class="i">
+<h3>Red slots: identifiers</h3>
+<p>The <em>name of a thing</em>. Postgres has to know these to plan the query at all, so they must be part of the SQL text. No parameter can carry one.</p>
+<p class="how">defence: a list you wrote. nothing else.</p>
+</div>
+</div>
+
+<p class="rule">A value can travel beside the query. An identifier has to be part of it.</p>
+
+<h2>Which Prisma call parameterises</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  IN["' OR 1=1 --"] --> A["prisma.task.findMany({ where })"]
+  IN --> B["$queryRaw&#96;WHERE title = ${v}&#96;"]
+  IN --> C["$queryRawUnsafe(&#96;... = '${v}'&#96;)"]
+  A --> P["Postgres receives<br/>the text AND the value<br/>as two separate things"]
+  B --> P
+  P --> OK["compared to a title<br/>0 rows of 5"]
+  C --> GLUE["Postgres receives<br/>one string, already glued:<br/>WHERE title = '' OR 1=1 --'"]
+  GLUE --> BAD["the quote closed early,<br/>OR 1=1 became LOGIC<br/>5 rows of 5"]
+</pre>
+<figcaption>The top two are the <em>same</em> mechanism, not two. <code>$queryRaw</code> is a tagged template: it receives the fixed strings and the <code>${}</code> values as separate arrays and cannot mix them up. Only the glued shape is injectable, and it is spelled <code>Unsafe</code>.</figcaption>
+</figure>
+
+<h2>Two silent failures, one page apart</h2>
+<p>Neither of these throws. Both look like working code.</p>
+
+<ul class="silent">
+<li>
+<div class="h">1 &middot; a parameter in an identifier slot &mdash; accepted, then ignored</div>
+<pre><code>ORDER BY ${"title"}       -> ["Add zod validation","Write the tasks routes","Buy milk"]
+ORDER BY ${"nonsense!!"}  -> ["Add zod validation","Write the tasks routes","Buy milk"]</code></pre>
+<p class="note">Byte-identical, and <strong>neither is sorted</strong>. A parameter is a value, so Postgres ordered every row by the same constant &mdash; which is no order at all. A real column name and pure gibberish behave exactly the same.</p>
+</li>
+<li>
+<div class="h">2 &middot; a route schema with no querystring key &mdash; validation skipped</div>
+<pre><code>schema: { params: TeamParams }                      -> ?sort=nope answers 200
+schema: { params: TeamParams, querystring: TaskQuery }  -> ?sort=nope answers 400</code></pre>
+<p class="note">Fastify does not throw for the missing key. You get one <code>FSTWRN001</code> line in the log, and a wall that is present in the file and absent at runtime.</p>
+</li>
+</ul>
+
+<p class="rule">A parameter in the wrong slot, and a schema the router never reads, both fail <strong>quietly</strong>. Test for a reordering, never for a <code>200</code>.</p>
+
+<h2>The honest finding</h2>
+<p>I expected widening the allowlist to open an injection. It does not &mdash; and what it opens instead is worse than it looks.</p>
+
+<div class="two">
+<div class="bad">
+<span class="tag">sort: z.string()</span>
+<pre><code>GET ...?sort=passwordHash
+
+HTTP 500
+"Invalid `prisma.task.findMany()`
+invocation in
+/Users/jay/learning/full-stack-
+learning/server/src/store/
+task.store.ts:18:22
+  15 // ! only because TaskQuery
+     already narrowed it..."</code></pre>
+<p>Prisma <em>refuses</em> the unknown <code>orderBy</code> key before building any SQL, so there is no injection. The reply hands over absolute file paths, line numbers and <strong>your source comments</strong> instead.</p>
+</div>
+<div class="good">
+<span class="tag">sort: z.enum([...])</span>
+<pre><code>GET ...?sort=passwordHash
+
+HTTP 400
+"message":"sort: Invalid option:
+ expected one of
+ \"id\"|\"title\"|\"createdAt\""</code></pre>
+<p>Refused at the door. Nothing downstream runs, so there is nothing to throw and nothing to describe &mdash; the reply names <em>your list</em>, which is the API contract, not an internal. Still the right wall the day the builder is swapped for raw SQL.</p>
+</div>
+</div>
+
+<p class="rule">The allowlist turns a <code>500</code> that describes your code into a <code>400</code> that describes nothing.</p>
+
+<h2>Where the list lives</h2>
+<pre><code>src/schemas/task.schema.ts   sort: z.enum(["id","title","createdAt"])   &lt;-- the allowlist
+src/routes/tasks.route.ts    querystring: TaskQuery                     &lt;-- or the above does nothing
+src/store/task.store.ts      orderBy: { [sort]: dir }                   &lt;-- sort is a KEY, never checked here</code></pre>
+<p>Three files, one wall. The <code>enum</code> <em>is</em> the allowlist &mdash; there is no second check, because a second check is a place to forget.</p>
+
+<hr>
+<p class="nav">The lesson: <a href="./0020-the-column-that-cannot-be-a-parameter.html">Lesson 20 &mdash; The column that cannot be a parameter</a> &middot; Reference: <a href="../reference/sql-injection.html">SQL injection and allowlists</a></p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html">OWASP, SQL Injection Prevention Cheat Sheet</a> &mdash; read &ldquo;Defense Option 4: Allow-list Input Validation&rdquo;. It exists for exactly today's problem.</p>
+<p><b>Also:</b> <a href="https://www.prisma.io/docs/orm/prisma-client/using-raw-sql/raw-queries">Prisma, raw queries</a>. Note the wording on <code>$queryRawUnsafe</code>.</p>
+<p><b>Reference card:</b> <a href="../reference/sql-injection.html">SQL injection and allowlists, one page</a>.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/PostgreSQL/">r/PostgreSQL</a> &mdash; how do they let users sort by a column safely? Watch for anyone reaching for <code>quote_ident</code>, and ask why a list is not enough.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0019-the-row-that-outlives-the-user.html">&larr; Back</a>
+<a href="../reference/the-whole-arc.html">The whole arc, one page &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

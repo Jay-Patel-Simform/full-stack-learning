@@ -1,0 +1,6 @@
+.neon
+.env.local
+node_modules/
+.env.docker
+.env
+.DS_Store

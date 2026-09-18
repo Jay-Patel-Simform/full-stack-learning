@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reference — Prisma + Postgres</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+</head>
+<body>
+
+<p class="kicker">Reference &middot; grows each lesson</p>
+<h1>Prisma + Postgres</h1>
+<p class="lede">Quick-reference sheet. Print it. Commands are for <code>/Users/jay/learning/full-stack-learning/server</code>.</p>
+
+<h2>Commands you will type most</h2>
+<div class="scroll">
+<table>
+<tr><th>Command</th><th>What it does</th></tr>
+<tr><td><code>psql -U postgres -h localhost</code></td><td>Admin shell into the Postgres already installed on this Mac.</td></tr>
+<tr><td><code>npx prisma migrate dev --name &lt;change&gt;</code></td><td>Writes the SQL file, runs it, regenerates the client. Your normal loop.</td></tr>
+<tr><td><code>npx prisma generate</code></td><td>Regenerates the typed client only. After a git pull.</td></tr>
+<tr><td><code>npx prisma migrate deploy</code></td><td>Applies existing migrations, writes none. This is the production one.</td></tr>
+<tr><td><code>npx prisma studio</code></td><td>Browser table viewer. Good for &ldquo;did that row really save?&rdquo;</td></tr>
+<tr><td><code>npx prisma migrate reset</code></td><td>Drops everything and replays every migration. Local only. Destroys data.</td></tr>
+</table>
+</div>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  E["you edit<br/>schema.prisma"] -- "migrate dev" --> SQL["migrations/*.sql<br/>committed, never edited"]
+  E -- "migrate dev / generate" --> CL["src/generated/prisma<br/>typed client"]
+  SQL -- "migrate dev (local)<br/>migrate deploy (prod)" --> DB[("Postgres")]
+  CL -- "queries" --> DB
+</pre>
+<figcaption>One file is the truth. Migrations are history &mdash; append, never rewrite. The client is generated, never hand-edited.</figcaption>
+</figure>
+
+<h2>Schema field cheatsheet</h2>
+<pre><code>model Task {
+  id         Int      @id @default(autoincrement())
+  title      String   @db.VarChar(200)   // length rule in the table
+  done       Boolean  @default(false)
+  email      String   @unique            // no two rows alike
+  ownerId    Int
+  owner      User     @relation(fields: [ownerId], references: [id])
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt         // set on every write
+  @@index([ownerId])                     // fast lookup by owner
+}</code></pre>
+
+<h2>Client calls</h2>
+<div class="scroll">
+<table>
+<tr><th>Need</th><th>Call</th></tr>
+<tr><td>All rows</td><td><code>prisma.task.findMany({ orderBy: { id: "asc" } })</code> &rarr; <code>[]</code> when empty</td></tr>
+<tr><td>One row or nothing</td><td><code>prisma.task.findUnique({ where: { id } })</code> &rarr; <code>null</code> when missing</td></tr>
+<tr><td>Insert</td><td><code>prisma.task.create({ data })</code></td></tr>
+<tr><td>Change one, may be missing</td><td><code>prisma.task.updateMany({ where: { id }, data })</code> &rarr; <code>{ count }</code></td></tr>
+<tr><td>Delete one, may be missing</td><td><code>prisma.task.deleteMany({ where: { id } })</code> &rarr; <code>{ count }</code></td></tr>
+<tr><td>All or nothing</td><td><code>prisma.$transaction([a, b])</code></td></tr>
+</table>
+</div>
+<p><code>update</code> and <code>delete</code> throw when the row is missing. The <code>*Many</code> versions return a count instead, which maps straight onto a 404.</p>
+
+<h2>Relations</h2>
+<p>Only <code>ownerId</code> is a real column. <code>owner</code> and <code>tasks Task[]</code> are names for Prisma, not table data.</p>
+<div class="scroll">
+<table>
+<tr><th>Need</th><th>Call</th></tr>
+<tr><td>Only this owner's rows</td><td><code>findMany({ where: { ownerId } })</code> &mdash; the line that stops IDOR</td></tr>
+<tr><td>Pull the related row too</td><td><code>findMany({ include: { owner: true } })</code></td></tr>
+<tr><td>Pull two fields of it</td><td><code>include: { owner: { select: { id: true, email: true } } }</code></td></tr>
+<tr><td>Create both at once</td><td><code>create({ data: { title, owner: { create: { email } } } })</code></td></tr>
+<tr><td>Count children</td><td><code>user.findMany({ include: { _count: { select: { tasks: true } } } })</code></td></tr>
+</table>
+</div>
+<pre><code>-- the SQL that `include: { owner: true }` stands for
+select t.id, t.title, u.email
+from "Task" t
+join "User" u on u.id = t."ownerId"
+where t."ownerId" = 1;</code></pre>
+<p>Adding a required foreign key to a table that already has rows takes three migrations in production: add it nullable, backfill with <code>UPDATE</code>, then make it required. Only reset the database when the data is throwaway.</p>
+
+<h2>psql in ten lines</h2>
+<pre><code>psql "postgresql://tasks:tasks@localhost:5432/tasks"   # connect as this project
+\dt                       -- list tables
+\d "Task"                 -- describe one table
+select * from "Task";     -- quotes needed: the name has a capital letter
+\q                        -- quit</code></pre>
+
+<h2>Adding a required column to a table with rows</h2>
+<p>Postgres will refuse. It cannot invent a value for the rows already there.
+Three steps, in this order &mdash; on a live server, three separate deploys.</p>
+<pre><code>npx prisma migrate dev --create-only --name &lt;change&gt;   # write the file, do not run it
+# edit prisma/migrations/&lt;stamp&gt;_&lt;change&gt;/migration.sql
+npx prisma migrate dev                                  # now run it</code></pre>
+<pre><code>-- 1. EXPAND   nullable, so old rows may be empty for now
+ALTER TABLE "Task" ADD COLUMN "teamId" INTEGER;
+
+-- 2. BACKFILL  give every empty row a real value
+UPDATE "Task" SET "teamId" = 1 WHERE "teamId" IS NULL;
+
+-- 3. CONTRACT  nothing is empty, so the wall goes up
+ALTER TABLE "Task" ALTER COLUMN "teamId" SET NOT NULL;</code></pre>
+<div class="scroll">
+<table>
+<tr><th>Way out</th><th>Cost</th></tr>
+<tr><td>Make it nullable</td><td>The rule leaves the database. Every reader now needs a null branch, forever.</td></tr>
+<tr><td>Delete the rows</td><td>Fine on a laptop. Data loss anywhere else, and not undoable.</td></tr>
+<tr><td>Expand / backfill / contract</td><td>Three statements, and you must decide what the old rows meant. Take this one.</td></tr>
+</table>
+</div>
+<p>The backfill is not a technical step. It is you writing an assumption about
+the past into SQL, permanently. Say it in a comment.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  A["rows exist<br/>no column"] -- "1. EXPAND<br/>ADD COLUMN (nullable)" --> B["column = NULL"]
+  B -- "2. BACKFILL<br/>UPDATE ... WHERE IS NULL" --> C["column filled"]
+  C -- "3. CONTRACT<br/>SET NOT NULL" --> D["wall up"]
+  X["one-step ALTER<br/>ADD COLUMN NOT NULL"] -.-> ERR["Postgres refuses"]
+</pre>
+<figcaption>Three separate deploys on a live server. Step 3 before step 2 fails for the same reason the one-step version does.</figcaption>
+</figure>
+
+<h2>Scoping vs permission in a <code>where</code></h2>
+<p>These look identical and are not.</p>
+<div class="scroll">
+<table>
+<tr><th></th><th><code>where: { id, ownerId }</code></th><th><code>where: { id, teamId }</code></th></tr>
+<tr><td>asks</td><td>may you?</td><td>which rows?</td></tr>
+<tr><td>decided by</td><td>this query, alone, untested</td><td>the gate, already, upstream</td></tr>
+<tr><td>remove it and</td><td>anyone edits anything</td><td>you leak across teams (IDOR)</td></tr>
+</table>
+</div>
+<p>A permission rule inside a query is a rule nobody can find. Move it to
+<code>can()</code>. Keep the scope.</p>
+
+<h2>Two kinds of nothing in a <code>Json</code> column</h2>
+<p>Postgres <code>jsonb</code> can be empty, or it can hold the JSON literal <code>null</code>. They are different values and only one of them matches <code>IS NULL</code>.</p>
+<table>
+<tr><th>You write</th><th>Column becomes</th><th><code>IS NULL</code></th><th><code>jsonb_typeof</code></th></tr>
+<tr><td><code>undefined</code></td><td>SQL NULL</td><td>true</td><td><code>NULL</code></td></tr>
+<tr><td><code>Prisma.DbNull</code></td><td>SQL NULL</td><td>true</td><td><code>NULL</code></td></tr>
+<tr><td><code>Prisma.JsonNull</code></td><td>JSON null</td><td>false</td><td><code>'null'</code></td></tr>
+<tr><td><code>null</code></td><td>JSON null</td><td>false</td><td><code>'null'</code></td></tr>
+</table>
+<p>Prisma reads both back as JavaScript <code>null</code>, so the client cannot tell them apart. Only SQL can. Count them:</p>
+<pre><code>select count(*) filter (where col is null)             as sql_null,
+       count(*) filter (where col = 'null'::jsonb)     as json_null,
+       count(*) filter (where jsonb_typeof(col) = 'object') as real
+from "Table";</code></pre>
+<p><b>Default to <code>?? undefined</code> for a <code>Json?</code> field.</b> Use <code>Prisma.JsonNull</code> only when a stored <code>null</code> is a fact you mean. And an <code>as never</code> on a Prisma write is a promise to the compiler &mdash; this is the bug it hides.</p>
+
+<h2>Database roles and privileges</h2>
+<p>Two permission systems sit under this app. <code>can()</code> decides what a <em>person</em> may do. A <b>role</b> (a database login) decides what the <em>app</em> may do. Today the app owns every table, so the second one grants everything.</p>
+<div class="scroll"><table>
+<tr><th>Need</th><th>SQL</th></tr>
+<tr><td>See the privileges on one table</td><td><code>\dp "AuditLog"</code> in psql, or <code>select relacl from pg_class where relname = 'AuditLog';</code></td></tr>
+<tr><td>Take a power away</td><td><code>REVOKE UPDATE, DELETE, TRUNCATE ON "AuditLog" FROM tasks_app;</code></td></tr>
+<tr><td>Give a power</td><td><code>GRANT SELECT, INSERT ON "AuditLog" TO tasks_app;</code></td></tr>
+<tr><td>A whole schema at once</td><td><code>GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO tasks_app;</code> &mdash; existing tables only</td></tr>
+<tr><td>Cover future tables too</td><td><code>ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ... TO tasks_app;</code></td></tr>
+<tr><td>Auto-increment ids need this</td><td><code>GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO tasks_app;</code></td></tr>
+</table></div>
+<p>Reading <code>relacl</code>. <code>NULL</code> means nothing is written down, so the owner holds everything. Otherwise the form is <code>grantee=letters/grantor</code>:</p>
+<div class="scroll"><table>
+<tr><th><code>r</code></th><th><code>a</code></th><th><code>w</code></th><th><code>d</code></th><th><code>D</code></th><th><code>x</code></th><th><code>t</code></th></tr>
+<tr><td>SELECT</td><td>INSERT</td><td>UPDATE</td><td>DELETE</td><td>TRUNCATE</td><td>REFERENCES</td><td>TRIGGER</td></tr>
+</table></div>
+<p><b>Measured, lesson 41.</b> An append-only <code>AuditLog</code> is <code>{tasks=arxtm/tasks}</code> &mdash; <code>r</code> and <code>a</code>, no <code>w</code>, no <code>d</code>, no <code>D</code>.</p>
+<ul>
+<li><b>TRUNCATE is a separate privilege.</b> Revoking DELETE leaves one word that empties the table.</li>
+<li><b>A revoke on the owner works, and the owner can grant it back.</b> Against your own role it guards mistakes, not attackers. The wall needs a second role that owns nothing.</li>
+<li><b>Split the jobs, not the code.</b> Serving requests, running migrations and deleting old rows are three jobs. Only the first faces the internet, and it is the one that needs least.</li>
+<li><b>A role that owns nothing cannot grant itself anything.</b> Measured in lesson 42: <code>GRANT DELETE ON "AuditLog" TO tasks_app;</code> run <em>as</em> <code>tasks_app</code> answers <code>WARNING: no privileges were granted</code>. Not an error &mdash; a warning, and nothing changes.</li>
+<li><b>Assert the code, not the message.</b> <code>42501</code> is the SQLSTATE for insufficient privilege. The English text can change between versions; the five characters cannot.</li>
+</ul>
+<p>Wiring it in (lesson 42). Two connection strings, and one line picks:</p>
+<pre><code>// src/db.ts
+const connectionString =
+  config.NODE_ENV === "test" ? config.DATABASE_URL : config.APP_DATABASE_URL;
+const adapter = new PrismaPg({ connectionString });</code></pre>
+<p>To see which login is actually connected, with the server running:</p>
+<pre><code>select usename from pg_stat_activity where datname = 'tasks';</code></pre>
+<p>It shows nothing until the first request that touches the database &mdash; the Prisma pool is lazy, and <code>/health</code> does not query.</p>
+
+<h2>How big is it? (lesson 45)</h2>
+<table>
+<tr><td><code>pg_database_size('tasks')</code></td><td>whole database, including the ~7.4&nbsp;MB catalog floor</td></tr>
+<tr><td><code>pg_total_relation_size('"AuditLog"')</code></td><td>one table: heap + indexes + TOAST &mdash; <b>the default answer</b></td></tr>
+<tr><td><code>pg_relation_size('"AuditLog"')</code></td><td>the rows only</td></tr>
+<tr><td><code>pg_indexes_size('"AuditLog"')</code></td><td>the indexes only</td></tr>
+<tr><td><code>pg_size_pretty(...)</code></td><td>wrap any of them: bytes &rarr; <code>3152 kB</code></td></tr>
+</table>
+<p>Prisma table names are capitalised, so they need SQL double quotes inside shell single quotes: <code>'"AuditLog"'</code>. Unquoted <code>AuditLog</code> folds to <code>auditlog</code> and does not exist.</p>
+<p>Every table, biggest first &mdash; the query to run when a disk alert fires:</p>
+<pre><code>select relname,
+       pg_size_pretty(pg_total_relation_size(c.oid)) as total,
+       pg_size_pretty(pg_relation_size(c.oid))       as heap,
+       pg_size_pretty(pg_indexes_size(c.oid))        as idx
+from pg_class c join pg_namespace n on n.oid = c.relnamespace
+where n.nspname = 'public' and c.relkind = 'r'
+order by pg_total_relation_size(c.oid) desc;</code></pre>
+<p>Measure growth per table, never with <code>pg_database_size</code> &mdash; an empty database is already 7.4&nbsp;MB, which buries the change. The app login may read all of these; size is not privileged.</p>
+
+<h2>Rules that keep you out of trouble</h2>
+<ul>
+<li>Never edit a migration that has already run. Add a new one.</li>
+<li>Commit <code>prisma/migrations/</code>. Never commit <code>.env</code>.</li>
+<li>One role and one database per project. Never develop as the <code>postgres</code> superuser.</li>
+<li>The role needs <code>CREATEDB</code>, because <code>migrate dev</code> makes a temporary shadow database.</li>
+<li>One <code>PrismaClient</code> for the whole app, exported from <code>src/db.ts</code>.</li>
+<li>Put the rule in the table too, not only in Zod. Zod guards one door.</li>
+<li>Use the query API, not string-built SQL. That is what stops SQL injection.</li>
+<li>Reading a list? Add <code>take</code> and <code>skip</code> before the table gets big.</li>
+<li>Index every column you filter a list on: <code>@@index([teamId])</code>.</li>
+<li>A required column on a table with rows is three steps, never one.</li>
+<li>A <code>where</code> that decides <em>may you</em> is a permission rule in hiding. Move it out.</li>
+<li><code>Json?</code> field with no value? Write <code>undefined</code>, not <code>null</code>. <code>null</code> stores the word.</li>
+<li>A privilege nothing in the app uses is a privilege to revoke. Check before you assume it is needed.</li>
+</ul>
+
+<hr>
+<p class="nav">From: <a href="../lessons/0003-rows-that-survive-a-restart.html">Lesson 3</a>, <a href="../lessons/0010-a-task-belongs-to-a-team.html">Lesson 10</a>, <a href="../lessons/0037-two-kinds-of-nothing.html">Lesson 37</a>, <a href="../lessons/0041-the-role-that-can-erase-the-evidence.html">Lesson 41</a> &middot; Also: <a href="./api-security-basics.html">API Security Basics</a> &middot; Docs: <a href="https://www.prisma.io/docs">Prisma</a>, <a href="https://www.postgresql.org/docs/current/">PostgreSQL</a></p>
+
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

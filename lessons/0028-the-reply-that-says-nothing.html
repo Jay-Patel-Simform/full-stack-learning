@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 28 &mdash; 204 responses and cache updates</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.three { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; margin: 1.2rem 0 .8rem; }
+.three > div { border: 1px solid var(--rule); border-radius: 6px; padding: .9rem 1rem;
+  font-family: var(--mono); font-size: .7rem; line-height: 1.8; min-width: 0; }
+.three h4 { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
+  text-transform: uppercase; margin: 0 0 .6rem; color: var(--muted); font-weight: 500; }
+.three .end { margin: .7rem 0 0; font-family: var(--serif); font-size: .8rem; font-weight: 600; }
+.three .good { border-color: var(--ok); } .three .good .end { color: var(--ok); }
+.three .bad { border-color: var(--bad); border-style: dashed; } .three .bad .end { color: var(--bad); }
+
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin: 1.2rem 0 .8rem; }
+.two > div { border: 1px solid var(--rule); border-radius: 6px; padding: .9rem 1rem;
+  font-family: var(--mono); font-size: .72rem; line-height: 1.8; min-width: 0; }
+.two h4 { font-family: var(--mono); font-size: .66rem; letter-spacing: .1em;
+  text-transform: uppercase; margin: 0 0 .6rem; color: var(--muted); font-weight: 500; }
+.two .end { margin: .7rem 0 0; font-family: var(--serif); font-size: .82rem; font-weight: 600; }
+.two .good { border-color: var(--ok); } .two .good .end { color: var(--ok); }
+.two .bad { border-color: var(--bad); border-style: dashed; } .two .bad .end { color: var(--bad); }
+.two pre { margin: 0; font-size: .7rem; }
+
+.file { color: var(--muted); font-size: .66rem; }
+.ok200 { color: var(--ok); font-weight: 600; }
+.gone { color: var(--bad); font-weight: 600; }
+.kept { color: var(--muted); }
+
+.wire { font-family: var(--mono); font-size: .72rem; line-height: 1.9; border: 1px solid var(--rule);
+  border-radius: 6px; padding: .9rem 1rem; margin: 1.2rem 0 .6rem; }
+.wire b { color: var(--accent); }
+.byte { background: var(--code-bg); padding: 0 .3em; border-radius: 3px; }
+
+table.w { font-family: var(--mono); font-size: .7rem; width: 100%; }
+table.w th { font-size: .64rem; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted); font-weight: 500; }
+table.w td { vertical-align: top; }
+
+.rule { font-size: .95rem; padding: .8rem 1rem; border-left: 3px solid var(--accent);
+  background: var(--code-bg); border-radius: 0 4px 4px 0; margin: 1.3rem 0 2.2rem; }
+@media (max-width: 46rem) { .three, .two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 28 &middot; Week 10 &middot; Front end</p>
+<h1>204 responses and cache updates</h1>
+<p class="lede">The page can read tasks, tick them and add them. The last write missing is <b>delete</b> &mdash; and it is the only one whose reply carries no state at all. That changes what you may put in the cache, and it changes what &ldquo;safe to send twice&rdquo; actually means.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>Your <code>DELETE</code> answers <code>204</code>:</strong> zero bytes, no <code>content-type</code>, no <code>content-length</code>. Measured below.</li>
+<li><strong>axios still hands you <code>.data</code>, and it is <code>""</code></strong> &mdash; an empty string. <code>api.delete&lt;Task&gt;(&hellip;)</code> compiles happily and is a lie at runtime.</li>
+<li><strong>So you filter by the id you <em>sent</em>,</strong> not the id you were told. <code>onSuccess</code>&rsquo;s second argument is that id.</li>
+<li><strong>Send it twice: <code>204</code>, then <code>404</code>.</strong> Same world after both, two different answers. That is what <em>idempotent</em> means &mdash; and it is not &ldquo;the answer repeats&rdquo;.</li>
+<li><strong>A Viewer&rsquo;s <code>can</code> is <code>["task:read"]</code>,</strong> so no button is drawn. Draw it anyway and the gate says <code>403</code>. Measured.</li>
+</ul>
+</div>
+
+<h2>The word pair</h2>
+<div class="word"><b>idempotent</b> &mdash; sending it twice leaves the world where sending it once did. A promise about <em>state</em>.</div>
+<div class="word"><b>repeatable answer</b> &mdash; sending it twice gets you the same reply. A promise about the <em>response</em>.</div>
+<p class="takeaway"><code>DELETE</code> is the first one and not the second. A retry is <b>safe</b> and still <b>looks like a failure</b> &mdash; so the second <code>404</code> is not a bug to fix, it is a thing your UI has to expect.</p>
+
+<h2>Your three writes, side by side</h2>
+<p>You now have one of each shape. This is the table worth remembering &mdash; every future write is one of these three rows.</p>
+<div class="scroll">
+<table>
+<tr><th>Write</th><th>First send</th><th>Second send</th><th>World after two</th><th>Cache move</th><th>Guard lives</th></tr>
+<tr><td><code>PATCH {done:true}</code><br>lesson 25</td><td><code>200</code> + the row</td><td><code>200</code> + the same row</td><td class="yes">one row, done</td><td><code>map</code></td><td>nowhere &mdash; it needs none</td></tr>
+<tr><td><code>POST {title}</code><br>lesson 26</td><td><code>201</code> + row <code>399</code></td><td><code>201</code> + row <code>400</code></td><td><b>two rows</b></td><td><code>append</code></td><td>the button (<code>disabled</code>)</td></tr>
+<tr><td><code>DELETE /:id</code><br>today</td><td><code>204</code>, no body</td><td><code>404</code> not found</td><td class="yes">gone, once</td><td><code>filter</code></td><td>the button, for the message only</td></tr>
+</table>
+</div>
+<p>Read the last row across. The <em>state</em> column is as safe as the <code>PATCH</code>. The <em>answer</em> column is as noisy as an error. Only <code>POST</code> is genuinely unsafe to repeat, and that is the one you already guarded.</p>
+
+<h2>Measured, on your API, just now</h2>
+<p>Real <code>buildApp()</code>, real Postgres, a fresh team with an <b>OWNER</b> and a <b>VIEWER</b>:</p>
+<pre><code>POST   /teams/480/tasks        -> 201  {"id":399,"title":"probe 28","done":false}
+DELETE /teams/480/tasks/399    -> <b>204</b>  body: ""  bytes: <b>0</b>  content-type: (none)  content-length: (none)
+DELETE /teams/480/tasks/399    -> <b>404</b>  {"error":"not found"}
+PATCH  /teams/480/tasks/399    -> 404  {"error":"not found"}
+
+GET    /teams        as VIEWER -> [{"id":480,"role":"VIEWER","can":<b>["task:read"]</b>}]
+DELETE /teams/480/tasks/400    -> <b>403</b>  {"error":"forbidden"}          (as VIEWER)
+DELETE /teams/480/tasks/999999 -> 404  {"error":"not found"}          (as OWNER, no such row)
+DELETE from origin evil.com    -> 403  {"error":"cross-site write refused"}</code></pre>
+<p>And what the <em>client</em> sees, measured with your actual axios against a real <code>204</code>:</p>
+<pre><code>axios 204 -> status 204 | data: <b>""</b> | typeof <b>string</b> | content-type: (none)
+axios 404 -> <b>throws</b>, e.response.status 404 {"error":"not found"}</code></pre>
+<div class="aside"><b>The trap in one line.</b> <code>(await api.delete&lt;Task&gt;(url)).data</code> type-checks. TypeScript believes you, because a type parameter is a claim you made, not a fact it checked. At runtime that <code>Task</code> is <code>""</code>, and the crash lands later, in <code>setQueryData</code>, on a line that looks fine. <b>The reply has no type because it has no body &mdash; so do not give it one.</b></div>
+
+<h2>Two ids, and only one of them exists</h2>
+<div class="vs">
+<div class="no">
+<h4>from the reply</h4>
+<pre><code>mutationFn: async (id: number) =&gt;
+  (await api.delete&lt;Task&gt;(
+    `/teams/${teamId}/tasks/${id}`)).data,
+
+onSuccess: (<b>task</b>) =&gt;
+  setQueryData(key, (tasks) =&gt;
+    tasks?.filter((t) =&gt; t.id !== <b>task.id</b>)),
+//                            ^ "".id
+//                            = undefined</code></pre>
+<p>Filters nothing. The row stays on screen &mdash; and the server already deleted it.</p>
+</div>
+<div class="yes">
+<h4>from what you sent</h4>
+<pre><code>mutationFn: async (id: number) =&gt; {
+  await api.delete(
+    `/teams/${teamId}/tasks/${id}`);
+},
+
+onSuccess: (_nothing, <b>id</b>) =&gt;
+  setQueryData(key, (tasks) =&gt;
+    tasks?.filter((t) =&gt; t.id !== <b>id</b>)),
+//                            ^ the number
+//                            you typed</code></pre>
+<p>Filters the right row, with zero extra requests.</p>
+</div>
+</div>
+<p><code>onSuccess</code> gets <b>four</b> arguments: <code>(data, variables, context, mutation)</code>. Until today you only ever needed the first. When the reply is empty, the <em>second</em> is the whole payload &mdash; and it is trustworthy for a different reason than the reply is: the server said <code>204</code>, which means <em>the thing you named is now gone</em>. You are not guessing. You are being told, in the status line instead of the body.</p>
+<p class="takeaway">A <code>204</code> is not &ldquo;no information&rdquo;. It is the information, moved into the status code.</p>
+
+<h2>The code &mdash; type it yourself</h2>
+
+<h3>1. <code>web/src/features/tasks/tasks.ts</code> &mdash; append</h3>
+<pre><code>export function useDeleteTask(teamId: number) {
+  const client = useQueryClient();
+
+  return useMutation({
+    // 204 means "done, nothing to send back". There is no row to type and
+    // nothing to return - `.data` on a 204 is "", an empty string, and
+    // api.delete&lt;Task&gt;() would have type-checked that lie without complaint.
+    mutationFn: async (id: number) =&gt; {
+      await api.delete(`/teams/${teamId}/tasks/${id}`);
+    },
+
+    // The id comes from what we SENT, not from what came back. That is the
+    // only difference between this mutation and the other two - and it is
+    // safe precisely because the server answered 204 rather than 404.
+    onSuccess: (_nothing, id) =&gt;
+      client.setQueryData&lt;Task[]&gt;(tasksKey(teamId), (tasks) =&gt;
+        tasks?.filter((t) =&gt; t.id !== id),
+      ),
+  });
+}</code></pre>
+<p>Note the <code>mutationFn</code> body is a <b>block</b>, not an arrow expression. That is deliberate: an expression body would return the axios response, and then something downstream would try to read it. Returning <code>void</code> makes <code>_nothing</code> honest.</p>
+
+<h3>2. <code>web/src/features/tasks/tasks-panel.tsx</code></h3>
+<p>Three edits. New imports, a <code>can</code> prop, a button in the row, an error line at the bottom.</p>
+<pre><code>import { useCreateTask, <b>useDeleteTask</b>, useSetTaskDone, useTasks } from "@/features/tasks/tasks";
+<b>import type { Action } from "@/features/teams/teams";
+import { Trash2 } from "lucide-react";</b>
+
+export function TasksPanel({ teamId<b>, can</b> }: { teamId: number<b>; can: Action[]</b> }) {
+  const { data: tasks, isPending, error } = useTasks(teamId);
+  const setDone = useSetTaskDone(teamId);
+  <b>const remove = useDeleteTask(teamId);</b></code></pre>
+<p>Inside the <code>&lt;li&gt;</code>, after the <code>&lt;span&gt;</code> holding the title:</p>
+<pre><code>{/* Drawn from the server's answer, same rule as lesson 23: a
+    Viewer's `can` holds only task:read, so no button. Deleting
+    this line does not open anything - the gate still says 403. */}
+{can.includes("task:delete") &amp;&amp; (
+  &lt;Button
+    size="icon-sm"
+    variant="destructive"
+    className="ml-auto"
+    // The row is the label. "Delete" alone tells a screen reader
+    // nothing about WHICH task is about to disappear.
+    aria-label={`Delete ${task.title}`}
+    // Only this row waits. variables is the id in flight.
+    disabled={remove.isPending &amp;&amp; remove.variables === task.id}
+    onClick={() =&gt; remove.mutate(task.id)}
+  &gt;
+    &lt;Trash2 /&gt;
+  &lt;/Button&gt;
+)}</code></pre>
+<p>And below the <code>setDone</code> error line, its twin:</p>
+<pre><code>{/* A 404 here means somebody else deleted it first. The row is already
+    gone from the cache on success, so this is the only way you hear. */}
+{remove.error !== null &amp;&amp; (
+  &lt;p className="text-destructive text-sm"&gt;
+    {errorMessage(remove.error, "Could not delete that.")}
+  &lt;/p&gt;
+)}</code></pre>
+
+<h3>3. <code>web/src/features/teams/teams-card.tsx</code> &mdash; two lines</h3>
+<pre><code>const BUTTONS: readonly [Action, string][] = [
+  ["task:create", "New task"],
+<b>- ["task:delete", "Delete task"],</b>   &lt;- delete this line: the real button exists now
+  ["member:invite", "Invite member"],
+  ["team:delete", "Delete team"],
+];
+
+{open ? &lt;TasksPanel teamId={team.id} <b>can={team.can}</b> /&gt; : null}</code></pre>
+<p>That first change is the small satisfying one. <a href="./0023-the-button-you-can-still-press.html">Lesson 23</a> drew a permanently <code>disabled</code> &ldquo;Delete task&rdquo; button to show what <code>can</code> was for. It was a placeholder for today. The <code>can</code> check did not move &mdash; it moved <em>closer to the thing it guards</em>, from a decorative row to the actual row being deleted.</p>
+
+<h2>What the page does not do, on purpose</h2>
+<table>
+<tr><th>Missing</th><th>Why that is the right call today</th></tr>
+<tr><td>No &ldquo;are you sure?&rdquo;</td><td>A confirm dialog is a speed bump, not a safety feature &mdash; people learn to click through it. <b>Undo</b> is the real answer, and undo needs a soft delete (a <code>deletedAt</code> column), which is a server change and a different lesson.</td></tr>
+<tr><td>No optimistic removal</td><td>The row disappears when the server says it did. Same reasoning as <a href="./0025-send-the-value-not-the-verb.html">lesson 25</a>: the cheapest rollback is having nothing to roll back. Optimistic delete needs <code>onMutate</code> + a snapshot + <code>onError</code> restore, and the payoff is ~80ms.</td></tr>
+<tr><td>The second click still 404s</td><td><code>disabled</code> closes the window for <em>one</em> tab. Two tabs, or a retry after a dropped reply, and you get &ldquo;not found&rdquo; for a delete that worked. Honest, and unavoidable without an idempotency key.</td></tr>
+<tr><td>Still no front-end test</td><td>Third lesson running that this is open. It is now the loudest gap in the workspace &mdash; <code>tsc</code> and clicking are not a suite.</td></tr>
+</table>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="1">
+<p class="q">Why not filter using the id from the reply?</p>
+<button>Because the reply arrives too late</button>
+<button>Because there is no reply body</button>
+<p class="why" hidden>A <code>204</code> is zero bytes &mdash; measured above, no <code>content-type</code>, no <code>content-length</code>. axios hands you <code>""</code>, so <code>task.id</code> is <code>undefined</code>, so <code>t.id !== undefined</code> is true for every row and the filter removes nothing. The row stays on screen while the server has already deleted it, which is the exact drift <code>setQueryData</code> was supposed to prevent. The id you sent is the only id in the building.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Your <code>DELETE</code> answered <code>204</code> then <code>404</code>. Is it idempotent?</p>
+<button>Yes, the world is the same</button>
+<button>No, the answers differ</button>
+<p class="why" hidden>Idempotent is a promise about <em>state</em>, not about the response. After one delete the task is gone; after two it is still gone, and nothing else changed. That is the whole definition. The <code>404</code> is the server truthfully answering a question about a row that no longer exists &mdash; it is not a second effect. This is why a network retry on <code>DELETE</code> is safe and a retry on <code>POST</code> is not, even though the delete is the one that <em>looks</em> like it failed.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">A Viewer edits the JS in devtools and makes the bin icon appear. What happens?</p>
+<button>The task is deleted, the UI lied</button>
+<button>The server answers 403 forbidden</button>
+<p class="why" hidden>Measured above: <code>403 {"error":"forbidden"}</code>, and the audit table recorded the refusal. <code>can.includes("task:delete")</code> decides whether a button is <em>drawn</em>; <code>requirePermission("task:delete")</code> decides whether anything <em>happens</em>. Same rule as <a href="./0023-the-button-you-can-still-press.html">lesson 23</a>, now with the button that actually does something. A hint is not a gate.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li>Type the three edits. Then <code>cd web &amp;&amp; npm run build</code> &mdash; that runs <code>tsc -b</code>. <b>Expect a clean build</b>; there is no test script here, which is itself the point of the last row in the gaps table.</li>
+<li><strong>Watch the network tab.</strong> Open the app, show a team&rsquo;s tasks, delete one. You should see <b>exactly one request</b> &mdash; the <code>DELETE</code>, status <code>204</code>, response tab empty &mdash; and <b>no</b> follow-up <code>GET /tasks</code>. If you see two requests, you invalidated instead of filtering.</li>
+<li><strong>Prove the trap.</strong> Change <code>mutationFn</code> to <code>async (id) =&gt; (await api.delete&lt;Task&gt;(url)).data</code> and <code>onSuccess</code> to use <code>task.id</code>. Build passes. Now delete a task: the row <b>stays</b>. Reload and it is gone. Put it back.</li>
+<li><strong>Prove idempotency.</strong> In one terminal: <code>curl -i -X DELETE localhost:3000/teams/&lt;id&gt;/tasks/&lt;taskId&gt; -H "origin: http://localhost:5173" -H "sec-fetch-site: same-site" -b "sid=&lt;your cookie&gt;"</code>. Run it twice. <b>Expect <code>204</code> then <code>404</code></b>, and check the row count in Postgres did not change between them.</li>
+<li><strong>Prove the gate.</strong> Log in as a Viewer. No bin icon. Then in devtools, edit <code>can.includes(&hellip;)</code> to <code>true</code> in the built bundle, or temporarily hardcode it and rebuild. Click. <b>Expect <code>403</code></b>, then <code>cd server &amp;&amp; npm run log</code> and find the row.</li>
+<li><strong>The trim fix, still open from lesson 26.</strong> <code>title: z.string().min(1)</code> accepts <code>"   "</code>. Make it <code>.trim().min(1)</code>, and note it fixes <code>PATCH</code> too because <code>UpdateTask</code> reuses <code>CreateTask.shape.title</code>. Add a test. <b>Expect 142 passing.</b></li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>Three pictures. What each of your three writes does when you send it twice, where the id in <code>filter</code> actually comes from, and what a <code>204</code> looks like on the wire.</p>
+
+<h2>1. Send it twice</h2>
+<p>All three measured against your real API, real Postgres, one fresh team.</p>
+<div class="three">
+<div class="good"><h4>PATCH {done:true}</h4>
+1st &rarr; <span class="ok200">200</span> {id:399,done:<b>true</b>}<br>
+2nd &rarr; <span class="ok200">200</span> {id:399,done:<b>true</b>}<br>
+<br>
+rows after: <b>1</b>, done<br>
+answers: <span class="kept">identical</span><br>
+<span class="file">lesson 25</span>
+<p class="end">Safe. And it looks safe.</p></div>
+
+<div class="bad"><h4>POST {title}</h4>
+1st &rarr; <span class="ok200">201</span> {id:<b>399</b>,&hellip;}<br>
+2nd &rarr; <span class="ok200">201</span> {id:<b>400</b>,&hellip;}<br>
+<br>
+rows after: <span class="gone">2</span><br>
+answers: <span class="kept">both fine</span><br>
+<span class="file">lesson 26</span>
+<p class="end">Unsafe. And it looks fine.</p></div>
+
+<div class="good"><h4>DELETE /:id</h4>
+1st &rarr; <span class="ok200">204</span> <span class="byte">(no body)</span><br>
+2nd &rarr; <span class="gone">404</span> {"error":"not found"}<br>
+<br>
+rows after: <b>0</b><br>
+answers: <span class="gone">different</span><br>
+<span class="file">today</span>
+<p class="end">Safe. And it looks broken.</p></div>
+</div>
+<p>Read the bottom line of all three. <b>The state column and the answer column disagree twice</b> &mdash; and in opposite directions. <code>POST</code> answers <code>201</code> twice and quietly makes two rows. <code>DELETE</code> answers <code>404</code> and quietly did exactly the right thing.</p>
+<p class="rule"><b>Idempotent is a promise about the world, not about the reply.</b> Judge a retry by the row count, never by the status code.</p>
+
+<h2>2. Two ids, one of which is <code>""</code></h2>
+<div class="two">
+<div class="bad"><h4>&#x2718; from the reply</h4>
+<pre><code>api.delete&lt;<b>Task</b>&gt;(url)
+  &rarr; response.data = <span class="byte">""</span>
+  &rarr; typeof <b>string</b>
+
+onSuccess(<b>task</b>)
+  task.id     &rarr; undefined
+  t.id !== undefined
+              &rarr; <b>true, every row</b>
+  filter keeps <b>all</b> of them</code></pre>
+<span class="file">tsc: clean. runtime: wrong.</span>
+<p class="end">Row stays. Server deleted it.</p></div>
+
+<div class="good"><h4>&#x2713; from what you sent</h4>
+<pre><code>api.delete(url)
+  &rarr; nothing returned
+  &rarr; mutationFn is void
+
+onSuccess(_nothing, <b>id</b>)
+  id          &rarr; 399
+  t.id !== 399
+              &rarr; false for <b>one</b> row
+  filter drops <b>that</b> one</code></pre>
+<span class="file">0 extra requests</span>
+<p class="end">Row goes. Once.</p></div>
+</div>
+<p>The <code>&lt;Task&gt;</code> in the left column is not a check &mdash; it is a claim <em>you</em> made, and TypeScript took your word for it. The reply has no type because it has no body. The id you are allowed to trust is the one you typed into the URL, and the thing that makes trusting it correct is the <code>204</code>: <em>the thing you named is gone.</em></p>
+
+<h2>3. What a <code>204</code> is on the wire</h2>
+<div class="wire">
+<b>200</b> with a row &nbsp;&nbsp;&mdash;&nbsp; the PATCH<br>
+&nbsp;&nbsp;content-type: application/json; charset=utf-8<br>
+&nbsp;&nbsp;content-length: 41<br>
+&nbsp;&nbsp;<span class="byte">{"id":399,"title":"probe 28","done":true}</span><br>
+<br>
+<b>204</b> with nothing &nbsp;&mdash;&nbsp; the DELETE<br>
+&nbsp;&nbsp;content-type: <span class="gone">(none)</span><br>
+&nbsp;&nbsp;content-length: <span class="gone">(none)</span><br>
+&nbsp;&nbsp;<span class="byte">&nbsp;</span> <span class="file">0 bytes &mdash; a 204 must not carry a body</span>
+</div>
+<p>So there is no header saying &ldquo;JSON&rdquo;, no length, and nothing to parse. axios does not error &mdash; it fills <code>data</code> with the empty string it received, which is the most dangerous possible value: falsy, indexable, and not <code>undefined</code>.</p>
+
+<h2>Which move, after which reply</h2>
+<div class="scroll">
+<table class="w">
+<tr><th>The server said</th><th>You hold</th><th>Cache move</th><th>Extra requests</th></tr>
+<tr><td><span class="ok200">200</span> + the changed row</td><td>the new state</td><td><code>map</code> it over the old</td><td class="kept">0</td></tr>
+<tr><td><span class="ok200">201</span> + a new row, list is sort=id asc</td><td>the new state and its place</td><td><code>append</code></td><td class="kept">0</td></tr>
+<tr><td><span class="ok200">201</span> + a new row, list is sorted otherwise</td><td>the state, <b>not</b> the place</td><td><code>invalidateQueries</code></td><td class="kept">1, and honest</td></tr>
+<tr><td><span class="ok200">204</span> + nothing</td><td>the <b>id you sent</b></td><td><code>filter</code></td><td class="kept">0</td></tr>
+<tr><td><span class="gone">403</span> / <span class="gone">404</span> / <span class="gone">400</span></td><td>a sentence</td><td>none &mdash; write nothing</td><td class="kept">0</td></tr>
+</table>
+</div>
+<p class="rule"><b>Every write either hands you the new state, or hands you the status line and expects you to have kept your own request.</b> Those are the only two kinds. Invalidate only when it hands you neither.</p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Methods/DELETE">MDN &mdash; HTTP <code>DELETE</code></a>. Short. Read the &ldquo;Idempotent&rdquo; row in the summary box, then the note that a successful response &ldquo;should be&rdquo; <code>204</code> if no body, <code>200</code> if there is one. Both are legal; yours chose <code>204</code>, and that choice is what this lesson is about.</p>
+<p><b>Also:</b> <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/204">MDN &mdash; <code>204 No Content</code></a>. One screen. Note it says a <code>204</code> <em>must not</em> carry a body, which is why there is nothing to type.</p>
+<p><b>Reference card:</b> <a href="../reference/react-query-rules.html">React Query, the rules so far</a> &mdash; updated today with the delete row and the <code>variables</code> rule.</p>
+<p><b>Ask the community:</b> <a href="https://github.com/TanStack/query/discussions">TanStack Query discussions</a> &mdash; search for &ldquo;optimistic delete&rdquo;. Watch how much code it takes, and decide for yourself whether 80ms is worth it. Then ask when they would reach for a soft delete instead.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0027-the-default-that-hides-the-typo.html">&larr; Back</a>
+<a href="../reference/the-whole-arc.html">The whole arc, one page &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+</body>
+</html>

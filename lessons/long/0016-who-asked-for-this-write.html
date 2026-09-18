@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 16 &mdash; Who Asked For This Write</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 16 &middot; Week 7&ndash;8 &middot; API security &mdash; sixth one</p>
+<h1>Who asked for this write</h1>
+<p class="lede">CORS decides who may <em>read</em> your reply. An attacker&rsquo;s page does not want to read it. It wants your browser to send one <code>DELETE</code>, with your cookie, and it does not care what comes back. Nothing in your API decides that yet.</p>
+
+<h2>Your homework, marked</h2>
+<p>You owed me the walk-through from <a href="../0014-one-origin-no-question.html">lesson 14</a>, and it was three questions in one. Here is what came back.</p>
+<div class="scroll">
+<table>
+<tr><th>The part</th><th>You said</th><th>Mark</th></tr>
+<tr><td>What does the browser send?</td><td><code>OPTIONS /api/teams/1</code>, with <code>Origin: https://evil.example</code> and <code>Access-Control-Request-Method: DELETE</code></td><td class="yes"><strong>Right.</strong> <code>DELETE</code> is not a simple request, so the preflight goes first. Your header lines are correct, in order.</td></tr>
+<tr><td>What does your server do?</td><td>&mdash;</td><td>Not said.</td></tr>
+<tr><td>What stops it? Name the one thing.</td><td>&mdash;</td><td>Not said &mdash; and this is the whole lesson.</td></tr>
+<tr><td>Does the API&rsquo;s CSP cover your React page?</td><td>&ldquo;No. CSP binds to a response, and is enforced against the execution context created from that response &mdash; a document or a worker.&rdquo;</td><td class="yes"><strong>Fully right</strong>, including the reason. A JSON body fetched as a subresource never becomes a context, so there is nothing to enforce against. That is the precise answer.</td></tr>
+</table>
+</div>
+<div class="aside">
+<p><strong>Second time now.</strong> In lesson 13 you answered the third of the question that had a knob in it and skipped the rest. Same shape here: <em>&ldquo;what does the browser send&rdquo;</em> has a concrete answer you can type, and you typed it. <em>&ldquo;What stops it&rdquo;</em> has no knob, and you skipped it. I am not scolding &mdash; I am telling you where your attention goes, so you can aim it. The knobless part is usually the part that decides your architecture.</p>
+</div>
+
+<h2>The two missing thirds</h2>
+<p><strong>What your server does: nothing.</strong> Not &ldquo;refuses&rdquo;. <em>Nothing.</em> The preflight arrives, <code>@fastify/cors</code> sees <code>https://evil.example</code> is not in <code>ALLOWED_ORIGINS</code>, and replies <strong>200 with no <code>Access-Control-Allow-Origin</code> header</strong>. That is the test you already wrote in <code>src/routes/cors.test.ts</code> &mdash; the one that asserts a 200 for a denied origin.</p>
+<p><strong>What stops it: the browser.</strong> The one thing. The preflight came back without permission, so the browser never sends the real <code>DELETE</code>. Your server never sees a <code>DELETE</code> at all. It was not defended &mdash; it was never attacked.</p>
+<p>Now change one word in the attacker&rsquo;s page. Not <code>fetch</code> &mdash; a form:</p>
+<pre><code>&lt;form method="POST" action="https://app.example/api/teams/1/tasks"&gt;
+  &lt;input name="title" value="pwned"&gt;
+&lt;/form&gt;
+&lt;script&gt;document.forms[0].submit()&lt;/script&gt;</code></pre>
+<p>An HTML form has been able to POST across sites since 1995, so it needs <strong>no preflight</strong>. Every defence you named just evaporated. That is CSRF: <strong>cross-site request forgery</strong> &mdash; another site&rsquo;s page making your browser send a write, using your cookie, without ever reading the reply.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>CORS protects <em>reading</em>. CSRF does not read. Different problem, different defence.</li>
+<li><code>SameSite=Lax</code> on your cookie already blocks the form POST. It does <strong>not</strong> block a state-changing <code>GET</code>.</li>
+<li>New defence: <strong><code>Sec-Fetch-Site</code></strong>. The browser writes it, and a page is <em>forbidden</em> to set it.</li>
+<li>Nine lines in <code>src/auth/csrf.ts</code>, one <code>onRequest</code> hook. No token, no store, no second cookie. <strong>No new dependency.</strong></li>
+<li><code>npm test</code> = 93. Eleven new, split decision (<code>src/auth/csrf.test.ts</code>) and enforcement (<code>src/routes/csrf.test.ts</code>).</li>
+</ul>
+</div>
+
+<h2>Count what stops each shape</h2>
+<p>Four things an attacker&rsquo;s page can do to your write route. Same counting move as lessons <a href="../0009-the-third-argument.html">9</a>, <a href="../0010-a-task-belongs-to-a-team.html">10</a> and <a href="../0011-five-tries-then-wait.html">11</a> &mdash; do not argue about whether you are safe, count the rows.</p>
+<div class="scroll">
+<table>
+<tr><th>The attacker&rsquo;s page does</th><th>Preflight?</th><th>Cookie sent?</th><th>What stops it, before today</th></tr>
+<tr><td><code>fetch(&hellip;, { method: "DELETE", credentials: "include" })</code></td><td>Yes</td><td>No &mdash; a preflight carries no cookie</td><td class="yes">The <strong>browser</strong>. CORS preflight fails, the real request is never sent.</td></tr>
+<tr><td><code>&lt;form method="POST"&gt;</code>, auto-submitted</td><td>No</td><td>No &mdash; <code>SameSite=Lax</code> withholds it</td><td class="yes">Your <strong>cookie flag</strong>, set in lesson 6. Not CORS.</td></tr>
+<tr><td>Same form, if the cookie were <code>SameSite=None</code></td><td>No</td><td>Yes</td><td>Fastify: <strong>415</strong>, no form parser installed. An accident, not a decision.</td></tr>
+<tr><td><code>&lt;a href&gt;</code> the victim clicks, to a <code>GET</code> that writes</td><td>No</td><td><strong>Yes</strong> &mdash; Lax allows top-level <code>GET</code></td><td><strong>Nothing.</strong> Only the fact that you have no such route.</td></tr>
+</table>
+</div>
+<p>Three of the four are held by something you did not choose for this purpose. Row four is held by nothing at all. <a href="https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html">OWASP&rsquo;s rule</a> is blunt about it: <em>&ldquo;Do not use GET requests for state changing operations.&rdquo;</em> You obey it today by luck. That is a rule living in your head, not in your code.</p>
+
+<h2>Why <code>SameSite=Lax</code> is not the answer on its own</h2>
+<p>Read your own cookie, in <code>src/auth/session.ts</code>:</p>
+<pre><code>"SameSite=Lax", // ! not sent from another site's form -&gt; blocks basic CSRF</code></pre>
+<p>That comment is true. <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie">Lax sends the cookie cross-site only for a top-level navigation using a safe method</a> &mdash; <code>GET</code>, <code>HEAD</code>, <code>OPTIONS</code>. Not <code>fetch</code>, not a subresource, not <code>POST</code>.</p>
+<p>But OWASP lists <code>SameSite</code> as a <strong>defence-in-depth layer</strong>, not a primary defence, and it names the gaps. Two of them are yours to worry about:</p>
+<ul>
+<li><strong>Lax only blocks unsafe methods.</strong> Row four of that table.</li>
+<li><strong>When Lax is a browser <em>default</em> rather than something you wrote, it is looser:</strong> the cookie also rides on a cross-site <code>POST</code> if it was set less than two minutes ago. You wrote <code>SameSite=Lax</code> explicitly, so this one does not bite you &mdash; but it is the reason &ldquo;the default is Lax now, so CSRF is solved&rdquo; is wrong.</li>
+</ul>
+<p>And the thing that should actually worry you: <code>SameSite=Lax</code> is <em>one word in one string</em>. The day somebody needs a mobile app or a third-party embed and changes it to <code>None</code>, your only CSRF defence for writes leaves with it, silently, and no test fails.</p>
+
+<h2>The header the page cannot forge</h2>
+<p>Since March 2023, <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Sec-Fetch-Site">every browser sends <code>Sec-Fetch-Site</code></a> on every request. Four values, and they answer exactly the question you need:</p>
+<div class="scroll">
+<table>
+<tr><th>Value</th><th>Means</th><th>For your API</th></tr>
+<tr><td><code>same-origin</code></td><td>Same scheme, host <em>and</em> port as the target</td><td class="yes">Our own page. Allow the write.</td></tr>
+<tr><td><code>same-site</code></td><td>Same site, so a different port or subdomain</td><td>Maybe. Your dev front end on <code>:5173</code>, or a sibling subdomain you do not control.</td></tr>
+<tr><td><code>cross-site</code></td><td>A different site entirely</td><td>Refuse the write.</td></tr>
+<tr><td><code>none</code></td><td>The <em>user</em> started it &mdash; address bar, bookmark</td><td>You cannot POST from an address bar. Refuse.</td></tr>
+</table>
+</div>
+<p>Here is the part that makes it a defence and not a suggestion. The <code>Sec-</code> prefix makes it a <strong>forbidden header name</strong>. Page JavaScript cannot set it, cannot change it, cannot delete it. If an attacker&rsquo;s <code>fetch</code> tries, the browser silently drops their value and writes the true one. Compare that to <code>Origin</code>, which is also written by the browser but is simply <em>absent</em> on plenty of legitimate requests &mdash; absence is what makes <code>Origin</code> alone awkward.</p>
+<p>This is the same shape as <a href="../0013-same-site-is-not-same-origin.html">lesson 13</a>&rsquo;s rule, inverted. CORS is <em>advice</em> to a browser, so it stops nobody with curl. <code>Sec-Fetch-Site</code> is a <em>report</em> from a browser &mdash; and since CSRF <strong>requires</strong> a browser holding a victim&rsquo;s cookie, a report from the only party that can carry out the attack is exactly the right witness.</p>
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  A["A write arrives:<br/>POST / PATCH / DELETE"] --> B{"Sec-Fetch-Site<br/>= same-origin?"}
+  B -- yes --> OK["Allow. Our own page."]
+  B -- no --> C{"Origin header<br/>in ALLOWED_ORIGINS?"}
+  C -- yes --> OK2["Allow. Our dev front end<br/>on another port."]
+  C -- no --> D{"Was there any<br/>Sec-Fetch-Site at all?"}
+  D -- yes --> NO["403. A browser spoke,<br/>and it was not our page."]
+  D -- no --> E["Allow. Not a browser:<br/>curl, Postman, a cron job.<br/>No victim cookie exists."]
+  style OK fill:#d9ecdd,stroke:#2f6b3a,color:#14301b
+  style OK2 fill:#d9ecdd,stroke:#2f6b3a,color:#14301b
+  style NO fill:#f8d7d5,stroke:#93231a,color:#3a1512
+</pre>
+<figcaption>Four branches, and the last one is the only judgement call in the lesson. Read it top to bottom before you read the code &mdash; the code is this picture.</figcaption>
+</figure>
+
+<h2>The code</h2>
+<p><code>server/src/auth/csrf.ts</code>, new file, the whole decision:</p>
+<pre><code>const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+export function allowWrite(
+  method: string,
+  site: string | undefined,     // Sec-Fetch-Site
+  origin: string | undefined,   // Origin
+  allowedOrigins: string[],
+): boolean {
+  if (SAFE_METHODS.has(method)) return true;
+  if (site === "same-origin") return true;
+  if (origin) return allowedOrigins.includes(origin);
+  if (site) return false;
+  return true;
+}</code></pre>
+<p>Four decisions, one line each. Note what it is <strong>not</strong>: no token, no token endpoint, no second cookie, no server-side state, no front-end change. Nothing to keep in sync, nothing to expire, nothing to move to Redis in week 11&ndash;12.</p>
+<p>Two lines that look small and are not:</p>
+<ul>
+<li><code>if (origin) return allowedOrigins.includes(origin)</code> &mdash; this is why <code>same-site</code> alone is not enough. <code>blog.app.example</code> is <em>same-site</em> with <code>app.example</code>. Whoever runs the blog is not you. Your existing allow-list already knows the difference, so reuse it rather than trusting the word &ldquo;site&rdquo;. That is <a href="../0013-same-site-is-not-same-origin.html">lesson 13</a>&rsquo;s pair of words earning its keep a second time.</li>
+<li><code>if (SAFE_METHODS.has(method)) return true</code> &mdash; this line is a promise that your <code>GET</code>s do not write. Row four of the table lives here. If you ever add a <code>GET</code> that mutates, this line is the bug, and the comment in the file says so.</li>
+</ul>
+<p>The hook, in <code>src/app.ts</code>, as step 4 &mdash; after the rate limiter, <strong>before</strong> anything that touches the database:</p>
+<pre><code>app.addHook("onRequest", async (request, reply) =&gt; {
+  const site = request.headers["sec-fetch-site"];
+  if (!allowWrite(request.method, typeof site === "string" ? site : undefined,
+                  request.headers.origin, ALLOWED_ORIGINS)) {
+    return reply.code(403).send({ error: "cross-site write refused" });
+  }
+});</code></pre>
+<p>Fourth use of the frame you already own: <strong>the cheap check goes in front of the expensive work.</strong> Two string comparisons, then a refusal &mdash; a forged write never pays for <code>requireAuth</code>&rsquo;s session query. And it is <strong>one place that says no</strong>, per <a href="../0007-one-place-that-says-no.html">lesson 7</a>: an app-level <code>onRequest</code> hook, not a line in each route, because there is no route this rule should skip.</p>
+<p><strong>403, not 401.</strong> Sixth use of <em>one reply for two different noes</em>, and this time the point is the opposite &mdash; here the two noes must be <em>different</em>. A 401 means &ldquo;log in and try again&rdquo;, and the victim already has. The cookie was perfect. The caller was not.</p>
+
+<h2>The library you are not installing</h2>
+<p><code>@fastify/csrf-protection</code> exists, it is official, and it is well written. You are not taking it. Not on weight, and not because its defaults are wrong. On something new:</p>
+<div class="scroll">
+<table>
+<tr><th>Lesson</th><th>Library</th><th>Rule</th></tr>
+<tr><td><a href="../0011-five-tries-then-wait.html">11</a></td><td><code>@fastify/rate-limit</code>, rejected</td><td>Reject it when its <strong>default is the wrong decision</strong>.</td></tr>
+<tr><td><a href="../0012-the-floor-under-everything.html">12</a>, <a href="../0013-same-site-is-not-same-origin.html">13</a></td><td><code>rate-limit</code>, <code>cors</code>, taken</td><td>Take it when the problem has <strong>no decisions left in it</strong>.</td></tr>
+<tr><td><a href="../0015-headers-for-json-not-pages.html">15</a></td><td><code>@fastify/helmet</code>, turned down</td><td><strong>Take it, then switch off what it assumed</strong> about your app.</td></tr>
+<tr><td><strong>16</strong></td><td><code>@fastify/csrf-protection</code>, rejected</td><td><strong>A library encodes the browser of the year it was written.</strong> Check whether the platform grew a cheaper answer since.</td></tr>
+</table>
+</div>
+<p>The token pattern &mdash; generate a secret, put half in a cookie, make the front end echo the other half in a header, compare them &mdash; exists because for twenty years the server had <em>no trustworthy way to ask who sent this</em>. In 2023 the platform grew one. The token plumbing is a workaround for a missing header, and the header is no longer missing. OWASP itself now calls <code>Sec-Fetch-Site</code> <em>&ldquo;the primary signal for CSRF protection&rdquo;</em>.</p>
+<p>This is the fourth dependency rule, and it is the one that will keep paying: before you install anything, ask what year its problem was solved in.</p>
+
+<h2>Where I disagree with OWASP, and why I am telling you</h2>
+<p>Look at the last line of <code>allowWrite</code>. Both headers absent, and we <strong>allow</strong> the write. OWASP says the opposite: <em>&ldquo;If neither of these headers are present, you can either accept or block the request. We recommend blocking.&rdquo;</em></p>
+<p>My reasoning, so you can disagree with it:</p>
+<ul>
+<li>A CSRF attack needs a <strong>browser</strong> carrying a <strong>victim&rsquo;s cookie</strong>. Nothing else can do it.</li>
+<li>Every browser since March 2023 sends <code>Sec-Fetch-Site</code>. Every browser since roughly 2016 sends <code>Origin</code> on a <code>POST</code>. A write with <em>neither</em> is not a browser.</li>
+<li>So blocking that case buys no security, and costs you every <code>curl</code>, Postman call and cron job that writes.</li>
+</ul>
+<p>The honest cost: it is one assumption about your clients, and assumptions rot. So it is written down as a <code>ponytail:</code> comment with the exact one-line fix &mdash; change that <code>return true</code> to <code>return false</code>, and every curl write then needs <code>-H "Origin: http://localhost:5173"</code>. There is a test asserting the current choice, so the day you flip it, one named test tells you what you decided.</p>
+<p>Same habit as <a href="../0011-five-tries-then-wait.html">lesson 11</a>: <strong>a written-down shortcut is a decision, an unwritten one is a future bug.</strong></p>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="0">
+<p class="q">You add <code>GET /teams/:id/export?purge=true</code>, which deletes the rows after exporting. A victim clicks a link to it on <code>evil.example</code>. Which of your defences stops it?</p>
+<button>Nothing stops it at all</button>
+<button>The CSRF hook stops it</button>
+<p class="why" hidden><strong>Nothing.</strong> <code>GET</code> is in <code>SAFE_METHODS</code>, so the hook waves it through. <code>SameSite=Lax</code> sends the cookie on a cross-site top-level <code>GET</code> navigation, so <code>requireAuth</code> is happy. CORS is irrelevant &mdash; nobody needs to read the reply. This is why &ldquo;never write in a GET&rdquo; is a real rule and not style advice.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">An attacker&rsquo;s page calls <code>fetch(url, { method: "POST", headers: { "Sec-Fetch-Site": "same-origin" } })</code>. What reaches your server?</p>
+<button>The header arrives as sent</button>
+<button>The browser drops that value</button>
+<p class="why" hidden><strong>Dropped.</strong> <code>Sec-</code> makes it a forbidden header name, so the browser refuses the page&rsquo;s value and writes the true one, <code>cross-site</code>. That single rule is the entire reason this defence works and a plain <code>X-Requested-With</code> header does not.</p>
+</div>
+
+<h2>What this does NOT fix</h2>
+<div class="scroll">
+<table>
+<tr><th>Hole</th><th>Status</th><th>When</th></tr>
+<tr><td>A <code>GET</code> route that changes data</td><td>Not covered, by design. <code>SAFE_METHODS</code> trusts you.</td><td>Your job forever. Grep for it at every code review.</td></tr>
+<tr><td>A pre-2023 browser with no <code>Sec-Fetch-Site</code></td><td>Falls back to <code>Origin</code>, which browsers do send on <code>POST</code>. Weaker, still real.</td><td>Fine. This is the fallback OWASP asks for.</td></tr>
+<tr><td>Client-side CSRF &mdash; your own page tricked into calling its own API</td><td>Untouched. <code>Sec-Fetch-Site</code> says <code>same-origin</code>, correctly. This is an XSS problem wearing a CSRF coat.</td><td>Week 9&ndash;10, with the front-end CSP.</td></tr>
+<tr><td>The cookie has no <code>Secure</code> flag</td><td>Still open since lesson 6. Marked <code>ponytail:</code> in <code>session.ts</code>.</td><td>Week 11&ndash;12, with HTTPS.</td></tr>
+<tr><td>Somebody changes <code>SameSite=Lax</code> to <code>None</code></td><td>Now survivable &mdash; the hook does not read the cookie. Before today it was fatal.</td><td>Done. That is the actual win.</td></tr>
+</table>
+</div>
+<p>Fifth security lesson with this table, and it is doing its job again: the win is not &ldquo;CSRF is fixed&rdquo;. The win is that your CSRF defence no longer depends on one word in one cookie string that somebody will change for an unrelated reason.</p>
+
+<h2>Do this now</h2>
+<pre><code>cd ~/learning/full-stack-learning/server
+npm test        # 93, was 82</code></pre>
+<p>Then see it refuse a real forged write. Start the server, then in another terminal:</p>
+<pre><code># A browser would send this. Refused.
+curl -si -X POST localhost:3000/auth/logout \
+  -H "Sec-Fetch-Site: cross-site" -H "Origin: https://evil.example" | head -1
+# HTTP/1.1 403 Forbidden
+
+# Your own page. Allowed.
+curl -si -X POST localhost:3000/auth/logout \
+  -H "Sec-Fetch-Site: same-origin" | head -1
+# HTTP/1.1 204 No Content</code></pre>
+<p>Then break it on purpose, the way you did in lesson 11. Delete <code>if (site === "same-origin") return true;</code> from <code>src/auth/csrf.ts</code> and run <code>npm test</code>. Two tests should fail and their names should tell you exactly what you removed. Put the line back.</p>
+
+<p>Then the questions:</p>
+<ol>
+<li><strong>The knobless one, on purpose.</strong> Your rate limiter answers <code>429</code> before this hook runs. Your CSRF hook answers <code>403</code> before <code>requireAuth</code> runs. So a forged write from a blocked IP gets a <code>429</code>, and an attacker learns something from that. Name what they learn &mdash; and then say whether the hook order should change. There is no setting to tweak here; the answer is a sentence about what an error code reveals.</li>
+<li><strong>Community.</strong> Ask r/webdev or the Fastify Discord: <em>&ldquo;In 2026, is a CSRF token still worth it if you check <code>Sec-Fetch-Site</code> and fall back to <code>Origin</code>?&rdquo;</em> You will get a real split. The people who say &ldquo;always use tokens&rdquo; usually have a reason involving a client you do not have &mdash; find out which client, because that is the thing that would change your answer.</li>
+</ol>
+
+<div class="takeaway">
+<p><strong>The one sentence.</strong> CORS decides who may read my reply; <code>Sec-Fetch-Site</code> decides who asked for my write &mdash; and a page cannot lie about it, because the browser writes that header, not the page.</p>
+</div>
+
+<div class="aside">
+<p>Something unclear? Ask me &mdash; I am your teacher here, and I will re-teach it another way. The two words to keep straight: <strong>reading is CORS, writing is CSRF.</strong> They are different attacks and they never share a defence.</p>
+</div>
+
+<hr>
+<p class="nav">Back: <a href="../0015-headers-for-json-not-pages.html">Lesson 15 &mdash; Headers for JSON, not pages</a> &middot; Keep for reference: <a href="../../reference/api-security-basics.html#csrf">CSRF decision table</a> &middot; <a href="../../reference/api-security-basics.html">API security basics</a> &middot; The code: <a href="../../server/src/auth/csrf.ts">server/src/auth/csrf.ts</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

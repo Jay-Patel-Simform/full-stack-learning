@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 35 &mdash; Globs and test discovery</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.box { font-family: var(--mono); font-size: 0.72rem; margin: 0.9rem 0;
+    border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+  .box > .cap { background: var(--code-bg); color: var(--muted); font-size: 0.66rem;
+    padding: 0.35rem 0.7rem; border-bottom: 1px solid var(--rule); }
+  .box .body { padding: 0.6rem 0.7rem; overflow-x: auto; }
+  .box .body > div { padding: 0.12rem 0; white-space: nowrap; }
+  .bad { color: var(--bad); font-weight: 600; }
+  .ok { color: var(--ok); font-weight: 600; }
+  .dim { color: var(--muted); }
+  .acc { color: var(--accent); font-weight: 600; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 0.9rem; margin: 1.1rem 0; }
+  .two h4 { font-family: var(--mono); font-size: 0.66rem; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--muted); margin: 0 0 0.2rem; font-weight: 600; }
+  @media (max-width: 34rem) { .two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 35 &middot; Week 11 &middot; Real world</p>
+<h1>Globs and test discovery</h1>
+<p class="lede">You wrote the test I asked for in <a href="./0034-the-log-that-keeps-the-secret.html">lesson 34</a>. It is correct. It is a good test &mdash; it even has the <code>all.length &gt; 0</code> assertion, which is the part most people leave out. Then I ran <code>npm test</code> and got <b>154</b>. Not 155. Your test file is on disk, it passes when I run it by itself, and your test suite has never once executed it. Nothing said so.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>Measured: 22 test files on disk, 21 reached the runner.</strong> The missing one is <code>src/log-redact.test.ts</code> &mdash; yours.</li>
+<li><strong>The shell expands the pattern, not the test runner.</strong> <code>tsx --test src/**/*.test.ts</code> &mdash; by the time <code>tsx</code> starts, the <code>*</code> characters are gone and it has a plain list of 21 file names.</li>
+<li><strong><code>**</code> means &ldquo;any depth&rdquo; in zsh and &ldquo;one level&rdquo; in sh.</strong> Your terminal is zsh. <code>npm run</code> uses sh. <b>Same command string, two different answers: 155 and 154.</b></li>
+<li><strong>Why it worked for 34 lessons:</strong> every test file was one directory deep, so <code>src/*/*.test.ts</code> happened to match them all. Your new file sits at the top of <code>src/</code>, so it fell out.</li>
+<li><strong>The fix is two quote marks.</strong> Quoted, the shell leaves the pattern alone and the runner globs it itself &mdash; with real <code>**</code> support. Node&rsquo;s own docs ask for those quotes.</li>
+<li><strong>The lasting rule: a new test is not trusted until you have watched it fail.</strong> A pass can mean &ldquo;it ran and was fine&rdquo; or &ldquo;it never ran at all&rdquo;, and the two look identical.</li>
+</ul>
+</div>
+
+<h2>Where you actually are</h2>
+<p>Pre-flight, before writing anything. Third clean hand-over in a row:</p>
+<pre><code>server: npm test          <b>154 passing</b>   &lt;- should be 155
+web:    npm test          <b>5 passing</b>
+web:    npx tsc -b        clean</code></pre>
+<p>I read your <code>log-redact.test.ts</code> line by line, not just the count. The sink, the two log calls, the empty-log guard first, then the two leak checks and <code>[Redacted]</code> equal to 2. That is exactly right, including the part lesson 34 warned you about. So the problem was never your test.</p>
+
+<div class="aside"><b>Why this lesson and not the audit log page.</b> I promised the two front-end holes again. Then the pre-flight found that your test suite has a hole of its own, and a suite you cannot trust makes every later lesson weaker &mdash; including the one where a test has to prove a Viewer cannot edit. This is 15 minutes. The audit log page is next, for real.</div>
+
+<h2>First, the measurement</h2>
+<p>Three commands. Run them yourself in exercise 2; here is what they printed on your machine:</p>
+<pre><code>$ find src -name '*.test.ts' | wc -l
+<b>22</b>                                  &lt;- files on disk
+
+$ sh -c 'set -- src/**/*.test.ts; echo $#'
+<b>21</b>                                  &lt;- files npm hands to the runner
+
+$ comm -13 &lt;shell list&gt; &lt;disk list&gt;
+<b>src/log-redact.test.ts</b>              &lt;- the one that is missing</code></pre>
+<p>And the same command in two shells, which is the fact worth remembering:</p>
+<div class="vs">
+<div class="no"><h4>via npm run (sh)</h4><pre><code>$ npm test
+# pass <b>154</b></code></pre></div>
+<div class="yes"><h4>pasted into your terminal (zsh)</h4><pre><code>$ LOG_LEVEL=silent npx tsx \
+    --test src/**/*.test.ts
+# pass <b>155</b></code></pre></div>
+</div>
+<p>Nothing changed except who read the <code>*</code>.</p>
+
+<h2>Who expands the star</h2>
+<div class="word"><b>glob</b> &mdash; a pattern that matches file names. <code>*.ts</code>, <code>src/**/*.test.ts</code>. The word comes from the old Unix program that did it.</div>
+<div class="word"><b>shell expansion</b> &mdash; the shell finds the files that match the pattern and replaces the pattern with their names <em>before</em> starting your program. Your program never sees the pattern.</div>
+<p>So this command:</p>
+<pre><code>tsx --test src/**/*.test.ts</code></pre>
+<p>is not what <code>tsx</code> receives. <code>tsx</code> receives this:</p>
+<pre><code>tsx --test src/audit/audit.test.ts src/auth/can.test.ts src/auth/csrf.test.ts
+    src/auth/session.test.ts ... src/routes/teams.test.ts
+    (21 names, and your file is not one of them)</code></pre>
+<p>There is no pattern left to be wrong about. The runner ran every file it was given, and every one passed. 154, green, honest &mdash; and blind.</p>
+
+<div class="word"><b>globstar</b> &mdash; the name for <code>**</code> meaning &ldquo;any number of directories, including none&rdquo;. zsh has it switched on. <b>sh and bash do not</b>, unless you run <code>shopt -s globstar</code>. Without it, <code>**</code> is treated as a plain <code>*</code> &mdash; one level, no more.</div>
+
+<p>So in sh, your pattern is really <code>src/*/*.test.ts</code>: exactly one directory between <code>src</code> and the file. Count the paths:</p>
+<pre><code>src/routes/tasks.test.ts       one directory   <b>matched</b>
+src/auth/can.test.ts           one directory   <b>matched</b>
+src/log-redact.test.ts         <b>zero</b> directories  <b>missed</b>
+src/a/b/deep.test.ts           two directories  would also be missed</code></pre>
+<p>This is why the bug waited 34 lessons to appear. Every test file you had ever written lived in <code>src/routes/</code>, <code>src/auth/</code> or <code>src/audit/</code>. The pattern was wrong the whole time and the mistake had nothing to hit.</p>
+
+<h2>Why <code>web</code> does not have the bug</h2>
+<p>Look at the two scripts next to each other. They differ by two characters:</p>
+<div class="vs">
+<div class="no"><h4>server/package.json</h4><pre><code>"test": "LOG_LEVEL=silent tsx
+  --test src/**/*.test.ts"</code></pre></div>
+<div class="yes"><h4>web/package.json</h4><pre><code>"test": "node
+  --test \"src/**/*.test.ts\""</code></pre></div>
+</div>
+<p>When the pattern is quoted, the shell does not touch it. The runner gets the pattern itself and does its own matching &mdash; and Node&rsquo;s matcher <em>does</em> support <code>**</code> at any depth. That is why <code>web</code> finds <code>src/features/tasks/edit-pages.test.ts</code>, three levels down, which the sh version could never have matched.</p>
+<p>The Node documentation says this in one sentence, and it is the sentence to remember: <em>the glob patterns should be enclosed in double quotes on the command line to prevent shell expansion.</em> <a href="https://nodejs.org/api/test.html#running-tests-from-the-command-line">Node &mdash; running tests from the command line</a>.</p>
+
+<h2>The fix, and the one you should not pick</h2>
+<div class="vs">
+<div class="yes"><h4>Do this</h4><pre><code>"test": "LOG_LEVEL=silent tsx
+  --test \"src/**/*.test.ts\""</code></pre>
+<p style="font-size:0.82rem">Measured: <b>155 passing</b>. The scope stays named, so a stray <code>.test.ts</code> in <code>prisma/</code> or in generated code is not picked up.</p></div>
+<div class="no"><h4>Not this</h4><pre><code>"test": "LOG_LEVEL=silent tsx
+  --test"</code></pre>
+<p style="font-size:0.82rem">Also <b>155 passing</b> &mdash; with no argument the runner uses its own default patterns. Shorter, and it works today. But it searches the whole project, and <code>src/generated/prisma/</code> is regenerated code you do not control.</p></div>
+</div>
+
+<h2>The rule that outlives this bug</h2>
+<p class="takeaway">A test you have never seen fail is not a test. It is a file.</p>
+<p>You now have three ways a test can report success while proving nothing, and you have met all three in two lessons:</p>
+<div class="scroll">
+<table>
+<tr><th>Failure</th><th>What you see</th><th>Where you met it</th></tr>
+<tr><td>The file never ran</td><td>A count that did not go up</td><td><b>Today</b></td></tr>
+<tr><td>It ran, but had nothing to read</td><td>Green, forever, even when broken</td><td>Lesson 34, the silent log level</td></tr>
+<tr><td>It ran and asserted the obvious</td><td>Green whatever the code does</td><td>Lesson 20, the sort test whose two orders agreed</td></tr>
+</table>
+</div>
+<p>One habit covers all three, and it costs ten seconds: after writing a test, break the code it tests and watch the test go red. Then put the code back. You did this on purpose in lesson 34 exercise 3. Today it stops being an exercise and becomes the routine.</p>
+
+<h2>Check yourself</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Who turned <code>src/**/*.test.ts</code> into a list of file names?</p>
+<button>The runner, when it was started</button>
+<button>The shell, before it was started</button>
+<p class="why" hidden>The shell. It matched the pattern, replaced it with 21 names, and only then ran <code>tsx</code>. The runner had no pattern to interpret and no way to know a file was missing. This is also why quoting fixes it &mdash; a quoted argument is passed through untouched, and then the runner does the matching with its own rules.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why did the bug stay hidden for 34 lessons?</p>
+<button>Every test sat one folder deep</button>
+<button>The runner reused an older result</button>
+<p class="why" hidden>In sh, <code>**</code> is just <code>*</code>, so the pattern meant &ldquo;exactly one directory under src&rdquo;. Every test file you had ever written was in <code>src/routes/</code>, <code>src/auth/</code> or <code>src/audit/</code>, so all 21 matched. The pattern was wrong from lesson 6 and had nothing to lose until you put a file at the top of <code>src/</code>.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Your suite prints 154 passing and 0 failing. What has it proved?</p>
+<button>That 154 of your behaviours still work</button>
+<button>That 154 files it was handed passed</button>
+<p class="why" hidden>Only the second. A runner reports on what it was handed. Files it never received are not failures and not skips &mdash; they are invisible. That is why the number itself is the signal: you expected 155, you got 154, and the gap was the whole bug. Write the expected count down every session, as these lessons do.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><strong>See the two answers with your own eyes.</strong> In <code>server/</code>:
+<pre><code>npm test | grep '^# pass'
+LOG_LEVEL=silent npx tsx --test src/**/*.test.ts | grep '^# pass'</code></pre>
+<b>Expect 154 and then 155.</b> Same pattern, different shell. Do not skip this one &mdash; it is the whole lesson in two lines.</li>
+
+<li><strong>Count both sides.</strong>
+<pre><code>find src -name '*.test.ts' | wc -l
+sh -c 'set -- src/**/*.test.ts; echo $#'</code></pre>
+<b>Expect 22 and 21.</b> Whenever those two numbers disagree, some test file is not being run. This is the check to remember; it works in any project, with any runner.</li>
+
+<li><strong>Fix it. One line, and you type it.</strong> In <code>server/package.json</code>, put double quotes around the pattern (escaped, because it is inside a JSON string):
+<pre><code>"test": "LOG_LEVEL=silent tsx --test <b>\"</b>src/**/*.test.ts<b>\"</b>",</code></pre>
+Then <code>npm test</code>. <b>Expect 155 passing.</b></li>
+
+<li><strong>Prove your test is really in the suite now &mdash; by breaking it.</strong> In <code>src/log-redact.test.ts</code>, change the last line to expect <code>3</code> instead of <code>2</code>:
+<pre><code>assert.equal((all.match(/\[Redacted\]/g) ?? []).length, <b>3</b>);</code></pre>
+Run <code>npm test</code>. <b>Expect 1 failing</b>, and expect the file name <code>log-redact.test.ts</code> in the output. Before today that change was invisible. Put the <code>2</code> back.</li>
+
+<li><strong>Check the other repo, and work out why it is safe.</strong> In <code>web/</code>, run its test command <em>without</em> the quotes:
+<pre><code>node --test src/**/*.test.ts | grep '^# pass'</code></pre>
+It still says 5. Work out why before reading on, then check yourself: in <code>web/src</code> the sh pattern <code>src/*/*.test.ts</code> matches <b>nothing</b>, and a pattern that matches nothing is left alone by the shell &mdash; so Node received the pattern and globbed it correctly. It works, by luck. Add a test one folder deep in <code>web/src</code> some day and that luck ends. The quotes in <code>web/package.json</code> are load-bearing; leave them.</li>
+
+<li><strong>Write the rule down</strong> in <code>server/CLAUDE.md</code>, under the test rules: <em>quote every glob you pass to a tool &mdash; the shell expands it first, and sh treats <code>**</code> as one level. A new test file must move the count.</em></li>
+
+<li><strong>Two answers you still owe me</strong>, no code. (a) The <code>pg_trgm</code> question from <a href="./0033-the-list-is-a-question.html">lesson 33</a> &mdash; last time I am asking. (b) The one from lesson 34: a task is deleted; which of <code>AuditLog</code> and the pino stream should still tell you who did it a year later, and why not the other? I need (b) before the audit log page, because your answer decides what that page reads.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p>One command string. Two shells. Two different test suites.</p>
+
+<h2>1. The pattern is gone before the runner starts</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  S["npm test<br/>&quot;tsx --test src/**/*.test.ts&quot;"] --> SH{"which shell<br/>reads the *?"}
+  SH -- "sh &mdash; ** means ONE level" --> A["expands to 21 names<br/>src/routes/... src/auth/..."]
+  SH -- "zsh &mdash; ** means ANY depth" --> B["expands to 22 names"]
+  A --> R1["tsx receives 21 paths<br/>no pattern left"]
+  B --> R2["tsx receives 22 paths"]
+  R1 --> O1["154 passing"]
+  R2 --> O2["155 passing"]
+</pre>
+<figcaption><code>npm run</code> uses sh. Your terminal is zsh. Nothing in the command changed &mdash; only who read the <code>*</code>.</figcaption>
+</figure>
+
+<h2>2. Quoted, nobody expands it but the runner</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  S["tsx --test &bsol;&quot;src/**/*.test.ts&bsol;&quot;"] --> SH["sh: quoted, leave it alone"]
+  SH --> T["tsx / node receives<br/>the PATTERN itself"]
+  T --> G["node's own glob<br/>** = any depth"]
+  G --> O["155 passing"]
+</pre>
+<figcaption>Node&rsquo;s docs ask for the quotes for exactly this reason. The runner&rsquo;s matcher supports <code>**</code> properly; the shell&rsquo;s does not.</figcaption>
+</figure>
+
+<h2>3. Count the directories, find the missing file</h2>
+<div class="box">
+<div class="cap">sh reads src/**/*.test.ts as src/*/*.test.ts &mdash; exactly one directory</div>
+<div class="body">
+<div><span class="dim">src/</span>routes<span class="dim">/tasks.test.ts</span>        1 dir   <span class="ok">matched</span></div>
+<div><span class="dim">src/</span>auth<span class="dim">/can.test.ts</span>            1 dir   <span class="ok">matched</span></div>
+<div><span class="dim">src/</span>audit<span class="dim">/audit.test.ts</span>        1 dir   <span class="ok">matched</span></div>
+<div><span class="dim">src/</span><span class="bad">log-redact.test.ts</span>          0 dir   <span class="bad">MISSED</span>  &larr; you wrote this</div>
+<div><span class="dim">src/</span>a/b<span class="dim">/deep.test.ts</span>          2 dir   <span class="bad">MISSED</span>  &larr; would also vanish</div>
+</div>
+</div>
+<p class="takeaway">22 files on disk. 21 handed over. 0 warnings.</p>
+
+<h2>4. The shape of a pass</h2>
+<div class="two">
+<div><h4>what green looks like</h4>
+<div class="box"><div class="body">
+<div><span class="ok"># pass 154</span></div>
+<div><span class="ok"># fail 0</span></div>
+<div><span class="dim"># skipped 0</span></div>
+</div></div></div>
+<div><h4>what green means</h4>
+<div class="box"><div class="body">
+<div>154 files <span class="acc">it was given</span> were fine.</div>
+<div>Files it never got are not</div>
+<div>failures. Not skips. They are</div>
+<div><span class="bad">invisible</span>.</div>
+</div></div></div>
+</div>
+<p>A missing file has no row. That is why the <em>expected number</em> is the only thing that catches it: you wanted 155, you read 154.</p>
+
+<h2>5. Three greens that prove nothing</h2>
+<div class="box">
+<div class="cap">the same family, three lessons</div>
+<div class="body">
+<div><span class="bad">never ran</span>       the runner never got the file        <span class="dim">&mdash; lesson 35</span></div>
+<div><span class="bad">nothing to read</span> log level silent, stream empty      <span class="dim">&mdash; lesson 34</span></div>
+<div><span class="bad">nothing asserted</span> both sort orders happened to agree <span class="dim">&mdash; lesson 20</span></div>
+<div>&nbsp;</div>
+<div><span class="ok">one habit</span>       break the code, watch it go red, put it back</div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://nodejs.org/api/test.html#running-tests-from-the-command-line">Node &mdash; Running tests from the command line</a>. Short. Read the paragraph about glob patterns and the list of default patterns underneath it. That list is what you get when you pass no pattern at all.</p>
+<p><b>Then this:</b> <a href="https://www.gnu.org/software/bash/manual/bash.html#The-Shopt-Builtin">Bash manual &mdash; <code>shopt</code>, the <code>globstar</code> entry</a>. Two sentences, and they are the exact wording of today&rsquo;s bug: with <code>globstar</code> off, <code>**</code> is an ordinary <code>*</code>.</p>
+<p><b>Reference card:</b> <a href="../reference/testing.html">Tests in this project</a> &mdash; new today. It collects every testing rule from lessons 6, 10, 34 and 35 in one place, including the parallel-process fixture trap that cost you an afternoon.</p>
+<p><b>Ask the community:</b> <a href="https://github.com/nodejs/help/discussions">nodejs/help Discussions</a>. Search &ldquo;test glob not matching&rdquo;. You will find the same report several times over, which tells you the quoting rule is not obvious to anyone.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0034-the-log-that-keeps-the-secret.html">&larr; Back</a>
+<a href="../reference/testing.html">Testing reference &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

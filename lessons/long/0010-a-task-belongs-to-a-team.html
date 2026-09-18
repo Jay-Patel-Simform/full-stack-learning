@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 10 — A Task Belongs To A Team</title>
+<link rel="stylesheet" href="../../assets/lesson.css">
+<link rel="stylesheet" href="../../assets/quiz.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 10 &middot; Week 5&ndash;6 &middot; RBAC &mdash; last one</p>
+<h1>A task belongs to a team</h1>
+<p class="lede">Half of your permission table has no route behind it. <code>task:read</code>, <code>task:create</code>, <code>task:update</code>, <code>task:delete</code> &mdash; four rules nothing calls. Today you wire them, and to do it you have to add a required column to a table that already has rows.</p>
+
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><code>PATCH /tasks/5</code> has no team in it, so the gate has no role to look up.</li>
+<li>Put the scope in the URL: <code>PATCH /teams/7/tasks/5</code>.</li>
+<li>A task now needs a <code>teamId</code>. Postgres refuses a required column on rows that have none.</li>
+<li>The safe dance is <strong>expand, backfill, contract</strong> &mdash; add nullable, fill it in, then put the wall up.</li>
+<li><code>where: { id, ownerId }</code> was a hidden permission. <code>where: { id, teamId }</code> is a fence. Different jobs.</li>
+</ul>
+</div>
+
+<h2>Why nothing calls them</h2>
+<p>Look at the two URLs you have:</p>
+<pre><code>DELETE /teams/7/members/3   &larr; the gate can answer this
+PATCH  /tasks/5             &larr; the gate cannot</code></pre>
+<p>Say the gate's job out loud: <em>"what role does this person hold, in this team?"</em> The first URL contains a team. The second does not. There is no role to look up, so there is no answer to give.</p>
+<p>That is not a routing detail. It is the same counting problem as <a href="../0009-the-third-argument.html">lesson 9</a>: your rule needs a fact your code has no room for. Last time the missing fact was the target. This time it is <strong>the scope</strong>.</p>
+<blockquote>A permission is never "may Jay delete tasks". It is "may Jay delete tasks <em>here</em>". Drop the <em>here</em> and the question has no answer.</blockquote>
+<p>So the task has to know its team. Which is a database change, and the database is about to say no.</p>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  U1["PATCH /tasks/5"] --> G1{"what role does this<br/>person hold... where?"}
+  G1 --> X["no answer<br/>gate cannot run"]
+  U2["PATCH /teams/7/tasks/5"] --> G2{"role in team 7?"}
+  G2 --> OK["MEMBER<br/>can(MEMBER, task:update)"]
+</pre>
+<figcaption>A permission is never &ldquo;may Jay delete tasks&rdquo;. It is &ldquo;may Jay delete tasks <em>here</em>&rdquo;. Drop the <em>here</em> and the question has no answer.</figcaption>
+</figure>
+
+<h2>Postgres refuses, and it is right to</h2>
+<p>Add <code>teamId Int</code> to the <code>Task</code> model, run the migration, and read this carefully:</p>
+<pre><code>&#9888; We found changes that cannot be executed:
+
+  &bull; Added the required column `teamId` to the `Task` table
+    without a default value. There are 5 rows in this table,
+    it is not possible to execute this step.</code></pre>
+<p>Nothing is broken. You asked for a column where every row must have a value, on a table with 5 rows that have none. Postgres cannot invent one, and it will not guess. Same wall as <a href="../0003-rows-that-survive-a-restart.html">lesson 3</a>, from the other side.</p>
+<p>This was your homework question. Three ways out:</p>
+<div class="scroll">
+<table>
+<tr><th>way</th><th>what you get</th><th>the cost</th></tr>
+<tr><td>Make it nullable</td><td>It applies straight away</td><td>The rule is now "a task <em>usually</em> has a team". Every gate needs a null branch, forever.</td></tr>
+<tr><td>Drop the rows</td><td>Also applies straight away</td><td>Fine on your laptop. On a real database it is data loss, and it is not undoable.</td></tr>
+<tr><td>Expand, backfill, contract</td><td>Column required, rows kept, no downtime</td><td>Three statements instead of one, and you have to say what the old rows belong to.</td></tr>
+</table>
+</div>
+<p>Take the third. Not because your five rows matter &mdash; they are junk from lesson 3 &mdash; but because <strong>this is the one that still works when there are users on the other end</strong>, and you want the muscle memory now, not at 3am.</p>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why is "make it nullable" the worst of the three, even though it is the easiest?</p>
+<button>Because nullable columns are slower to query and cannot be indexed well</button>
+<button>Because it moves the rule out of the database and into every reader</button>
+<p class="why" hidden>Right. A <code>NOT NULL</code> is one wall in one place. A nullable column is a <code>?</code> in every gate, store and handler that ever touches it &mdash; and you only have to forget one.</p>
+</div>
+
+<h2>Expand, backfill, contract</h2>
+<p>Three steps, in this order. On a live server they are three separate deploys; here they run back to back.</p>
+<ol>
+<li><strong>Expand</strong> &mdash; add the column <em>nullable</em>. Old rows are allowed to be empty for a moment. Nothing breaks.</li>
+<li><strong>Backfill</strong> &mdash; give every empty row a real value.</li>
+<li><strong>Contract</strong> &mdash; now that nothing is empty, put the wall up.</li>
+</ol>
+<p>Prisma will write the SQL for you, but not this SQL. So take the pen: <code>--create-only</code> makes the migration file and stops, so you can edit it before it runs.</p>
+<pre><code>npx prisma migrate dev --create-only --name task_team
+# edit prisma/migrations/&lt;stamp&gt;_task_team/migration.sql
+npx prisma migrate dev</code></pre>
+<p>The middle step needs an answer to a question only you can answer: <em>which team do the old tasks belong to?</em> You had zero teams, so there was no honest answer &mdash; the migration makes one, called <code>Legacy</code>, and puts everybody who ever wrote a task into it:</p>
+<pre><code>-- 1. EXPAND. Nullable, so the existing rows may be empty for now.
+ALTER TABLE "Task" ADD COLUMN "teamId" INTEGER;
+
+-- 2. BACKFILL. Every old row gets the legacy team.
+UPDATE "Task" SET "teamId" = (SELECT MAX("id") FROM "Team")
+  WHERE "teamId" IS NULL;
+
+-- 3. CONTRACT. Nothing is empty now, so the wall can go up.
+ALTER TABLE "Task" ALTER COLUMN "teamId" SET NOT NULL;</code></pre>
+<p>All five rows survived. Open <a href="../../server/prisma/migrations">the migration file</a> and read the whole thing &mdash; the membership rows it invents are the interesting part, because they are you deciding what the old data <em>meant</em>.</p>
+<blockquote>A backfill is never a technical step. It is you writing down an assumption about the past, in SQL, permanently.</blockquote>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart LR
+  A["5 rows<br/>no teamId"] -- "1. EXPAND<br/>ADD COLUMN, nullable" --> B["5 rows<br/>teamId = NULL"]
+  B -- "2. BACKFILL<br/>UPDATE ... SET teamId" --> C["5 rows<br/>teamId = 1"]
+  C -- "3. CONTRACT<br/>SET NOT NULL" --> D["5 rows<br/>wall is up"]
+</pre>
+<figcaption>On a live server these are three separate deploys. Run step 3 before step 2 and Postgres refuses again &mdash; the rows are still empty.</figcaption>
+</figure>
+
+<h2>Now the routes move</h2>
+<p>The URL has to carry the scope, so every task route grows a prefix:</p>
+<div class="scroll">
+<table>
+<tr><th>before</th><th>after</th><th>gate</th></tr>
+<tr><td><code>GET /tasks</code></td><td><code>GET /teams/:teamId/tasks</code></td><td><code>task:read</code></td></tr>
+<tr><td><code>POST /tasks</code></td><td><code>POST /teams/:teamId/tasks</code></td><td><code>task:create</code></td></tr>
+<tr><td><code>PATCH /tasks/:id</code></td><td><code>PATCH /teams/:teamId/tasks/:id</code></td><td><code>task:update</code></td></tr>
+<tr><td><code>DELETE /tasks/:id</code></td><td><code>DELETE /teams/:teamId/tasks/:id</code></td><td><code>task:delete</code></td></tr>
+</table>
+</div>
+<p>One line per route, and you have written it three times now:</p>
+<pre><code>preHandler: requirePermission("task:update"),</code></pre>
+<p>No loader. There is no <em>target role</em> here &mdash; a task does not hold a role &mdash; so the third argument sits out, exactly as it does for <code>team:delete</code>. You changed the shape of <code>can()</code> last lesson and it cost you nothing today. That was the point of the test that looped every role against every action.</p>
+
+<h2>The homework you were dreading</h2>
+<p>Question 5 last lesson: open <code>task.store.ts</code> and look at this.</p>
+<pre><code>await prisma.task.updateMany({ where: { id, ownerId }, data });</code></pre>
+<p>That is a permission rule. It says <em>"you may only change a task you wrote"</em>. It lives in a database query, it is not in <code>can()</code>, no gate calls it, and no test covers it. It is <a href="../0007-one-place-that-says-no.html">lesson 7</a>'s mistake wearing a different hat: <strong>a rule you cannot find is a rule you cannot check</strong>.</p>
+<p>So <code>ownerId</code> comes out of the <code>where</code>. It stays as a <em>column</em> &mdash; who typed it is a useful fact &mdash; it just stops deciding anything.</p>
+<p>Read what replaces it very carefully, because it looks identical and is not:</p>
+<pre><code>await prisma.task.updateMany({ where: { id, teamId }, data });</code></pre>
+<div class="scroll">
+<table>
+<tr><th></th><th><code>where: { id, ownerId }</code></th><th><code>where: { id, teamId }</code></th></tr>
+<tr><td>the question</td><td>may you?</td><td>which rows?</td></tr>
+<tr><td>who decides</td><td>this query, alone</td><td>the gate, already, upstream</td></tr>
+<tr><td>if you delete it</td><td>anyone edits anything</td><td>you leak across teams</td></tr>
+<tr><td>the name for it</td><td>a hidden permission</td><td>scoping</td></tr>
+</table>
+</div>
+<p>The gate has already said <em>"yes, a MEMBER of team 7 may update tasks"</em>. The <code>teamId</code> in the query is what stops <code>PATCH /teams/7/tasks/999</code> reaching into team 4. Not a second opinion on the permission &mdash; a fence around <em>which rows the permitted action can see</em>.</p>
+<p>That attack has a name, and it is on the OWASP top ten: <strong>IDOR</strong> &mdash; Insecure Direct Object Reference. Guess an id, get somebody else's row. There is a test for it now.</p>
+
+<div class="quiz" data-answer="0">
+<p class="q">A MEMBER of team 7 sends <code>PATCH /teams/7/tasks/999</code>, where task 999 is team 4's. Why 404 and not 403?</p>
+<button>The gate already allowed it, so the refusal is about the row, not the person</button>
+<button>The gate never ran, so the store is the only thing left to refuse it</button>
+<p class="why" hidden>Right. They really may update tasks in team 7 &mdash; that question is settled and the answer was yes. Task 999 is simply not one of team 7's tasks, so it is not found. 403 would leak that some other team owns it.</p>
+</div>
+
+
+<figure class="fig">
+<pre class="mermaid">
+flowchart TB
+  R["PATCH /teams/7/tasks/999"] --> G{"Gate: may a MEMBER of<br/>team 7 update tasks?"}
+  G -- "no" --> F403["403 &mdash; about the person"]
+  G -- "yes, settled" --> S{"where: { id: 999, teamId: 7 }"}
+  S -- "0 rows &mdash; task 999 is team 4's" --> F404["404 &mdash; about the row"]
+  S -- "1 row" --> OK["200"]
+</pre>
+<figcaption>Two different refusals. The gate judges the <em>person</em>. The fence picks the <em>rows</em>. Guessing an id to reach another team's row is the IDOR attack.</figcaption>
+</figure>
+
+<h2>One rule quietly changed</h2>
+<p>Before today, only the author could edit a task. Now any <code>MEMBER</code> of the team can. That is not a slip &mdash; it is what "roles are scoped to a team" means, and it is why the app is a <em>team</em> task tracker. If you ever want "only the author may edit", that is a new fact about the resource and a new comparison in <code>can()</code>, the same shape as <code>targetRole</code>. Not a <code>where</code> clause.</p>
+<p><code>npm test</code> is now <strong>50 passing</strong>, up from 40. The ten new ones are all enforcement: a viewer reading but not writing, an outsider getting 403, the IDOR 404, and the cascade that takes a team's tasks with it.</p>
+
+<h2>Read this</h2>
+<p><strong>Primary source:</strong> <a href="https://www.prisma.io/docs/orm/prisma-migrate/workflows/customizing-migrations">Prisma docs &mdash; Customizing migrations</a>. Short, and it is exactly the <code>--create-only</code> move you just made. The "adding a required field" example is your migration.</p>
+<p>Then the pattern by its proper name: <a href="https://planetscale.com/blog/backwards-compatible-databases-changes">PlanetScale &mdash; Backwards compatible database changes</a>. Expand/contract, written for people with users on the other end.</p>
+<p>And the attack: <a href="https://cheatsheetseries.owasp.org/cheatsheets/Insecure_Direct_Object_Reference_Prevention_Cheat_Sheet.html">OWASP &mdash; IDOR Prevention</a>. You just built the defence it recommends.</p>
+
+<h2>Do this before lesson 11</h2>
+<ol>
+<li>Run <code>cd server &amp;&amp; npm test</code>. 50 pass.</li>
+<li>Open <code>server/src/store/task.store.ts</code> and change <code>where: { id, teamId }</code> back to <code>where: { id }</code>. Run the tests. One fails. Read its name out loud &mdash; that is what IDOR looks like from the inside. Put it back.</li>
+<li>Attack it with <code>curl</code>. Log in, make two teams, put a task in each, then try to <code>PATCH</code> team B's task id through team A's URL. You want <code>404</code>. Save the commands with your others.</li>
+<li>Open the migration you edited: <code>server/prisma/migrations/20260902103929_task_team/migration.sql</code>. Read the three steps in order and say what would have gone wrong if you had run step 3 before step 2.</li>
+<li>Count the actions in <code>src/auth/can.ts</code> that still have no route: you should find exactly two.</li>
+</ol>
+<p>Then two questions to bring me:</p>
+<ol>
+<li>Those two orphan actions are <code>project:create</code> and <code>project:delete</code>. <code>Project</code> does not exist. Week 6 ends with a decision: <strong>build it, or delete the two rows?</strong> Argue one side. What would change your mind?</li>
+<li>A VIEWER can read every task in the team. Should there be such a thing as a private task &mdash; one only its author can see? Before you answer, say where the rule would have to live: the table in <code>can()</code>, the <code>Resource</code> argument, or the <code>where</code> clause. One of those three answers is the one you would have given before this lesson.</li>
+</ol>
+
+<div class="aside">
+<p>Stuck, or something felt hand-wavy? Ask me. I am your teacher here. Say what confused you and I will re-teach it another way. The expand/backfill/contract dance is worth asking real practitioners about &mdash; <a href="https://www.reddit.com/r/PostgreSQL/">r/PostgreSQL</a> has good threads on zero-downtime migrations, and the failure stories are the useful part.</p>
+</div>
+
+<hr>
+<p class="nav">Back: <a href="../0009-the-third-argument.html">Lesson 9 &mdash; The third argument</a> &middot; Keep for reference: <a href="../../reference/rbac-permissions.html">Roles &amp; permissions cheat sheet</a> &middot; <a href="../../reference/prisma-postgres.html">Prisma &amp; Postgres cheat sheet</a> &middot; <a href="../../reference/api-security-basics.html">API security basics</a> &middot; Mission: <a href="../../MISSION.md">MISSION.md</a> &middot; Sources: <a href="../../RESOURCES.md">RESOURCES.md</a></p>
+
+<script src="../../assets/quiz.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/diagram.js"></script>
+</body>
+</html>

@@ -1,0 +1,147 @@
+// The shape of the data, in one place. `prisma migrate` turns this into SQL.
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// The role *names*, as a real Postgres type. The database rejects "ADMINN"
+// before your code ever sees it -- same move as the NOT NULL wall.
+// The names only. What each one may do stays in src/auth/can.ts.
+enum Role {
+  VIEWER
+  MEMBER
+  ADMIN
+  OWNER
+}
+
+model Team {
+  id        Int      @id @default(autoincrement())
+  name      String   @db.VarChar(100)
+  createdAt DateTime @default(now())
+
+  members  Membership[]
+  tasks    Task[]
+  projects Project[]
+}
+
+// A folder inside a team. It owns no tasks yet -- add the link when a task
+// actually needs to sit in one.
+model Project {
+  id        Int      @id @default(autoincrement())
+  name      String   @db.VarChar(100)
+  createdAt DateTime @default(now())
+
+  // Same rule as Task: a project with no team is a project no permission
+  // rule can answer for. Cascade -- delete the team, the projects go.
+  team   Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  teamId Int
+
+  // Every list query is "the projects of team N".
+  @@index([teamId])
+}
+
+// The row that says "this person has this role in this team". An explicit
+// join model, not Prisma's implicit m-n, because we carry an extra field.
+model Membership {
+  role Role @default(MEMBER)
+
+  team   Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  teamId Int
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId Int
+
+  // One membership per person per team. Nobody is VIEWER and OWNER at once.
+  @@id([teamId, userId])
+}
+
+model Task {
+  id        Int      @id @default(autoincrement())
+  title     String   @db.VarChar(200)
+  done      Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  // Who typed it. Kept as a fact, no longer as the permission rule.
+  owner   User @relation(fields: [ownerId], references: [id])
+  ownerId Int
+
+  // Which team it belongs to. Required: a task with no team is a task no
+  // permission rule can answer for. Cascade -- delete the team, the tasks go.
+  team   Team @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  teamId Int
+
+  // Every list query is "the tasks of team N". Index the column it filters on.
+  @@index([teamId])
+}
+
+model User {
+  id           Int      @id @default(autoincrement())
+  email        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+  tasks        Task[]
+  sessions     Session[]
+  memberships  Membership[]
+}
+
+model Session {
+  // The SHA-256 of the id we handed the browser. Never the id itself.
+  idHash    String   @id
+  expiresAt DateTime
+
+  // onDelete: Cascade -- delete the user, the sessions go with them.
+  user   User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId Int
+}
+
+// Who did what, when. One row per write and per refusal.
+//
+// The only model here with NO relation to User -- on purpose. Every other
+// model cascades: delete the user, their rows go. An audit row that vanishes
+// with the person it accuses is not evidence. So `userId` is a plain Int,
+// and it keeps pointing at an id that may no longer exist.
+model AuditLog {
+  // TODO: ponytail: Int. This is the table that outgrows every other one, and
+  // TODO: 2.1 billion rows is the ceiling. Move to BigInt when retention lands
+  // TODO: (week 13-14) -- BigInt needs a serialiser, so not today.
+  id     Int      @id @default(autoincrement())
+  at     DateTime @default(now())
+
+  // Null = nobody was logged in. A 401 is a row worth having.
+  userId Int?
+  // Null = the route is not team-scoped (login, register, health).
+  teamId Int?
+
+  method String @db.VarChar(10)
+  // The route PATTERN ("/teams/:teamId/tasks/:id"), never request.url.
+  // A URL is caller input, and a store keyed on caller input is a store the
+  // caller can fill. The pattern is one of a fixed, short list.
+  route  String @db.VarChar(200)
+  status Int
+  // 45 chars fits an IPv6 address with an IPv4 tail.
+  ip     String @db.VarChar(45)
+
+  // The ids from the URL, so "who deleted task 41?" has an answer.
+  // ! Always an object -- {} for a route with no path params. Never null, in
+  // ! either encoding: a nullable Json column has TWO empties (SQL NULL and
+  // ! JSON 'null') and every reader has to remember both.
+  params Json   @default("{}")
+
+  
+ // * Snapshots. Copies, not pointers. Nothing else may ever update these.
+  // ! No @relation on targetId, for the same reason as userId: a cascade
+  // ! deletes the evidence at the moment it becomes evidence.
+  actorEmail   String? @db.VarChar(255)
+  targetType   String? @db.VarChar(30)
+  targetId     Int?
+  targetSnapshot Json?
+
+  // The two questions this table gets asked: "what did this person do?" and
+  // "what happened in this team?" Both are newest-first.
+  @@index([userId, at])
+  @@index([teamId, at])
+  @@index([at])
+}

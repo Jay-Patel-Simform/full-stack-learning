@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 15 — Security headers for a JSON API</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<style>
+.hdrs { list-style: none; padding: 0; margin: 1.5rem 0; }
+.hdrs li { display: grid; grid-template-columns: 1.6rem 1fr; gap: .6rem;
+  padding: .5rem .7rem; border-radius: 5px; margin-bottom: .25rem;
+  font-family: var(--mono); font-size: .78rem; line-height: 1.45; align-items: baseline; }
+.hdrs .mark { font-family: var(--serif); font-size: 1rem; text-align: center; }
+.hdrs .keep { background: #f1f7f0; }
+.hdrs .keep .mark { color: #2f6b3a; }
+.hdrs .fix  { background: #fdf4ee; }
+.hdrs .fix  .mark { color: #b4651c; }
+.hdrs .off  { background: transparent; color: var(--muted); }
+.hdrs .off  .mark { color: #b3ada2; }
+.hdrs .hand { background: #f2f4fb; }
+.hdrs .hand .mark { color: #33478f; }
+.hdrs em { font-family: var(--serif); font-size: .95rem; font-style: normal; color: var(--muted); }
+.hdrs .keep em, .hdrs .fix em, .hdrs .hand em { color: var(--ink); }
+.key { display: flex; flex-wrap: wrap; gap: 1.1rem; font-size: .8rem;
+  font-family: var(--mono); color: var(--muted); margin: .5rem 0 0; }
+.tally { display: flex; gap: .6rem; flex-wrap: wrap; margin: 1.2rem 0 0; }
+.tally div { flex: 1 1 6rem; text-align: center; border: 1px solid var(--rule);
+  border-radius: 6px; padding: .7rem .4rem; }
+.tally b { display: block; font-size: 1.7rem; line-height: 1; }
+.tally span { font-family: var(--mono); font-size: .68rem; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--muted); }
+.chain { font-family: var(--mono); font-size: .78rem; line-height: 1.9; margin: 1.2rem 0; }
+.chain div { padding-left: 1.4em; text-indent: -1.4em; }
+.chain .exit { color: #a4462c; }
+.chain .last { background: #f2f4fb; border-radius: 4px; padding: .2rem .5rem .2rem 1.9em;
+  text-indent: -1.4em; font-weight: 600; }
+.note { border-left: 3px solid var(--accent); padding: .7rem 1rem; margin: 1.6rem 0;
+  background: var(--code-bg); font-size: .95rem; }
+</style>
+</head>
+<body>
+
+<p class="kicker">Lesson 15 &middot; Week 7&ndash;8 &middot; API security</p>
+<h1>Security headers for a JSON API</h1>
+<p class="lede">Install Helmet, get thirteen headers. Your API sends JSON. Four of the thirteen matter, one is set wrong for you, and one can lock your own laptop out of <code>localhost</code> for a year.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li>Third dependency: <code>@fastify/helmet</code>. New rule &mdash; <strong>take the library, then turn it down.</strong></li>
+<li>Helmet's defaults are written for an HTML page. You serve JSON.</li>
+<li>Four earn their place: <code>nosniff</code>, a CSP of <code>default-src 'none'</code>, <code>X-Frame-Options: DENY</code>, and HSTS <em>in production only</em>.</li>
+<li><code>Cache-Control: no-store</code> matters most and no plugin sets it. Six lines by hand.</li>
+</ul>
+</div>
+
+<h2>The picture</h2>
+<figure class="fig">
+<pre class="mermaid">
+flowchart TD
+  H["Helmet: 13 default headers"] --> Q{"does this mean<br/>anything to JSON?"}
+  Q -- "no (9)" --> OFF["switched off<br/>page-only headers"]
+  Q -- "yes (4)" --> K{"is the default<br/>right for me?"}
+  K -- "yes (2)" --> KEEP["nosniff<br/>Referrer-Policy"]
+  K -- "no (2)" --> TUNE["CSP -> default-src 'none'<br/>X-Frame-Options -> DENY"]
+  MISS["Cache-Control: no-store"] -.->|"no plugin sets it"| HAND["written by hand, onSend"]
+</pre>
+<figcaption>Two separate judgements. First: is this header about my kind of response at all? Then: is the library's value right for <em>my</em> situation?</figcaption>
+</figure>
+
+<h2>The idea</h2>
+<p>Most Helmet defaults defend a browser rendering HTML: inline scripts, fonts, iframes, plugins. Your API returns <code>application/json</code>. Those headers are not wrong, they are simply about somebody else's problem.</p>
+<p>The dangerous one is <strong>HSTS</strong>. It tells the browser "never use plain HTTP for this host again, for a year." Send it from <code>localhost</code> and you have pinned your own development machine. The fix is manual, per browser.</p>
+
+<div class="aside"><strong>HSTS is gated on <code>NODE_ENV === "production"</code> and must stay that way.</strong></div>
+
+<h2>The code</h2>
+<pre><code>await app.register(helmet, {
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: { "default-src": ["'none'"], "frame-ancestors": ["'none'"] },
+  },
+  frameguard: { action: "deny" },
+  hsts: process.env.NODE_ENV === "production" ? { maxAge: 31536000 } : false,
+  // page-only, switched off:
+  crossOriginOpenerPolicy: false,
+  originAgentCluster: false,
+  xDnsPrefetchControl: false,
+  xDownloadOptions: false,
+  xPermittedCrossDomainPolicies: false,
+});
+
+// the one no plugin sets — onSend covers 200s AND 400/403/404/429
+app.addHook("onSend", async (_req, reply) =&gt; {
+  reply.header("Cache-Control", "no-store");
+});</code></pre>
+
+<p><code>onSend</code> is the only hook that also runs for error replies. A 403 that says "forbidden" is still a reply you do not want cached in a shared proxy.</p>
+
+<p class="takeaway">A library can be right about the facts and wrong about your situation. Those are two separate judgements.</p>
+
+<h2>Check yourself</h2>
+<div class="quiz" data-answer="0">
+<p class="q">Why add <code>Cache-Control</code> in <code>onSend</code> rather than a route hook?</p>
+<button>Because it also covers error replies</button>
+<button>Because it runs before the handler</button>
+<p class="why" hidden>A 401, 403 or 429 never reaches your handler's reply path. <code>onSend</code> is the last stop for every response, successful or not.</p>
+</div>
+
+<h2>Do this</h2>
+<ol>
+<li><code>npm test</code> &mdash; 82 tests, seven new in <code>src/routes/headers.test.ts</code>.</li>
+<li><code>curl -i localhost:3000/health</code>. Count the headers. Confirm <em>no</em> HSTS.</li>
+<li><code>curl -i localhost:3000/nope</code>. The 404 must also carry <code>Cache-Control: no-store</code>.</li>
+</ol>
+
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<p><code>app.register(helmet)</code> sends all thirteen. This is what each one does to a reply that is <strong>JSON, not a page</strong>.</p>
+
+<ul class="hdrs">
+<li class="keep"><span class="mark">&#10003;</span><span>X-Content-Type-Options: nosniff<br><em>Stops the browser guessing your JSON is HTML.</em></span></li>
+<li class="fix"><span class="mark">&#9998;</span><span>Content-Security-Policy: default-src <s>'self'</s> <strong>'none'</strong><br><em>Helmet permits loading from yourself. An API should permit nothing.</em></span></li>
+<li class="fix"><span class="mark">&#9998;</span><span>X-Frame-Options: <s>SAMEORIGIN</s> <strong>DENY</strong><br><em>You frame nothing, ever.</em></span></li>
+<li class="keep"><span class="mark">&#10003;</span><span>Strict-Transport-Security &mdash; <strong>production only</strong><br><em>On localhost it pins your whole host to HTTPS for a year.</em></span></li>
+<li class="keep"><span class="mark">&#10003;</span><span>Cross-Origin-Resource-Policy: same-origin<br><em>Blocks <code>&lt;script src&gt;</code> tricks. Cannot break <code>fetch()</code> &mdash; that is CORS mode.</em></span></li>
+<li class="keep"><span class="mark">&#10003;</span><span>Referrer-Policy: no-referrer<br><em>Harmless. Keep it.</em></span></li>
+<li class="off"><span class="mark">&#183;</span><span>Cross-Origin-Opener-Policy &mdash; about <code>window.opener</code> between pages</span></li>
+<li class="off"><span class="mark">&#183;</span><span>Origin-Agent-Cluster &mdash; a process-isolation hint for pages</span></li>
+<li class="off"><span class="mark">&#183;</span><span>X-DNS-Prefetch-Control &mdash; about links on a page</span></li>
+<li class="off"><span class="mark">&#183;</span><span>X-Download-Options &mdash; old Internet Explorer</span></li>
+<li class="off"><span class="mark">&#183;</span><span>X-Permitted-Cross-Domain-Policies &mdash; Adobe Flash</span></li>
+<li class="off"><span class="mark">&#183;</span><span>X-XSS-Protection: 0 &mdash; disables a filter you do not have</span></li>
+<li class="off"><span class="mark">&#183;</span><span>X-Powered-By removed &mdash; Fastify never sent one</span></li>
+<li class="hand"><span class="mark">&#43;</span><span>Cache-Control: no-store &mdash; <strong>hand-written</strong><br><em>No plugin sets it. Without it a cache can hand one user's reply to the next.</em></span></li>
+</ul>
+
+<p class="key"><span>&#10003; keep as-is</span><span>&#9998; override</span><span>&#183; switch off</span><span>&#43; add yourself</span></p>
+
+<div class="tally">
+<div><b>4</b><span>keep</span></div>
+<div><b>2</b><span>override</span></div>
+<div><b>7</b><span>no-op</span></div>
+<div><b>1</b><span>add by hand</span></div>
+</div>
+
+<div class="note">
+<p>That is the lesson in one column. Helmet is <strong>right about the facts</strong> &mdash; every string above is spelled correctly and current. It is <strong>wrong about your situation</strong>, because it assumed you serve pages. Two separate judgements.</p>
+</div>
+
+<h2>Where <code>no-store</code> has to sit</h2>
+<p>A rule with no exceptions belongs in the last hook, not in each route. Here is why &mdash; four of these replies never reach your handler:</p>
+
+<div class="chain">
+<div>request arrives</div>
+<div>&nbsp;&nbsp;onRequest &rarr; rate limit <span class="exit">&mdash;&rarr; 429 leaves here</span></div>
+<div>&nbsp;&nbsp;onRequest &rarr; helmet sets its headers</div>
+<div>&nbsp;&nbsp;routing <span class="exit">&mdash;&rarr; 404 leaves here</span></div>
+<div>&nbsp;&nbsp;body parse &amp; zod validate <span class="exit">&mdash;&rarr; 400 leaves here</span></div>
+<div>&nbsp;&nbsp;preHandler &rarr; requireAuth <span class="exit">&mdash;&rarr; 401 leaves here</span></div>
+<div>&nbsp;&nbsp;preHandler &rarr; can() <span class="exit">&mdash;&rarr; 403 leaves here</span></div>
+<div>&nbsp;&nbsp;your handler &mdash; 200</div>
+<div class="last">&nbsp;&nbsp;onSend &rarr; cache-control: no-store &nbsp; &#8592; every arrow above passes through here</div>
+<div>bytes go out</div>
+</div>
+
+<p>Put <code>no-store</code> in a route and you cover the 200. Put it in <code>onSend</code> and you cover all seven. That is what the 404 test in <code>src/routes/headers.test.ts</code> is guarding.</p>
+
+<hr>
+<p class="nav">Full lesson: <a href="./0015-headers-for-json-not-pages.html">Lesson 15 &mdash; Headers for JSON, not pages</a> &middot; Reference: <a href="../reference/api-security-basics.html#headers">Security headers table</a></p>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://helmetjs.github.io/">helmetjs.github.io</a> &mdash; the list of what each header does. Read it as a checklist against your own situation.</p>
+<p><b>The long version:</b> <a href="./long/0015-headers-for-json-not-pages.html">every header judged individually</a>.</p>
+<p>Your React page needs its <em>own</em> CSP from nginx. The API's does not cover it. Week 9&ndash;10.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0014-one-origin-no-question.html">&larr; Back</a>
+<a href="./0016-who-asked-for-this-write.html">Next: who asked for this write &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>
