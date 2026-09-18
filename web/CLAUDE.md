@@ -8,9 +8,11 @@ React 19 + Vite 8 front end for the task API. TypeScript, ESM, Tailwind 4 + shad
 - `npm run build` — `tsc -b && vite build`
 - `npm run preview` — serve the build
 - `npm run lint` — oxlint
+- `npm test` — `vitest run` (12 tests)
+- `npx vitest` — watch mode, while writing one
 - `npx shadcn@latest add <component>` — new UI primitive into `src/components/ui/`
 
-There is no test script and no typecheck script — `npm run build` runs `tsc -b`.
+There is no typecheck script — `npm run build` runs `tsc -b`.
 
 ## Environment
 
@@ -50,3 +52,16 @@ There is no test script and no typecheck script — `npm run build` runs `tsc -b
 - Permissions are the server's answer, not a copy. Render off the `can` list in the reply; never re-derive what a role may do in this app.
 - A mutation sends the value it wants, never a verb — send it twice and the answer is the same, so a double-click and a retry are the same event.
 - Comments explain why, in plain words. Keep that style.
+
+## Tests
+
+Vitest + jsdom + Testing Library, since lesson 68 — the first new dependency in 68 lessons. Vitest and not Jest because it reads `vite.config.ts`, so the `@/` alias and the JSX transform are already correct and there is no second config to drift.
+
+- One runner. `node:test` is gone from `web/`; the two older pure-function files were converted. A file importing `node:test` fails to bundle under the jsdom environment.
+- Component tests are `.test.tsx`. Pure-function tests stay `.test.ts`.
+- Test what a user can do, never what a component knows. Query by `getByRole` / `getByLabelText`, not by test id — then the test fails exactly when a real person could not find the control.
+- `findBy*` for anything that arrives after a request. `getBy*` throws immediately.
+- Every render needs `QueryClientProvider` + a router. Build a **fresh** `QueryClient` per test with `retry: false` on queries and mutations, or a failing-on-purpose test waits through backoff and is reported as a timeout.
+- Fake the network with `vi.spyOn(api, "post")`, not MSW and not `fetch`. Assert the **payload**, not just that a call happened.
+- `@testing-library/jest-dom` is deliberately not installed, so `toBeDisabled()` and `toHaveValue()` do not exist. Read `.disabled` and `.value` off the element instead.
+- `afterEach(cleanup)` is in `src/test-setup.ts`; `afterEach(() => vi.restoreAllMocks())` goes in any file that spies.

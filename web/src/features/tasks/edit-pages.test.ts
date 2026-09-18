@@ -1,9 +1,15 @@
-import { test } from "node:test";
-import assert from "node:assert/strict";
 import { QueryClient } from "@tanstack/react-query";
 import { editPages } from "./edit-pages.ts";
 import type { InfiniteData } from "@tanstack/react-query";
 import type { TaskPage } from "./tasks.ts";
+
+// Vitest, not node:test, since lesson 68. These are still pure-function
+// tests with no DOM in them -- what changed is the runner, because one
+// runner beats two. `test` and `expect` are globals (vite.config.ts).
+// Thin wrappers keep the original assertion style readable.
+const expectSame = (a: unknown, b: unknown) => expect(a).toBe(b);
+const expectNotSame = (a: unknown, b: unknown) => expect(a).not.toBe(b);
+const expectEqual = (a: unknown, b: unknown) => expect(a).toEqual(b);
 
 const KEY = ["teams", 1, "tasks"] as const;
 
@@ -38,7 +44,7 @@ test("an empty cache is left alone", () => {
 
   // The updater returning undefined must not create the entry. A mutation
   // firing before the list ever loaded should write nothing at all.
-  assert.equal(read(client), undefined);
+  expectSame(read(client), undefined);
 });
 
 test("the edit runs on every page", () => {
@@ -49,7 +55,7 @@ test("the edit runs on every page", () => {
   );
 
   const flat = read(client)!.pages.flatMap((page) => page.items);
-  assert.deepEqual(
+  expectEqual(
     flat.map((task) => task.done),
     [true, true, true],
   );
@@ -61,16 +67,16 @@ test("a delete only removes from the page the row is on", () => {
   editPages(client, KEY, (items) => items.filter((task) => task.id !== 2));
 
   const after = read(client)!;
-  assert.deepEqual(
+  expectEqual(
     after.pages[0].items.map((task) => task.id),
     [1],
   );
-  assert.deepEqual(
+  expectEqual(
     after.pages[1].items.map((task) => task.id),
     [3],
   );
   // The cursor belongs to the server's answer, not to what we removed.
-  assert.equal(after.pages[0].nextCursor, 2);
+  expectSame(after.pages[0].nextCursor, 2);
 });
 
 test("removing a row replaces that page and keeps the other one", () => {
@@ -84,8 +90,8 @@ test("removing a row replaces that page and keeps the other one", () => {
   // and hands the old object back wherever nothing changed. Page 0 lost a row
   // so it is new; page 1 is untouched, so it is the SAME object — which is why
   // a component reading page 1 does not re-render.
-  assert.notEqual(after.pages[0], before.pages[0]);
-  assert.equal(after.pages[1], before.pages[1]);
+  expectNotSame(after.pages[0], before.pages[0]);
+  expectSame(after.pages[1], before.pages[1]);
 });
 
 test("a delete reaches every filtered list under the prefix", () => {
@@ -104,7 +110,7 @@ test("a delete reaches every filtered list under the prefix", () => {
     const flat = client
       .getQueryData<InfiniteData<TaskPage>>(key)!
       .pages.flatMap((page) => page.items);
-    assert.deepEqual(
+    expectEqual(
       flat.map((task) => task.id),
       [1, 3],
     );

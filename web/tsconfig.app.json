@@ -6,9 +6,11 @@
     "target": "es2023",
     "lib": ["ES2023", "DOM"],
     "module": "esnext",
-    // node is here for the test files only: `node:test` and `node:assert`.
-    // @types/node was already in node_modules, so this costs no install.
-    "types": ["vite/client", "node"],
+    // vitest/globals types `test`, `expect` and `vi`, which vite.config.ts
+    // turns on with `globals: true`. Without it `npm run build` fails on the
+    // test files even though `npm test` passes -- two different checkers.
+    // node stays for `node:path` and friends outside src.
+    "types": ["vite/client", "node", "vitest/globals"],
     "allowArbitraryExtensions": true,
     "skipLibCheck": true,
 
