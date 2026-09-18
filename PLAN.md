@@ -911,3 +911,58 @@ Roles: Owner, Admin, Member, Viewer. Scoped per team.
 - Deploy arc is now closed. Next: the two front-end holes (nothing reads the
   audit log; no way to create a team from the page), then `render.yaml`, then
   a real page CSP on the static site's custom headers.
+
+### Lesson 60 — the team that makes you its owner (2026-09-18)
+- The "No teams yet" dead end becomes a form. `useCreateTeam` + a
+  `new-team-form.tsx`, dropped into `EmptyState`'s existing `action` slot.
+- Rule to remember: **a 201 body is not a list row.** `TeamPublic` is
+  `{id, name}`; a `GET /teams` row adds `role` and `can`, and `can` is the
+  server's permission table — so `setQueryData` cannot build it.
+  `invalidateQueries` instead. Pairs with lesson 59's "a 201 is not a session".
+- Rule to remember: **return the invalidation promise from `onSuccess`** so the
+  mutation stays pending until the list is back; otherwise the navigate lands
+  on a team the cache has not got. Invisible on localhost, visible on Slow 3G.
+- Rule to remember: **cache work in the hook, navigation in the per-call
+  `onSuccess`.**
+- `POST /teams` has no `requirePermission` on purpose: no `teamId` exists to
+  hold a role in until the handler runs, and the membership row it writes is
+  what makes the caller OWNER.
+- Zero server change, zero TypeScript run by me. Suite stays **172**. Streak
+  intact: **no new dependency, 60 lessons.**
+- Next: the audit log page (nothing reads it), then `render.yaml`, then a real
+  page CSP on the static site.
+
+### Lesson 61 — the deploy that is a file (2026-09-18)
+- **Correction to the last three "next lesson" notes: the audit-log page is not
+  a hole.** `web/src/features/audit/activity-page.tsx` exists, uses `useAudit`,
+  and is routed in `App.tsx`. It shipped inside commit 6039bae (the UI pass).
+  Checked the file before writing the lesson. The note was stale; it is dropped.
+- New file, workspace root: `render.yaml`, both services — `tasks-api`
+  (`runtime: docker`, `rootDir: server`, `plan: free`, `healthCheckPath`) and
+  `tasks-web` (`runtime: static`, `buildCommand`, `staticPublishPath`, two
+  `routes` in the order lesson 57 fixed).
+- **Every field checked against `https://render.com/schema/render.yaml.json`,
+  fetched this session** — not memory. `plan: free` is in the `serverPlan`
+  enum; `route` is `{type, source, destination}` with `type: rewrite`;
+  `serviceEnvVarProperty` has no way to prefix `https://`, which is why
+  `ALLOWED_ORIGINS` stays `sync: false`.
+- Rule to remember: **configuration you can only click is configuration nobody
+  can review** — and the corollary that does the work: moving the deploy into
+  git must not move the passwords into git. `sync: false` is the whole answer.
+- Rule to remember: **`rootDir` moves the service, not the paths.**
+  `dockerfilePath`/`staticPublishPath` stay repo-root-relative. Schema's own
+  words. This is the first-Blueprint mistake.
+- Feedback loop is `render blueprints validate` (CLI v2.7.0+), plus the
+  `# yaml-language-server: $schema=` line for editor checking. Break-it-twice
+  is homework, so the error text is familiar before it matters.
+- **Unmeasured and said so in the lesson** (same move as 57's client-IP note):
+  whether a Blueprint adopts existing same-named services or creates a second
+  pair. He reads the dashboard's plan before approving, and it is the community
+  question.
+- Left out on purpose and named: `databases:` (Neon, not Render), `fromService`
+  wiring for `ALLOWED_ORIGINS`, preview environments, the `headers:` CSP.
+- **Nothing executed, nothing written into `server/` or `web/`.** Jay writes
+  `render.yaml`. Suite stays **172**. Streak intact: **no new dependency, 61
+  lessons.**
+- Next: the page CSP via the static site's `headers:` key — the hard part is
+  the policy, not the YAML. Then Redis for the two in-process counters.

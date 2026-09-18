@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 60 &mdash; The team that makes you its owner</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 60 &middot; Week 15&ndash;16 &middot; Front end + RBAC</p>
+<h1>The team that makes you its owner</h1>
+
+<p class="lede">Lesson 59 gave a stranger an account. They sign in and land on <em>&ldquo;No teams yet&rdquo;</em> &mdash; a dead end, because <code>POST /teams</code> has never been called by anything but a test. Today that empty state grows a form. The trap is a cache one: <b>the 201 body is not a list row</b>, so the thing you just created cannot be pushed into the list you already hold.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong><code>POST /teams</code> is the one route with no permission gate</strong>, and that is not an omission. There is no team yet, so there is no role to hold in it. Creating one is what <em>gives</em> you a role: <code>OWNER</code>.</li>
+<li><strong>The reply is <code>{id, name}</code>. A row in <code>useTeams</code> is <code>{id, name, role, can}</code>.</strong> Two different shapes from two different schemas.</li>
+<li><strong>So this mutation invalidates, it does not <code>setQueryData</code>.</strong> Lesson 26&rsquo;s &ldquo;write it in by hand when you can do the arithmetic&rdquo; fails here: you cannot do the server&rsquo;s arithmetic, because <code>can</code> comes from its permission table.</li>
+<li><strong>Then navigate &mdash; after the list has refetched, not before.</strong> <code>await</code> the invalidation, or the page you jump to asks for a team its own cache has never heard of.</li>
+<li><strong>One hook, one small form, no server change.</strong> No new dependency, 60 lessons.</li>
+</ul>
+</div>
+
+<h2>Read the route before you call it</h2>
+<p><code>server/src/routes/teams.route.ts</code>, and note what is <em>missing</em> from it:</p>
+<pre><code>app.addHook("onRequest", requireAuth);          <span class="dim">&larr; who are you: still required</span>
+
+app.post("/teams",
+  { schema: { body: CreateTeam, response: { 201: TeamPublic } } },
+  async (request, reply) =&gt; {                   <span class="dim">&larr; no preHandler: requirePermission(...)</span>
+    const { name } = request.body as CreateTeamInput;
+    return reply.code(201).send(await createTeam(name, request.userId!));
+  });</code></pre>
+<p>Every other team route carries a <code>requirePermission(&hellip;)</code> line. This one cannot: <code>can(role, action)</code> needs a role, and <code>getRole(teamId, userId)</code> needs a <code>teamId</code> that does not exist until this handler runs. The store closes the loop in one statement:</p>
+<pre><code>prisma.team.create({ data: { name, members: { create: { userId, role: "OWNER" } } } });</code></pre>
+<p class="takeaway"><b>Authentication is the gate here; authorisation starts a moment later.</b> A route with no permission check is safe exactly when there is nothing yet to have permission <em>over</em> &mdash; and when the row it writes is what creates the permission.</p>
+
+<h2>The trap: two shapes, one word</h2>
+<div class="scroll"><table>
+<thead><tr><th></th><th>What it is</th><th>Fields</th></tr></thead>
+<tbody>
+<tr><td><code>TeamPublic</code></td><td>the <code>201</code> reply of <code>POST /teams</code></td><td><code>id</code>, <code>name</code></td></tr>
+<tr><td><code>TeamMembership</code></td><td>one row of <code>GET /teams</code></td><td><code>id</code>, <code>name</code>, <b><code>role</code></b>, <b><code>can</code></b></td></tr>
+</tbody>
+</table></div>
+<p>Both are &ldquo;a team&rdquo; in English. Only one of them is what <code>useTeams()</code> hands to the sidebar, to <code>PageHeader</code> (which prints <code>team.role</code>) and to every <code>team.can.includes("task:create")</code> that decides whether a button is drawn. Push the <code>201</code> body into that array and you get a row whose <code>can</code> is <code>undefined</code> &mdash; <code>TypeError: Cannot read properties of undefined (reading 'includes')</code>, thrown in a component, over a team that was created perfectly well.</p>
+<p class="dim">Same family as lesson 59, one level up. There the two bodies were identical and the difference was a <em>header</em>. Here the bodies differ and the difference is a <em>schema</em>. Both times the question is the same: what exactly did this response promise?</p>
+
+<h2>Build it &mdash; the hook</h2>
+<p>Append to <code>web/src/features/teams/teams.ts</code>:</p>
+<pre><code>import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+
+/**
+ * Start a team. The reply is {id, name} -- NOT a row of useTeams, which also
+ * carries role and can. So nothing is written into the cache by hand here:
+ * only the server knows what OWNER may do.
+ */
+export function useCreateTeam() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (name: string) =&gt;
+      (await api.post&lt;{ id: number; name: string }&gt;("/teams", { name })).data,
+    <span class="dim">// ! Returning the promise keeps isPending true until the list is back,</span>
+    <span class="dim">// ! so the caller can navigate into a team the cache already holds.</span>
+    onSuccess: () =&gt; queryClient.invalidateQueries({ queryKey: TEAMS_KEY }),
+  });
+}</code></pre>
+<p>Two things are doing work in that last line. <code>invalidateQueries</code> refetches instead of guessing &mdash; and <em>returning</em> its promise from <code>onSuccess</code> makes React Query wait for the refetch before the mutation settles. Drop the <code>return</code> (write <code>{ queryClient.invalidateQueries(&hellip;) }</code>) and the mutation resolves first; you navigate to <code>/teams/7/tasks</code> while <code>useTeams</code> still holds the old list, <code>useTeam("7")</code> finds nothing, and the page says the team does not exist &mdash; for about 80&nbsp;ms. A bug that appears only on a slow network is the worst kind to own.</p>
+
+<h2>Build it &mdash; the form</h2>
+<p>New file, <code>web/src/features/teams/new-team-form.tsx</code>:</p>
+<pre><code>export function NewTeamForm() {
+  const [name, setName] = useState("");
+  const createTeam = useCreateTeam();
+  const navigate = useNavigate();
+
+  function onSubmit(event: React.FormEvent&lt;HTMLFormElement&gt;) {
+    event.preventDefault();
+    createTeam.mutate(name.trim(), {
+      onSuccess: (team) =&gt; navigate(`/teams/${team.id}/tasks`),
+    });
+  }
+
+  return (
+    &lt;form onSubmit={onSubmit} className="grid w-full max-w-sm gap-2"&gt;
+      &lt;Label htmlFor="team-name"&gt;Team name&lt;/Label&gt;
+      &lt;Input id="team-name" value={name} required maxLength={100}
+             onChange={(e) =&gt; setName(e.target.value)} /&gt;
+      {createTeam.error !== null ? (
+        &lt;ErrorLine&gt;{errorMessage(createTeam.error, "Could not create team")}&lt;/ErrorLine&gt;
+      ) : null}
+      &lt;Button type="submit" disabled={createTeam.isPending || name.trim() === ""}&gt;
+        {createTeam.isPending ? "Creating…" : "Create team"}
+      &lt;/Button&gt;
+    &lt;/form&gt;
+  );
+}</code></pre>
+<p><code>maxLength={100}</code> mirrors <code>z.string().min(1).max(100)</code> in <code>team.schema.ts</code> &mdash; a hint, not a gate, same as lesson 59. And the <code>mutate</code> here takes a second argument: per-call callbacks. The hook&rsquo;s own <code>onSuccess</code> (cache) runs first and is about the data; this one (navigation) is about <em>this</em> click. Cache work belongs to the hook, because it is true wherever the hook is used; navigation belongs to the component, because it is not.</p>
+
+<h2>Build it &mdash; the dead end becomes a fork</h2>
+<p>In <code>web/src/App.tsx</code>, <code>TeamIndex</code> already renders the empty state. <code>EmptyState</code> has taken an <code>action</code> node since the UI pass &mdash; you are only filling a hole you left:</p>
+<pre><code>if (teams.length === 0) {
+  return (
+    &lt;EmptyState
+      title="No teams yet"
+      body="Start one and you are its owner. You can invite people once there is a team to invite them to."
+      <b>action={&lt;NewTeamForm /&gt;}</b>
+    /&gt;
+  );
+}</code></pre>
+<p>That is the whole wiring. Nothing new in the router: <code>/</code> was already the screen a fresh account lands on, and the redirect to <code>/teams/&hellip;/tasks</code> that the last line of <code>TeamIndex</code> does for everyone else is exactly what your <code>navigate</code> now does for the first team.</p>
+
+<h2>Practice &mdash; three</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why can the <code>201</code> body not be pushed into the teams list?</p>
+<button>Because the list is sorted by the server</button>
+<button>Because the row needs role and can</button>
+<p class="why" hidden><code>TeamPublic</code> is <code>{id, name}</code>; a row of <code>GET /teams</code> is <code>TeamMembership</code>, which adds <code>role</code> and <code>can</code>. <code>can</code> is computed by <code>allowedActions(role)</code> from the server&rsquo;s own permission table &mdash; the whole point of sending it is that the front end has no copy to let drift. So the front end cannot invent it either.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why return the invalidation promise from <code>onSuccess</code>?</p>
+<button>So navigation waits for the new list</button>
+<button>So the request is retried on failure</button>
+<p class="why" hidden>React Query keeps the mutation pending while a promise returned from <code>onSuccess</code> is unsettled. Without the <code>return</code>, your <code>navigate</code> fires against a cache that still holds the old array, and <code>useTeam(teamId)</code> &mdash; which reads the list rather than fetching one team &mdash; briefly finds nothing.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why does <code>POST /teams</code> carry no <code>requirePermission</code>?</p>
+<button>Because creating rows is always allowed</button>
+<button>Because no role exists to check yet</button>
+<p class="why" hidden><code>requirePermission</code> asks <code>getRole(teamId, userId)</code>, and there is no <code>teamId</code> before the handler runs. The route is still behind <code>requireAuth</code>, so a stranger cannot reach it &mdash; and the row it writes makes the caller <code>OWNER</code>, which is what every later gate on that team will read.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  F["Create team<br/>name"] --> P["POST /teams<br/><i>requireAuth only</i>"]
+  P --> D[("team row +<br/>membership OWNER")]
+  P -->|"<b>201</b> {id, name}"| X["setQueryData(TEAMS_KEY, ...)<br/>row has no role, no can"]
+  P -->|"<b>201</b> {id, name}"| I["<b>invalidate</b> TEAMS_KEY<br/>await the refetch"]
+  I --> G["GET /teams<br/>{id, name, <b>role</b>, <b>can</b>}"]
+  G --> N["navigate /teams/:id/tasks"]
+  X --> E["TypeError in a component<br/>can.includes is not a function"]
+</pre>
+<figcaption>Both arrows leave the same <code>201</code>. The left one is the shortcut that looks cheaper and hands you a row the rest of the app cannot use.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div>a &ldquo;new team&rdquo; button in the sidebar <span class="dim">the empty state is where the need is felt. A second entry point is worth adding the day you are in two teams and want a third &mdash; and it will reuse <code>NewTeamForm</code> unchanged.</span></div>
+<div>optimistic insert <span class="dim">nothing to be optimistic with: the row you would insert is missing the two fields the UI reads. Optimism needs a complete guess.</span></div>
+<div>unique team names <span class="dim">the schema does not ask for one and neither does the product. Two teams called &ldquo;Design&rdquo; owned by different people is not a bug.</span></div>
+<div>inviting anyone <span class="dim">still parked on the mailer, record 0056. Today you can own a team of one, which is exactly enough to make every page in the app reachable for a brand-new account.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://tanstack.com/query/latest/docs/framework/react/guides/invalidations-from-mutations">TanStack Query &mdash; Invalidations from Mutations</a>. Short, and it shows the returned-promise trick in its own words.</p>
+<p><b>Then this:</b> fifteen minutes. (1) Build the three pieces. (2) Register a brand-new account on the deployed URL and take it from signup to a task you created, without touching psql once &mdash; that path has never existed until today. (3) Delete the <code>return</code>/arrow body from <code>onSuccess</code>, throttle the network to Slow 3G in devtools, and watch the wrong screen. Put it back.</p>
+<p><b>Reference cards:</b> <a href="../reference/react-query-rules.html">React Query, the rules so far</a> and <a href="../reference/rbac-permissions.html">Roles and permissions</a>.</p>
+<p><b>Ask the community:</b> <a href="https://www.reddit.com/r/reactjs/">r/reactjs</a> &mdash; ask when they reach for <code>invalidateQueries</code> over <code>setQueryData</code>. The answers split, and the split is informative.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0059-the-account-nobody-can-make.html">&larr; Back</a>
+<a href="../reference/react-query-rules.html">React Query rules &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

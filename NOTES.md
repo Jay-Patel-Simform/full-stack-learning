@@ -1523,3 +1523,59 @@ move?* No answer -> do not write it.
   not ask a third time without him volunteering it; if it stays open, drop it.
 - The front-end holes are now the oldest open item and nothing blocks them.
   Next session should lead with them.
+
+## 2026-09-18 — lesson 60, the team that makes you its owner
+
+- He said only "next lesson", so I picked from the workspace: the team-creation
+  hole was named as "the oldest one" in both record 0062 and lesson 59's own
+  "left out" box. Picking the thing the last lesson promised is the cheapest
+  possible continuity.
+- **Read every file before writing a claim**, again: `teams.route.ts` (no
+  `requirePermission` on POST), `team.store.ts` (`role: "OWNER"` in the nested
+  create), `team.schema.ts` (`TeamPublic` vs `TeamMembership`), `App.tsx`
+  (`TeamIndex`), `empty-state.tsx` (it already takes an `action` node).
+- The `EmptyState` `action` prop existing already is a nice beat — the lesson
+  fills a hole he left himself, no new component API.
+- **Rule phrasing, deliberately parallel to 59**: "a 201 is not a session" →
+  "a 201 body is not a list row". Same question (what did this response
+  actually promise?), one level up: header vs schema. If 59 was shaky, teach
+  them as a pair.
+- Second keeper, and it is the subtler one: **returning the promise from
+  `onSuccess`** to hold `isPending`. Made it the devtools homework (throttle to
+  Slow 3G and watch the wrong screen) because it is invisible on localhost.
+- Third: **cache work in the hook, navigation in the per-call `onSuccess`.**
+  That split is worth reusing the next time a mutation wants to move the page.
+- Resisted: sidebar button, optimistic insert. Optimism needs a complete guess
+  and this row cannot be guessed — said so out loud.
+- Nothing executed, nothing written into `web/` — he types the code (record
+  0025 rule: lesson code, not app code).
+- Next session: the audit log page is now the oldest hole and nothing blocks it.
+
+## 2026-09-18 — lesson 61, the deploy that is a file
+
+- **Read the code before believing my own notes.** PLAN, NOTES and lesson 60
+  all said "nothing reads the audit log" — but `activity-page.tsx` is on disk
+  and routed. It shipped in the UI-pass commit and three notes never caught up.
+  Lesson: a "still open" line is a claim, and claims get checked like any other.
+  Told him plainly instead of quietly picking something else.
+- Picked `render.yaml` because it was the next named item and closes the deploy
+  arc. Mission line "runs in Docker and is deployed to a real URL" is nearly
+  done; this makes it reproducible.
+- Fetched Render's JSON schema instead of trusting memory for YAML fields.
+  Worth repeating for any config-file lesson — the schema is short, exact, and
+  free, and it is also what the editor and the CLI validate against.
+- The security beat is the lesson: **the file moves, the secrets do not.**
+  `sync: false`. Same family as "make the safe thing the default" (fifth-ish
+  use) — the default here is that a value is absent, and putting one in is the
+  deliberate act.
+- Second keeper, and it is the one he will get wrong: **`rootDir` moves the
+  service, not the paths.**
+- Gave him a *checker*, not a deploy, as the feedback loop, and told him to
+  break the file twice on purpose. Cheap loops beat waiting on a build. Reuse
+  this shape for any config lesson.
+- The `git diff --cached | grep -i postgres|password|neon` step is the same
+  rehearsal move as lesson 56's `git status --short | grep -i env`. Second use,
+  and it is becoming his habit for "commit is forever".
+- Kept the honest unknown visible in its own box (Blueprint adoption of
+  existing services). Same as 57's client-IP note. Do not let a box like this
+  go three lessons without resolution — ask him next session.

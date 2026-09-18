@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 61 &mdash; The deploy that is a file</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 61 &middot; Week 15&ndash;16 &middot; Deploy</p>
+<h1>The deploy that is a file</h1>
+
+<p class="lede">Lessons 56 and 57 built two Render services by typing into a web form. That worked, and it left nothing behind. Nobody can review a form. Today the same two services become <code>render.yaml</code> &mdash; a file in your repo, next to the code it deploys. The trap is the one your instinct will walk into: <b>a file in the repo is a public file</b>, so the eight values you typed cannot simply be copied into it.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>A Blueprint (<em>Render&rsquo;s word for a <code>render.yaml</code> file</em>) is your deploy written as code.</strong> Same two services, same settings, but readable in a diff.</li>
+<li><strong>Secrets go in with <code>sync: false</code>.</strong> That means &ldquo;this service has this variable, and Render asks me for the value&rdquo;. The name is in git, the value never is.</li>
+<li><strong>Non-secrets go in with <code>value:</code>.</strong> <code>NODE_ENV</code>, <code>TRUST_PROXY</code>, <code>LOG_LEVEL</code> are decisions, not secrets. A decision belongs in the file, where a reviewer can argue with it.</li>
+<li><strong><code>rootDir</code> moves the service; it does not move the paths.</strong> <code>dockerfilePath</code> is still written from the repo root. This is the line people get wrong.</li>
+<li><strong>You get a checker.</strong> <code>render blueprints validate</code> reads the file and tells you what is wrong, before any deploy. That is today&rsquo;s feedback loop.</li>
+</ul>
+</div>
+
+<h2>Why a form is not a deploy</h2>
+<p>Everything Render knows about your app lives in a dashboard. Ask the honest questions about it:</p>
+<div class="scroll"><table>
+<tr><th>Question</th><th>Dashboard</th><th><code>render.yaml</code></th></tr>
+<tr><td>What changed last Tuesday?</td><td>nobody knows</td><td><code>git log</code></td></tr>
+<tr><td>Can a colleague review it?</td><td>no</td><td>it is a diff</td></tr>
+<tr><td>Rebuild it after you delete it by mistake?</td><td>retype eight values</td><td>the file is still there</td></tr>
+<tr><td>Where do the secrets live?</td><td>in Render</td><td>still in Render</td></tr>
+</table></div>
+<p class="takeaway"><b>Configuration you can only click is configuration nobody can review.</b> The last row is the one to hold on to: moving the deploy into git must not move the passwords into git. That is the whole difficulty of this lesson, and it has a one-word answer below.</p>
+
+<h2>The file</h2>
+<p>Write it at the workspace root: <code>render.yaml</code>. Not inside <code>server/</code> &mdash; it describes <em>both</em> services, and Render looks for it at the repo root.</p>
+
+<pre><code><span class="dim"># yaml-language-server: $schema=https://render.com/schema/render.yaml.json</span>
+services:
+  <span class="dim"># ---------- the API: the Dockerfile from lesson 52 ----------</span>
+  - type: web
+    name: tasks-api
+    runtime: docker
+    plan: free
+    region: oregon                 <span class="dim">&larr; the region you picked in lesson 56</span>
+    rootDir: server                <span class="dim">&larr; same as the dashboard's "Root Directory"</span>
+    dockerfilePath: ./server/Dockerfile   <span class="dim">&larr; ! from the REPO ROOT, not from rootDir</span>
+    healthCheckPath: /health
+    envVars:
+      <span class="dim"># decisions: safe to read, and worth reading</span>
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY
+        value: true
+      - key: HOST
+        value: 0.0.0.0             <span class="dim">&larr; lesson 56: without this the port scan times out</span>
+      - key: LOG_LEVEL
+        value: info
+      - key: AUDIT_RETENTION_DAYS
+        value: 90
+      <span class="dim"># secrets: the NAME is here, the VALUE is asked for in the dashboard</span>
+      - key: DATABASE_URL
+        sync: false
+      - key: APP_DATABASE_URL
+        sync: false
+      <span class="dim"># not a secret, but it is a URL you cannot know until the site below exists</span>
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+  <span class="dim"># ---------- the page: the static site from lesson 57 ----------</span>
+  - type: web
+    name: tasks-web
+    runtime: static
+    rootDir: web
+    buildCommand: npm ci &amp;&amp; npm run build
+    staticPublishPath: ./web/dist
+    envVars:
+      - key: VITE_API_URL
+        value: /api                <span class="dim">&larr; lesson 57. A build-time value, and public by design</span>
+    routes:
+      <span class="dim"># ! Order matters, exactly as in the dashboard. /api/* first, or the</span>
+      <span class="dim"># ! SPA rule below swallows every API call and answers with index.html.</span>
+      - type: rewrite
+        source: /api/*
+        destination: https://tasks-api.onrender.com/*
+      - type: rewrite
+        source: /*
+        destination: /index.html</code></pre>
+
+<p>Nothing here is new behaviour. Every line is something you already typed once by hand; you are writing it down, not deciding it again. Three lines are worth naming out loud.</p>
+
+<h2>Three lines worth naming</h2>
+
+<p><b>1. <code>sync: false</code> is not &ldquo;do not deploy this&rdquo;.</b> It means: this service needs a variable with this name, and Render must ask a human for the value. The dashboard prompts you once, stores it, and never writes it back to the file. So the file records the <em>shape</em> of the environment &mdash; nine variables, these names &mdash; while the values stay where values belong. A reviewer can see that <code>APP_DATABASE_URL</code> is required without seeing your Neon password.</p>
+
+<p><b>2. <code>rootDir</code> moves the service, not the paths.</b> <code>rootDir: server</code> is what the dashboard called Root Directory. But <code>dockerfilePath</code> and <code>staticPublishPath</code> are described by Render&rsquo;s own schema as <em>relative to the repo root</em> &mdash; so they keep the <code>server/</code> and <code>web/</code> prefix that <code>rootDir</code> looks like it already removed. Two fields, two different starting points, in one service block. This is the most common wrong guess in a first Blueprint, and the validator below catches it in one second.</p>
+
+<p><b>3. <code>PORT</code> is still not here</b>, for the same reason it was not in the dashboard: Render sets it. Your <code>config.ts</code> defaults it to 3000 and Render overrides that. A value you write down that the platform will overwrite is a lie in a file, and one day you will read it and believe it.</p>
+
+<h2>Check it before you deploy</h2>
+<p>The Render CLI reads the file against that same schema:</p>
+<pre><code>cd ~/learning/full-stack-learning
+render blueprints validate</code></pre>
+<p>It answers with the errors, or with nothing. Break a line on purpose and run it again &mdash; change <code>runtime: docker</code> to <code>runtime: dokcer</code>, or drop the <code>web/</code> from <code>staticPublishPath</code> &mdash; so you learn what its complaints look like while you are not in a hurry. <b>This is the loop: edit, validate, edit.</b> No deploy, no waiting, no money.</p>
+<p>The same schema works in your editor. The comment on the first line of the file (<code>yaml-language-server: $schema=&hellip;</code>) is read by the YAML extension in VS Code, and you get completion and red squiggles as you type. A checker you get for free before you run anything is always worth the one line it costs.</p>
+
+<h2>Practice &mdash; three</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">What does <code>sync: false</code> put in your git repository?</p>
+<button>The value, encrypted by Render</button>
+<button>The name only, never the value</button>
+<p class="why" hidden>It records that the service needs a variable with that name, and tells Render to ask you for the value in the dashboard instead of reading one from the file. Nothing is encrypted and nothing is hidden &mdash; the value is simply never written down here. That is why <code>DATABASE_URL</code> can be in a public repo as a name and stay a secret as a value.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">With <code>rootDir: server</code>, what is <code>dockerfilePath</code> relative to?</p>
+<button>The repo root, so server/Dockerfile</button>
+<button>The rootDir, so just Dockerfile</button>
+<p class="why" hidden>Render&rsquo;s schema says <code>dockerfilePath</code> is &ldquo;relative to the repo root&rdquo;, and <code>rootDir</code> does not change that. So the <code>server/</code> stays. <code>rootDir</code> decides where the service lives and what the build context is; it does not rewrite the other paths in the same block. Two fields in one service, two starting points.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">Why must the <code>/api/*</code> route come before <code>/*</code>?</p>
+<button>Because rewrites run in reverse order</button>
+<button>Because the first match wins</button>
+<p class="why" hidden>Same rule as the dashboard in lesson 57: rules are tried in order and the first one that matches ends the search. <code>/*</code> matches <code>/api/teams</code> perfectly well, so if it comes first the browser gets <code>index.html</code> where it asked for JSON. The bug looks like a broken API and is really a sorted list.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  Y["render.yaml<br/><i>in git</i>"] --> N["names + decisions<br/>NODE_ENV, HOST, routes"]
+  Y --> S["sync: false<br/><i>names only</i>"]
+  S -.->|"Render asks you once"| D[("Render<br/>stored values")]
+  N --> R["the two services"]
+  D --> R
+  K["DATABASE_URL<br/>APP_DATABASE_URL"] -.->|"never"| Y
+  K --> D
+</pre>
+<figcaption>The solid lines are in your repository. The dotted line is the one crossing you must never draw the other way.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div>the database <span class="dim">Postgres is on Neon, not Render, so there is no <code>databases:</code> block and no <code>fromDatabase</code> wiring. That decision was made in lesson 55 and stands.</span></div>
+<div><code>ALLOWED_ORIGINS</code> wired with <code>fromService</code> <span class="dim">Render can hand one service another&rsquo;s <code>host</code>, but your value needs the <code>https://</code> in front of it, and there is no string-joining in this file. <code>sync: false</code> and one paste is smaller than a workaround.</span></div>
+<div>preview environments <span class="dim">a whole stack per pull request. Real, and free-tier-hostile, and there are no pull requests here yet. It is one <code>previews:</code> block the day there are.</span></div>
+<div>a page CSP <span class="dim">the <code>headers:</code> key on the static site is where it will go. That is its own lesson, because the hard part is the policy, not the YAML.</span></div>
+</div>
+</div>
+
+<div class="box">
+<div class="cap">not measured &mdash; do this before you click</div>
+<div class="body">
+<div><span class="dim">Your two services already exist, made by hand. I have not tested whether Render <b>adopts</b> services with matching names or <b>creates a second pair</b>. So: run <code>validate</code> first, then open the Blueprint page in the dashboard and <b>read the plan it shows you before approving it</b>. If it offers to create <code>tasks-api</code> when <code>tasks-api</code> already exists, stop and tell me. Names in the file must match your real service names exactly &mdash; check them.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://render.com/docs/blueprint-spec">Render &mdash; Blueprint specification</a>. It is a field list, so skim it; read the <code>envVars</code> and static-site sections properly.</p>
+<p><b>Then this:</b> twenty minutes. (1) Write <code>render.yaml</code> at the workspace root, with your real service names and region. (2) <code>render blueprints validate</code> until it is quiet. (3) Break it twice on purpose and read both complaints. (4) Commit it &mdash; and before you do, <code>git show --stat</code> and then <code>git diff --cached | grep -i -E "postgres|password|neon"</code>. Nothing should match. That grep is the habit, not the file.</p>
+<p><b>Reference card:</b> <a href="../reference/environment.html">Environment and config</a> &mdash; every variable and what a wrong value costs. The <code>sync: false</code> split is the same table, seen from the deploy side.</p>
+<p><b>Ask the community:</b> <a href="https://community.render.com/">Render Community</a> &mdash; ask what happens when a Blueprint names a service that already exists in the workspace. That is the one thing above I could not test for you.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0060-the-team-that-makes-you-its-owner.html">&larr; Back</a>
+<a href="../reference/environment.html">Environment and config &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

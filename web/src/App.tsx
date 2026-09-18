@@ -1,6 +1,14 @@
-import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "react-router";
+import {
+  Navigate,
+  Outlet,
+  Route,
+  Routes,
+  useLocation,
+  useParams,
+} from "react-router";
 import { MotionConfig } from "motion/react";
 import { LoginForm } from "@/features/auth/login-form";
+import { RegisterForm } from "@/features/auth/register-form";
 import { useSession } from "@/features/auth/session";
 import { AppShell } from "@/components/app-shell";
 import { Skeleton } from "@/components/skeleton";
@@ -9,6 +17,7 @@ import { useTeams } from "@/features/teams/teams";
 import { TasksPage } from "@/features/tasks/tasks-page";
 import { ProjectsPage } from "@/features/projects/projects-page";
 import { ActivityPage } from "@/features/audit/activity-page";
+import { NewTeamForm } from "./features/teams/new-team-form";
 
 // Every component lives at module level, never nested inside another.
 // Rule: rerender-no-inline-components.
@@ -84,7 +93,12 @@ function TeamIndex() {
 
   if (isPending) {
     return (
-      <div className="grid gap-3" role="status" aria-busy="true" aria-label="Loading your teams">
+      <div
+        className="grid gap-3"
+        role="status"
+        aria-busy="true"
+        aria-label="Loading your teams"
+      >
         <Skeleton className="h-7 w-48" />
         <Skeleton className="h-3.5 w-80" />
       </div>
@@ -105,6 +119,7 @@ function TeamIndex() {
       <EmptyState
         title="No teams yet"
         body="You are not in a team. An admin adds you by your user id, and this page fills in the moment they do."
+        action={<NewTeamForm />}
       />
     );
   }
@@ -135,15 +150,25 @@ export default function App() {
         <Route element={<SessionGate />}>
           <Route element={<RequireAnon />}>
             <Route path="/login" element={<LoginForm />} />
+            <Route path="/register" element={<RegisterForm />} />
           </Route>
 
           <Route element={<RequireAuth />}>
             <Route element={<AppShell />}>
               <Route index element={<TeamIndex />} />
               <Route path="/teams/:teamId/tasks" element={<TasksPage />} />
-              <Route path="/teams/:teamId/projects" element={<ProjectsPage />} />
-              <Route path="/teams/:teamId/activity" element={<ActivityPage />} />
-              <Route path="/teams/:teamId" element={<Navigate to="tasks" replace />} />
+              <Route
+                path="/teams/:teamId/projects"
+                element={<ProjectsPage />}
+              />
+              <Route
+                path="/teams/:teamId/activity"
+                element={<ActivityPage />}
+              />
+              <Route
+                path="/teams/:teamId"
+                element={<Navigate to="tasks" replace />}
+              />
               <Route path="*" element={<NotFound />} />
             </Route>
           </Route>

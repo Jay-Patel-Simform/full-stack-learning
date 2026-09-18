@@ -1,4 +1,4 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AxiosError } from "axios";
 import { api } from "@/lib/api";
 
@@ -82,4 +82,21 @@ export function useTeam(teamId: string | undefined) {
     isPending,
     error,
   };
+}
+
+/**
+ * Start a team. The reply is {id, name} -- NOT a row of useTeams, which also
+ * carries role and can. So nothing is written into the cache by hand here:
+ * only the server knows what OWNER may do.
+ */
+export function useCreateTeam() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (name: string) =>
+      (await api.post<{ id: number; name: string }>("/teams", { name })).data,
+    // ! Returning the promise keeps isPending true until the list is back,
+    // ! so the caller can navigate into a team the cache already holds.
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: TEAMS_KEY }),
+  });
 }
