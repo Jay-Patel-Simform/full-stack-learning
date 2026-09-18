@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 64 &mdash; The deploy you can still see the old of</title>
+<link rel="stylesheet" href="../assets/lesson.css">
+<link rel="stylesheet" href="../assets/quiz.css">
+<link rel="stylesheet" href="../assets/show-me.css">
+</head>
+<body>
+
+<p class="kicker">Lesson 64 &middot; Week 15&ndash;16 &middot; Deploy</p>
+<h1>The deploy you can still see the old of</h1>
+
+<p class="lede">Your headers shipped. I checked before writing this, and all three arrived. So this lesson can finally be the one that was queued: the <code>cache-control</code> line that has been sitting in every <code>curl</code> output since lesson 63, which nobody wrote and nobody read. It is a correctness question, not a security one. It decides two things &mdash; <b>how long after a deploy a user can still be shown the old app</b>, and <b>how much of your app the browser re-asks for on every single page load.</b> Today you measure both and change one.</p>
+
+<div class="tldr">
+<h2>In one minute</h2>
+<ul>
+<li><strong>Your deploy worked.</strong> <code>curl</code> now shows the CSP (report-only), <code>Referrer-Policy</code> and <code>Permissions-Policy</code>. Three new lines, none duplicated.</li>
+<li><strong>A static site has two kinds of file</strong>, and they want opposite caching: the HTML must never be cached, the hashed bundles should be cached forever.</li>
+<li><strong>Render sends both the same line</strong> &mdash; <code>max-age=0, s-maxage=300</code>. Correct for one file, wasteful for the others. I measured it; that is today&rsquo;s gap.</li>
+<li><strong><code>max-age</code> is the browser. <code>s-maxage</code> is the CDN.</strong> Two caches, two numbers, one header.</li>
+<li><strong>The fix is a filename guarantee, not a timer.</strong> <code>index-D1HMFRqX.js</code> can be cached for a year because that name can never mean different bytes.</li>
+</ul>
+</div>
+
+<h2>First: the deploy landed</h2>
+<p>Same command as last lesson, run this morning against your live site:</p>
+
+<pre><code><span class="dim">$</span> diff /tmp/before.txt /tmp/after.txt
+
+&gt; content-security-policy-report-only: default-src 'self'; script-src 'self'; &hellip;
+&gt; permissions-policy: camera=(), microphone=(), geolocation=()
+&gt; referrer-policy: strict-origin-when-cross-origin</code></pre>
+
+<p>Three lines added, nothing duplicated, and the renamed services in <code>render.yaml</code> now match what is live &mdash; which is what closed lesson 61 for good. The console walk from lesson 62 is now worth doing, because there is finally a policy for the browser to evaluate.</p>
+
+<h2>The line you have been reading past</h2>
+<p>It has been in every <code>curl</code> output in this workspace:</p>
+
+<pre><code>cache-control: public, max-age=0, s-maxage=300</code></pre>
+
+<p>Three instructions, and they are aimed at <em>different machines</em>:</p>
+
+<div class="scroll"><table>
+<tr><th>Part</th><th>Who obeys it</th><th>What it says</th></tr>
+<tr><td><code>public</code></td><td>Everyone</td><td>Any cache may store this, including shared ones. The opposite is <code>private</code>: browser only, never a CDN.</td></tr>
+<tr><td><code>max-age=0</code></td><td>The <b>browser</b></td><td>Treat your copy as stale immediately. Before reusing it, ask the server whether it changed.</td></tr>
+<tr><td><code>s-maxage=300</code></td><td>The <b>shared cache</b> (Cloudflare, in front of Render)</td><td>For five minutes, answer from your copy without asking Render at all.</td></tr>
+</table></div>
+
+<p class="takeaway"><b>Two caches sit between your build and your user, and they take separate orders.</b> <code>max-age</code> is the one in the user&rsquo;s laptop; <code>s-maxage</code> is the one in the datacentre near them. Nearly every caching bug is someone tuning one of those numbers while thinking about the other.</p>
+
+<p>So what does <code>s-maxage=300</code> actually cost you? <b>After a deploy finishes, a user can still be served the previous <code>index.html</code> for up to five minutes.</b> Not because their browser is stale &mdash; <code>max-age=0</code> prevents that &mdash; but because the CDN between them and Render is answering from a copy it took before you pushed. That is your staleness window, and it is a number you chose by not choosing it.</p>
+
+<h2>Your site has two kinds of file, and they want opposite things</h2>
+<p>Look at what Vite actually built. Fetch your own homepage and read the script tag:</p>
+
+<div class="scroll"><table>
+<tr><th></th><th><code>/index.html</code></th><th><code>/assets/index-D1HMFRqX.js</code></th></tr>
+<tr><td>Name after a rebuild</td><td>Always <code>/index.html</code></td><td>New hash if the bytes changed, same hash if not</td></tr>
+<tr><td>Can this name mean new bytes?</td><td><b>Yes</b> &mdash; that is its whole job</td><td><b>No.</b> Different bytes get a different name</td></tr>
+<tr><td>Right caching</td><td>Never reuse without asking</td><td>Reuse for as long as you like</td></tr>
+<tr><td>What it is sent today</td><td><code>max-age=0, s-maxage=300</code></td><td><code>max-age=0, s-maxage=300</code> &mdash; <b>identical</b></td></tr>
+</table></div>
+
+<p>That is the gap. <code>index.html</code> is the <b>pointer</b>; the hashed files are the <b>contents</b>. The pointer changes and must be re-read. The contents are addressed by their own hash, so re-checking them is asking a question whose answer cannot ever have changed.</p>
+
+<div class="box">
+<div class="cap">what that costs you, measured</div>
+<div class="body">
+<div>I sent your bundle&rsquo;s ETag back with an <code>If-None-Match</code> header. <span class="dim">The response was <code>HTTP/2 304</code> &mdash; no body, so the megabyte of JavaScript is not re-downloaded. Good. But it is still <b>a network round trip per file, on every page load</b>, before the browser will run a byte of a file it already has. On your home wifi that is a few milliseconds. On a phone on mobile data it is a few hundred, multiplied by every hashed file in the build. <b>The waste is not bandwidth, it is latency</b>, and it is paid on the load where the user is already waiting to see something.</span></div>
+</div>
+</div>
+
+<h2>The fix: one more headers entry</h2>
+<p>Same <code>headers:</code> block as lesson 63, one entry added. This one is scoped to a path, which is the whole reason <code>path</code> exists:</p>
+
+<pre><code>    headers:
+      <span class="dim"># ... the three from lesson 63, still path: /* ...</span>
+      <span class="dim"># hashed filenames: a name never means different bytes, so never re-ask</span>
+      - path: /assets/*
+        name: Cache-Control
+        value: "public, max-age=31536000, immutable"</code></pre>
+
+<p><code>31536000</code> is one year in seconds, which is the maximum anyone respects and the conventional way of writing &ldquo;forever&rdquo;. <code>immutable</code> is the interesting half: it tells the browser not to revalidate <em>even when the user hits reload</em>. Without it, a reload re-checks everything; with it, a reload still trusts the cache. That is exactly right for a file whose name is a hash of its own contents.</p>
+
+<p><b>And you deliberately do not touch <code>index.html</code>.</b> Its current line is already correct: the browser always asks, so a user who reloads gets the new pointer, and the new pointer names the new bundles. Leave <code>s-maxage=300</code> too &mdash; see the honesty box; that is a number to choose on purpose in a later lesson, not to flip today.</p>
+
+<h2>The failure this prevents, and the one it creates</h2>
+<p>Two failure shapes, and you should be able to tell them apart from the symptom alone:</p>
+
+<div class="scroll"><table>
+<tr><th>Symptom</th><th>Cause</th></tr>
+<tr><td>App looks old after a deploy, correct after five minutes or a reload</td><td>A stale <code>index.html</code>, from the CDN. The <code>s-maxage</code> window.</td></tr>
+<tr><td>Blank white page, console shows a <code>404</code> on a <code>/assets/</code> file</td><td>An old <code>index.html</code> pointing at bundle names that the new deploy replaced.</td></tr>
+</table></div>
+
+<p>The second one is the dangerous one, and it is the reason hashed filenames exist. Both files must be reachable during the window, and <b>this is the part I have not measured on your site</b>: whether Render keeps the previous build&rsquo;s <code>/assets/</code> files alive after a new one publishes, or replaces the directory outright. Named in the honesty box, with the check.</p>
+
+<h2>Practice &mdash; three</h2>
+
+<div class="quiz" data-answer="1">
+<p class="q">Which cache does <code>s-maxage=300</code> give orders to?</p>
+<button>The browser cache on the laptop</button>
+<button>The shared cache in the network</button>
+<p class="why" hidden>The <code>s</code> is for <em>shared</em>. It is read by caches that serve many users &mdash; a CDN or a proxy &mdash; and ignored by the browser, which obeys <code>max-age</code> instead. On your site the two numbers say opposite things on purpose: the browser must always ask, and Cloudflare may answer from its copy for five minutes without bothering Render. That five minutes is your post-deploy staleness window.</p>
+</div>
+
+<div class="quiz" data-answer="0">
+<p class="q">Why may a hashed bundle be cached for a year?</p>
+<button>That name can never mean different bytes</button>
+<button>That file is rebuilt on every single deploy</button>
+<p class="why" hidden>Vite puts a hash of the contents into the filename, so changed contents always produce a changed name. A cached copy of <code>index-D1HMFRqX.js</code> therefore cannot be out of date &mdash; if the code changed, the new HTML asks for a different file entirely. Long caching is safe because the guarantee lives in the <b>name</b>, not in a timer. This is also why <code>index.html</code> gets the opposite treatment: its name is fixed, so it must always be re-checked.</p>
+</div>
+
+<div class="quiz" data-answer="1">
+<p class="q">A user sees a blank page right after a deploy. Likely cause?</p>
+<button>Their browser cached your HTML too long</button>
+<button>Old HTML is asking for deleted bundles</button>
+<p class="why" hidden>Their browser is not the culprit: <code>max-age=0</code> means it re-asks every time. The stale copy is in the shared cache, and the danger is not the staleness itself but the <b>mismatch</b> &mdash; an old <code>index.html</code> names bundle files by their old hashes, and if the deploy removed those files each one 404s and nothing renders. The console shows a <code>404</code> on a <code>/assets/</code> path, which is how you tell this apart from a plain &ldquo;looks old&rdquo;.</p>
+</div>
+
+<h2 id="see-it-drawn">See it drawn</h2>
+<figure class="diagram">
+<pre class="mermaid">
+flowchart LR
+  U["user&rsquo;s browser<br/><i>obeys max-age</i>"] --> CDN["Cloudflare<br/><i>obeys s-maxage</i>"]
+  CDN --> R["Render<br/><i>the build you pushed</i>"]
+  U -. "max-age=0<br/>always re-asks" .-> CDN
+  CDN -. "s-maxage=300<br/>may answer alone" .-> R
+</pre>
+<figcaption>One header, two readers. The dotted lines are the two independent decisions: the browser&rsquo;s (ask every time) and the CDN&rsquo;s (do not bother Render for five minutes). Your staleness window is the second one.</figcaption>
+</figure>
+
+<figure class="diagram">
+<pre class="mermaid">
+flowchart TB
+  H["/index.html<br/><i>fixed name, changing bytes</i>"] -->|"names"| A["/assets/index-D1HMFRqX.js<br/><i>name IS the bytes</i>"]
+  H --> HC["max-age=0<br/><b>always re-check</b>"]
+  A --> AC["max-age=31536000, immutable<br/><b>never re-check</b>"]
+</pre>
+<figcaption>The pointer and the contents. Everything about static-site caching follows from which of the two a file is.</figcaption>
+</figure>
+
+<h2>What you did not build, on purpose</h2>
+<div class="box">
+<div class="cap">left out</div>
+<div class="body">
+<div><b>unmeasured, and the check is yours</b> <span class="dim">whether Render serves the <em>previous</em> deploy&rsquo;s <code>/assets/</code> files during the staleness window. Test it: before your next deploy, save a bundle URL from the current page; after the deploy finishes, <code>curl -sI</code> that saved URL. A <code>200</code> means old and new coexist and the white-page failure cannot happen. A <code>404</code> means the window is real and you should shorten <code>s-maxage</code>. Report the number back.</span></div>
+<div><b>touching <code>s-maxage</code> on the HTML</b> <span class="dim">tempting, and wrong to do blind. Lowering it to <code>0</code> removes the staleness window and also removes the CDN &mdash; every homepage hit then wakes your Render instance, which on a free plan is the slowest thing in the system. It is a trade between &ldquo;five minutes stale&rdquo; and &ldquo;slower for everyone always&rdquo;. Decide it with the measurement above in hand.</span></div>
+<div><b>cache-busting query strings</b> <span class="dim">the <code>?v=2</code> trick. It is the pre-hash solution to the same problem, and your bundler already solved it properly. Do not add both.</span></div>
+<div><b>a service worker</b> <span class="dim">a third cache, under your own control, with its own update lifecycle and its own class of &ldquo;why is this user still on the old app&rdquo; bugs. You do not need offline support. Not now, possibly not ever.</span></div>
+<div><code>report-uri</code> <span class="dim">still waiting on a public unauthenticated route. Its own lesson.</span></div>
+</div>
+</div>
+
+<footer class="ask">
+<p><b>Read this:</b> <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Caching">MDN &mdash; HTTP caching</a>. Read as far as &ldquo;Validation&rdquo;; that section is what your <code>304</code> was.</p>
+<p><b>Then this:</b> fifteen minutes. (1) <code>curl -sI</code> one of your <code>/assets/</code> files and confirm the line matches the HTML&rsquo;s. (2) Add the <code>/assets/*</code> entry to <code>render.yaml</code>. (3) Save one current bundle URL to a file. (4) <code>render blueprints validate</code>, commit, push. (5) After the deploy, <code>curl -sI</code> both the new bundle (is the year-long line there?) and the saved old one (<code>200</code> or <code>404</code>?). Tell me both answers.</p>
+<p><b>Reference card:</b> <a href="../reference/the-whole-arc.html">The whole arc</a> &mdash; this is the last hop, from your build to a screen.</p>
+<p><b>Ask the community:</b> <a href="https://community.render.com/">Render Community</a> &mdash; &ldquo;does a static site keep the previous deploy&rsquo;s hashed assets available?&rdquo; is a good, precise question, and the answer decides whether your <code>s-maxage</code> is safe.</p>
+<p>Anything unclear, ask me. I am your teacher, not a document.</p>
+</footer>
+
+<nav class="nav">
+<a href="./index.html">All lessons</a>
+<a href="./0063-the-headers-you-already-have.html">&larr; Back</a>
+<a href="../reference/the-whole-arc.html">The whole arc &rarr;</a>
+</nav>
+
+<script src="../assets/quiz.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/diagram.js"></script>
+</body>
+</html>

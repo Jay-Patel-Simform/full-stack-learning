@@ -1036,3 +1036,21 @@ Roles: Owner, Admin, Member, Viewer. Scoped per team.
 - Next: he has a real deploy to do first, and the console walk finally becomes
   meaningful. After that, `cache-control` on the static HTML (how stale a
   deploy can look), or `report-uri` (needs a public unauthenticated route).
+
+### Lesson 64 — the deploy you can still see the old of (2026-09-18)
+- Verified by `curl` first: lesson 63's deploy **landed**. Three headers
+  present, none duplicated, service names match. Lesson 61 closed for good.
+- Gap found by measurement: HTML and hashed bundles get the **same**
+  `max-age=0, s-maxage=300`.
+- Rule to remember: **`max-age` is the browser, `s-maxage` is the CDN.**
+- Rule to remember: **a hashed filename is itself the caching policy** — the
+  guarantee is in the name, not a timer. Hence `immutable` on `/assets/*` and
+  nothing at all on `index.html`.
+- `s-maxage=300` named as the post-deploy staleness window; deliberately **not**
+  lowered, because removing it means every hit wakes a free-plan instance.
+- Measured: `If-None-Match` → `304`. The cost is a round trip, not bandwidth.
+- Unmeasured and said so: does Render keep the old deploy's assets alive? His
+  check, one saved URL and one curl.
+- Zero application code. Suite stays **172**. Streak: **no new dependency, 64
+  lessons.**
+- Next: `report-uri` (needs the public route), or the invite mailer.

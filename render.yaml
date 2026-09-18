@@ -60,6 +60,12 @@ services:
       - path: /*
         name: Permissions-Policy
         value: camera=(), microphone=(), geolocation=()
+      # lesson 64: the filename IS the guarantee. index-D1HMFRqX.js can never
+      # mean different bytes, so never re-ask. index.html is left alone on
+      # purpose: fixed name, changing bytes, must always be re-checked.
+      - path: /assets/*
+        name: Cache-Control
+        value: "public, max-age=31536000, immutable"
     routes:
       # ! Order matters, exactly as in the dashboard. /api/* first, or the
       # ! SPA rule below swallows every API call and answers with index.html.
