@@ -32,7 +32,8 @@ There is no typecheck script — `npm run build` runs `tsc -b`.
 - `src/features/teams/teams.ts` — `useTeams` and its mutations. Each team arrives with the `role` you hold and the `can` list the server computed. `useLeaveTeam` calls `DELETE /teams/:id/members/me` — a separate server action from removing somebody, because nobody outranks themselves.
 - `src/components/app-shell.tsx` — the sidebar. `TeamRow` is one team: its name, your role, the Leave button, and the sections your `can` list allows. Exported for its test.
 - `src/features/tasks/tasks.ts` — `useTasks(teamId)` and its mutations, keyed `["teams", teamId, "tasks"]`.
-- `src/components/ui/` — shadcn primitives. Generated; edit only when a design change needs it.
+- `src/components/ui/` — shadcn primitives. Generated; edit only when a design change needs it. `tooltip.tsx` is hand-written on `radix-ui`; **`Tooltip` throws without a `TooltipProvider` ancestor**, and `main.tsx` mounts the one the app uses.
+- Motion tokens live in `index.css`: `--ease-out` (entering/leaving), `--ease-in-out` (moving on screen), `--ease-drawer`. Use them; do not hand-roll a curve.
 - `src/index.css` — Tailwind, shadcn theme tokens, Geist.
 
 ## Rules
@@ -54,6 +55,9 @@ There is no typecheck script — `npm run build` runs `tsc -b`.
 - A mutation sends the value it wants, never a verb — send it twice and the answer is the same, so a double-click and a retry are the same event.
 - No confirm step on a mistake you can undo yourself (deleting a task: type it again). A second click is for irreversible *and* mis-clickable — leaving a team, where an admin has to re-add you. The button becomes its own confirmation; no dialog to mount, trap focus in or dismiss.
 - `can` is what the UI may **offer**, never what the API will **allow**. A sole owner holds `member:leave` and is still refused with a `409`, because that refusal is about the team and not about them. Always render the server's sentence.
+- Animate for a reason you can name — feedback, state indication, spatial consistency, preventing a jarring change. `transform` and `opacity` only; UI stays under 300ms; never `ease-in` on entering or leaving.
+- A size or position change animates with Motion's `layout`, never by transitioning `width`/`height`/`top`.
+- Reduced motion ships with the animation, not after it: `useReducedMotion()` in components, `motion-safe:` on utility classes. It means gentler, not none — keep the fade, drop the movement.
 - Comments explain why, in plain words. Keep that style.
 
 ## Tests

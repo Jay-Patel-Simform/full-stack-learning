@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { NavLink, Outlet, useNavigate, useParams } from "react-router";
 import { useIsFetching } from "@tanstack/react-query";
-import { AnimatePresence, motion } from "motion/react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
   DoorOpen,
   FolderClosed,
@@ -12,6 +12,11 @@ import {
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/skeleton";
 import { Wordmark } from "@/components/wordmark";
 import { cn } from "@/lib/utils";
@@ -21,6 +26,8 @@ import { useLeaveTeam, useTeams, type Team } from "@/features/teams/teams";
 import { UnderTheHood } from "@/features/dev/under-the-hood";
 
 const EASE_OUT = [0.23, 1, 0.32, 1] as const;
+// Movement ON screen, as opposed to something entering or leaving it.
+const EASE_IN_OUT = [0.77, 0, 0.175, 1] as const;
 
 /** The sections of one team. Which of them a person sees is the server's
  *  answer, read off the `can` list the team arrived with. */
@@ -46,8 +53,15 @@ const SECTIONS = [
  * the button becomes the confirmation, so there is nothing to mount, trap
  * focus in, or dismiss.
  */
-export function TeamRow({ team, onNavigate }: { team: Team; onNavigate: () => void }) {
+export function TeamRow({
+  team,
+  onNavigate,
+}: {
+  team: Team;
+  onNavigate: () => void;
+}) {
   const [armed, setArmed] = useState(false);
+  const reduce = useReducedMotion();
   const leaveTeam = useLeaveTeam();
   const navigate = useNavigate();
   const { teamId } = useParams();
@@ -60,6 +74,10 @@ export function TeamRow({ team, onNavigate }: { team: Team; onNavigate: () => vo
 
   function leave() {
     leaveTeam.mutate(team.id, {
+      // Disarm whatever the answer is. On a refusal the message IS the reply,
+      // and a button still saying "Sure?" invites a second click that can only
+      // fail the same way. On success the row is leaving anyway.
+      onSettled: () => setArmed(false),
       onSuccess: () => {
         // Only move if you are standing in the team you just left. Leaving one
         // you are not looking at should not throw you off the page.
@@ -71,7 +89,18 @@ export function TeamRow({ team, onNavigate }: { team: Team; onNavigate: () => vo
   }
 
   return (
-    <div className="grid gap-1">
+    <motion.div
+      layout={reduce ? false : "position"}
+      // Leaving is the one moment this row disappears under its own steam, so
+      // it exits the way a thing leaves a list: fading while sliding the way
+      // it would be read out of. Siblings close the gap with `layout` rather
+      // than an animated height, which would be a reflow per frame.
+      exit={
+        reduce ? { opacity: 0 } : { opacity: 0, transform: "translateX(-12px)" }
+      }
+      transition={{ duration: 0.2, ease: EASE_OUT }}
+      className="grid gap-1"
+    >
       <div className="flex items-baseline gap-2 px-3">
         <h2 className="mr-auto truncate text-xs font-semibold tracking-[0.04em] uppercase">
           {team.name}
@@ -80,30 +109,79 @@ export function TeamRow({ team, onNavigate }: { team: Team; onNavigate: () => vo
           {team.role.toLowerCase()}
         </span>
         {mayLeave ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            // An icon-only destructive control names its row. "Leave" alone
-            // does not say which team disappears — lesson 28, third use.
-            aria-label={
-              armed ? `Confirm leaving ${team.name}` : `Leave ${team.name}`
-            }
-            disabled={leaveTeam.isPending}
-            onClick={() => (armed ? leave() : setArmed(true))}
-            // Losing focus un-arms it, so a button left mid-confirm does not
-            // sit there waiting for the next click that lands nearby.
-            onBlur={() => setArmed(false)}
-            className={cn(
-              "-my-1 h-6 shrink-0 gap-1 self-center px-1.5 text-[0.6875rem]",
-              armed
-                ? "text-destructive hover:text-destructive"
-                : "text-muted-foreground",
-            )}
-          >
-            <DoorOpen className="size-3.5" aria-hidden />
-            {armed ? "Sure?" : null}
-          </Button>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <motion.button
+                type="button"
+                // `layout` so the width change from icon to icon + "Sure?" is
+                // carried out with a transform instead of a reflow that
+                // teleports. The neighbouring role chip slides rather than
+                // jumping, which is the whole reason the morph is legible.
+                layout="size"
+                transition={
+                  reduce
+                    ? { duration: 0 }
+                    : { duration: 0.2, ease: EASE_IN_OUT }
+                }
+                // An icon-only destructive control names its row. "Leave"
+                // alone does not say which team disappears — lesson 28.
+                aria-label={
+                  armed ? `Confirm leaving ${team.name}` : `Leave ${team.name}`
+                }
+                disabled={leaveTeam.isPending}
+                onClick={() => (armed ? leave() : setArmed(true))}
+                // Losing focus un-arms it, so a button left mid-confirm does
+                // not sit there waiting for the next click that lands nearby.
+                onBlur={() => setArmed(false)}
+                className={cn(
+                  "focus-visible:ring-ring/50 focus-visible:border-ring -my-1 flex h-6 shrink-0 items-center gap-1 self-center rounded-md border border-transparent px-1.5 text-[0.6875rem] font-medium transition-colors duration-150 outline-none select-none focus-visible:ring-3 disabled:pointer-events-none disabled:opacity-50",
+                  armed
+                    ? "bg-destructive/10 text-destructive"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+              >
+                <DoorOpen
+                  aria-hidden
+                  className={cn(
+                    "size-3.5 transition-transform duration-200 ease-[var(--ease-out)]",
+                    // The door edges open. One small nudge, and it only
+                    // happens in the armed state, so it reads as "this is now
+                    // a different button" rather than decoration.
+                    armed ? "motion-safe:translate-x-px" : "",
+                  )}
+                />
+                <AnimatePresence initial={false}>
+                  {armed ? (
+                    <motion.span
+                      // The label is the state change. It arrives from behind
+                      // the icon, so the eye is already looking at the thing
+                      // that moved.
+                      initial={
+                        reduce
+                          ? { opacity: 0 }
+                          : { opacity: 0, transform: "translateX(-4px)" }
+                      }
+                      animate={{ opacity: 1, transform: "translateX(0px)" }}
+                      exit={
+                        reduce
+                          ? { opacity: 0 }
+                          : { opacity: 0, transform: "translateX(-4px)" }
+                      }
+                      transition={{ duration: 0.15, ease: EASE_OUT }}
+                      className="overflow-hidden whitespace-nowrap"
+                    >
+                      Sure?
+                    </motion.span>
+                  ) : null}
+                </AnimatePresence>
+              </motion.button>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              {armed
+                ? `Click again to leave ${team.name}. Nobody can add you back but an admin.`
+                : `Leave ${team.name}`}
+            </TooltipContent>
+          </Tooltip>
         ) : null}
       </div>
 
@@ -156,7 +234,7 @@ export function TeamRow({ team, onNavigate }: { team: Team; onNavigate: () => vo
           ),
         )}
       </ul>
-    </div>
+    </motion.div>
   );
 }
 
@@ -177,9 +255,14 @@ function TeamNav({
 
   return (
     <div className="grid gap-5">
-      {teams.map((team) => (
-        <TeamRow key={team.id} team={team} onNavigate={onNavigate} />
-      ))}
+      {/* popLayout takes the leaving row out of flow immediately, so the rows
+          below start closing the gap while it is still fading rather than
+          waiting for it to finish. */}
+      <AnimatePresence initial={false} mode="popLayout">
+        {teams.map((team) => (
+          <TeamRow key={team.id} team={team} onNavigate={onNavigate} />
+        ))}
+      </AnimatePresence>
     </div>
   );
 }

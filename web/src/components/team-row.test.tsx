@@ -7,6 +7,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router";
 import { api } from "@/lib/api";
+import { TooltipProvider } from "./ui/tooltip";
 import { TeamRow } from "./app-shell";
 import type { Action, Team } from "@/features/teams/teams";
 
@@ -26,13 +27,18 @@ function renderRow(can: Action[]) {
   return render(
     <QueryClientProvider client={client}>
       <MemoryRouter>
-        <TeamRow team={team(can)} onNavigate={() => {}} />
+        {/* Radix throws without it: `Tooltip` must be used within
+            `TooltipProvider`. The app mounts one in main.tsx. */}
+        <TooltipProvider>
+          <TeamRow team={team(can)} onNavigate={() => {}} />
+        </TooltipProvider>
       </MemoryRouter>
     </QueryClientProvider>,
   );
 }
 
-const leaveButton = () => screen.queryByRole("button", { name: /leave Design/i });
+const leaveButton = () =>
+  screen.queryByRole("button", { name: /leave Design/i });
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -100,3 +106,20 @@ test("a sole owner sees the server's 409 sentence", async () => {
   // * words, because they say what to do about it.
   await screen.findByText(/last owner cannot leave/i);
 });
+
+test("the button says what it is, on focus as well as hover", async () => {
+  renderRow(["task:read", "member:leave"]);
+  const user = userEvent.setup();
+
+  // An icon alone is a guess. Radix opens the tooltip on focus with no delay,
+  // which is also how a keyboard user reaches it at all.
+  await user.tab();
+  expect(await screen.findAllByText(/leave Design/i)).not.toHaveLength(0);
+});
+
+// NOT tested: the armed tooltip copy ("nobody can add you back but an
+// admin"). Activating a trigger closes its tooltip, by design, so asserting
+// the armed text means re-opening it — and Radix's pointer state machine does
+// not replay faithfully in jsdom. The state it depends on IS covered: the
+// aria-label flip above proves `armed` reached the render. Chasing the rest
+// would produce a test of the test environment.
