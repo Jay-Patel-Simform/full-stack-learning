@@ -36,6 +36,11 @@ export function useSession() {
     // signed-in UI for half a minute. Measured — it does. Auth is the one
     // query with no grace period.
     staleTime: 0,
+    // A 401 never reaches here — getSession turns it into `null` — so the only
+    // thing left to retry is the server being unreachable, which on a free
+    // plan is the normal first request while the container boots. Without
+    // this, a cold start logs a signed-in person out.
+    retry: 2,
   });
 
   // Derived during render, never stored in state and never synced in an

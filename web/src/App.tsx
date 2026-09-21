@@ -46,6 +46,10 @@ function Booting() {
         <Skeleton className="h-3.5 w-72" />
         <Skeleton className="mt-4 h-11 w-full max-w-xl" />
         <Skeleton className="h-11 w-full max-w-xl" />
+        <p className="cold-start-notice text-muted-foreground mt-2 text-sm">
+          Waking the server up — the first load after a quiet spell takes up to
+          a minute.
+        </p>
       </div>
     </div>
   );
